@@ -2,6 +2,7 @@ import { expect, test } from '@rstest/core';
 import sharp from 'sharp';
 import { calibrationPageMarkers } from '../src/assisted-contracts.js';
 import {
+  detectCalibrationMarkers,
   detectScreenFromMarkers,
   markerSvg,
 } from '../src/camera/calibration-markers.js';
@@ -14,8 +15,8 @@ const layout = {
   markers: calibrationPageMarkers(400, 800),
 };
 
-async function photograph(shiftCheck = false) {
-  const markers = layout.markers
+async function photograph(shiftCheck = false, visible = layout.markers) {
+  const markers = visible
     .map((m) =>
       markerSvg(m.code).replace(
         '<svg ',
@@ -26,6 +27,46 @@ async function photograph(shiftCheck = false) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="580" height="800"><rect width="100%" height="100%" fill="#ccc"/><g transform="matrix(1,-.12,-.08,.84,95,70)"><rect width="400" height="800" fill="white"/>${markers}</g></svg>`;
   return sharp(Buffer.from(svg)).jpeg().toBuffer();
 }
+
+test('requires every fitting and independent check marker to be visible', async () => {
+  for (const code of [10, 14]) {
+    const visible = layout.markers.filter((marker) => marker.code !== code);
+    const frame = await photograph(false, visible);
+    await expect(
+      detectCalibrationMarkers(frame, layout.markers),
+    ).rejects.toThrow(
+      `Calibration marker ${code} could not be decoded uniquely (0 matches)`,
+    );
+  }
+});
+
+test('rejects a duplicate marker even when another one is missing', async () => {
+  const visible = layout.markers.map((marker) =>
+    marker.code === 15 ? { ...marker, code: 10 } : marker,
+  );
+  const frame = await photograph(false, visible);
+  await expect(detectCalibrationMarkers(frame, layout.markers)).rejects.toThrow(
+    'Calibration marker 10 could not be decoded uniquely (2 matches)',
+  );
+});
+
+test('recovers dim markers and still checks the independent marker positions', async () => {
+  const dim = async (shiftCheck: boolean) =>
+    sharp(await photograph(shiftCheck))
+      .linear(0.12, 90)
+      .jpeg({ quality: 90 })
+      .toBuffer();
+  const { accuracy } = await detectCalibrationMarkers(
+    await dim(false),
+    layout.markers,
+  );
+  expect(accuracy.fit.count).toBe(4);
+  expect(accuracy.validation.count).toBe(2);
+  expect(accuracy.validation.maxErrorCssPx).toBeLessThanOrEqual(3);
+  await expect(
+    detectCalibrationMarkers(await dim(true), layout.markers),
+  ).rejects.toThrow('Independent check');
+});
 test('recovers the outer screen from a slanted six-marker phone over eight frames', async () => {
   const frame = await photograph();
   let captures = 0;

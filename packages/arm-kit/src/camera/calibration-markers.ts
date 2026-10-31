@@ -19,20 +19,28 @@ const dictionary = new aruco.AR.Dictionary(dictionaryName);
 export const markerSvg = (id: number) => dictionary.generateSVG(id);
 type Markers = CalibrationPageLayout['markers'];
 export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
-  const { data, info } = await sharp(jpeg, { limitInputPixels: 16_777_216 })
-    .toColourspace('srgb')
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
   const detector = new aruco.AR.Detector({
     dictionaryName,
     maxHammingDistance: 5,
   });
-  const observed = detector.detect({
-    data,
-    width: info.width,
-    height: info.height,
-  });
+  async function decode(enhanced: boolean) {
+    const image = sharp(jpeg, { limitInputPixels: 16_777_216 }).toColourspace(
+      'srgb',
+    );
+    if (enhanced) image.normalise().sharpen();
+    const { data, info } = await image
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    return detector.detect({ data, width: info.width, height: info.height });
+  }
+  let observed = await decode(false);
+  const counts = markers.map(
+    ({ code }) => observed.filter((m) => m.id === code).length,
+  );
+  // Enhance only an incomplete read. A duplicate ID is already ambiguous.
+  if (counts.includes(0) && counts.every((count) => count <= 1))
+    observed = await decode(true);
   const pairs = markers.map((m) => {
     const matches = observed.filter((o) => o.id === m.code);
     if (matches.length !== 1)

@@ -16,7 +16,9 @@ pnpm dev
 
 Open the printed URL, connect your hardware, follow calibration and configure a model to run tasks. Confirm workspace clearance before movement; use **Stop robot** to stop.
 
-Calibration follows upstream dev: collect samples, fit, automatically check the boundary, record a safe position, then confirm and save. Targets use a fixed 10% inset; fitted touches must cover at least 60% of the full screen. Fast and sliding modes require a fixed, horizontal screen.
+Keep all six phone markers visible during camera calibration. If the camera misses a marker in a low-contrast frame, it retries once with contrast enhancement.
+
+Collect samples, fit, automatically check the boundary, record a safe position, then confirm and save. Targets use a fixed 10% inset; fitted touches must cover at least 60% of the full screen. Fast and sliding modes require a fixed, horizontal screen.
 
 ## SDK & Adapters
 
