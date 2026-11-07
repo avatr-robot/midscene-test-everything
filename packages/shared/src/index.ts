@@ -1,0 +1,32 @@
+export const armUiTheme = {
+  token: { colorPrimary: '#2b83ff', borderRadius: 8 },
+  components: {
+    Layout: {
+      headerHeight: 60,
+      headerPadding: '0 30px',
+      headerBg: '#fff',
+      bodyBg: '#fff',
+    },
+    Button: {
+      controlHeight: 32,
+      controlHeightLG: 40,
+      controlHeightSM: 24,
+      borderRadius: 8,
+      borderRadiusSM: 6,
+      paddingInline: 12,
+      paddingInlineSM: 8,
+      fontWeight: 500,
+      primaryShadow: 'none',
+      defaultShadow: 'none',
+      dangerShadow: 'none',
+      defaultBg: '#f2f4f7',
+      defaultBorderColor: 'transparent',
+      defaultHoverBg: '#e8ebef',
+      defaultHoverBorderColor: 'transparent',
+      defaultHoverColor: 'rgba(0,0,0,.85)',
+      defaultActiveBg: '#dfe4ea',
+      defaultActiveBorderColor: 'transparent',
+      defaultActiveColor: 'rgba(0,0,0,.85)',
+    },
+  },
+};

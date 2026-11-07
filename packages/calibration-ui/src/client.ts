@@ -1,0 +1,125 @@
+import type {
+  AssistedCalibrationAction,
+  AssistedCalibrationInput,
+  AssistedCalibrationSetup,
+  AssistedCalibrationState,
+  AssistedMappingInput,
+  CalibrationCommand,
+  CalibrationPhoneStatus,
+  CalibrationSnapshot,
+} from '@midscene/arm-kit-shared/contracts';
+export interface CalibrationClientOptions {
+  baseUrl: string;
+  timeoutMs?: number;
+  fetch?: typeof globalThis.fetch;
+}
+export class CalibrationClient {
+  private readonly baseUrl: string;
+  constructor(private readonly options: CalibrationClientOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+  }
+  private async request<T>(path: string, body?: unknown): Promise<T> {
+    const response = await (this.options.fetch ?? globalThis.fetch)(
+      `${this.baseUrl}${path}`,
+      {
+        method: body === undefined ? 'GET' : 'POST',
+        headers:
+          body === undefined
+            ? undefined
+            : { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(this.options.timeoutMs ?? 180000),
+      },
+    );
+    const data = await response.json();
+    if (!response.ok)
+      throw new Error(
+        data.error?.message ??
+          data.error ??
+          `Calibration request failed (${response.status})`,
+      );
+    return data as T;
+  }
+  subscribeCalibration(
+    update: (snapshot: CalibrationSnapshot) => void,
+    disconnected: () => void,
+  ) {
+    const source = new EventSource(
+      `${this.baseUrl}/assisted-calibration/events`,
+    );
+    source.onmessage = (event) => update(JSON.parse(event.data));
+    source.onerror = disconnected;
+    return () => source.close();
+  }
+  async calibrationPhoneStatus(): Promise<CalibrationPhoneStatus> {
+    return this.request('/assisted-calibration/phone');
+  }
+  async assistedCalibration(): Promise<AssistedCalibrationState | null> {
+    return (
+      await this.request<{
+        session: AssistedCalibrationState | null;
+      }>('/assisted-calibration')
+    ).session;
+  }
+  async assistedCalibrationSetup(): Promise<AssistedCalibrationSetup> {
+    return (
+      await this.request<{
+        setup: AssistedCalibrationSetup;
+      }>('/assisted-calibration/setup')
+    ).setup;
+  }
+  async prepareAssistedCalibration(
+    input: AssistedCalibrationInput,
+  ): Promise<AssistedCalibrationSetup> {
+    return (
+      await this.request<{
+        setup: AssistedCalibrationSetup;
+      }>('/assisted-calibration/setup', input)
+    ).setup;
+  }
+  async mapAssistedCalibration(
+    output?: AssistedMappingInput,
+  ): Promise<AssistedCalibrationSetup> {
+    return (
+      await this.request<{
+        setup: AssistedCalibrationSetup;
+      }>('/assisted-calibration/setup/mapping', output ?? {})
+    ).setup;
+  }
+  async createAssistedCalibration(): Promise<AssistedCalibrationState> {
+    return (
+      await this.request<{
+        session: AssistedCalibrationState;
+      }>('/assisted-calibration', {})
+    ).session;
+  }
+  async assistedCalibrationCommand(
+    id: string,
+    action: AssistedCalibrationAction,
+    confirmed = false,
+    attemptId?: string,
+  ): Promise<AssistedCalibrationState> {
+    return (
+      await this.request<{
+        session: AssistedCalibrationState;
+      }>(`/assisted-calibration/${encodeURIComponent(id)}/commands`, {
+        action,
+        confirmed,
+        attemptId,
+      })
+    ).session;
+  }
+  async assistedCalibrationSafety(
+    id: string,
+    command: CalibrationCommand,
+  ): Promise<AssistedCalibrationState> {
+    return (
+      await this.request<{
+        session: AssistedCalibrationState;
+      }>(`/assisted-calibration/${encodeURIComponent(id)}/safety`, command)
+    ).session;
+  }
+}
+export function createCalibrationClient(options: CalibrationClientOptions) {
+  return new CalibrationClient(options);
+}

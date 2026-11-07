@@ -1,0 +1,59 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "organizeImports": {
+    "enabled": true
+  },
+  "files": {
+    "ignore": [
+      "node_modules/**",
+      ".pnpm-store/**",
+      ".nx/**",
+      "**/.midscene/**",
+      "**/midscene_run/**",
+      "**/dist/**",
+      "**/coverage/**",
+      "packages/calibration-ui/lib/**",
+      "packages/playground/src/ui/vendor/visualizer/**"
+    ]
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "a11y": {
+        "useKeyWithClickEvents": "off",
+        "useValidAnchor": "off"
+      },
+      "style": {
+        "noParameterAssign": "off",
+        "noNonNullAssertion": "off",
+        "noUselessElse": "off"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "off"
+      },
+      "complexity": {
+        "noForEach": "off"
+      },
+      "suspicious": {
+        "noExplicitAny": "off",
+        "noArrayIndexKey": "off",
+        "noImplicitAnyLet": "off"
+      }
+    }
+  },
+  "vcs": {
+    "defaultBranch": "main"
+  },
+  "formatter": {
+    "lineWidth": 80,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineEnding": "lf"
+  }
+}

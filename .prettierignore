@@ -1,0 +1,12 @@
+node_modules/
+.pnpm-store/
+.nx/
+dist/
+coverage/
+pnpm-lock.yaml
+# Match midscene-private: preserve Markdown code block formatting.
+*.md
+*.mdx
+
+# Preserve the pinned upstream vendor baseline; local differences are documented.
+packages/playground/src/ui/vendor/visualizer/

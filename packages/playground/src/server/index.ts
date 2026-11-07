@@ -1,0 +1,662 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import type { IncomingMessage } from 'node:http';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { networkInterfaces } from 'node:os';
+import { extname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { ArmController, listCameras } from '@midscene/arm-kit';
+import type { RobotArmAdapter } from '@midscene/arm-kit';
+import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
+import type { ProfileStore } from '@midscene/arm-kit/internal/runtime/profile-store';
+import { RobotActionAuditStore } from '@midscene/arm-kit/internal/runtime/robot-action-audit-store';
+import {
+  robotAuditDirectory,
+  robotDataRoot,
+} from '@midscene/arm-kit/internal/storage/layout';
+import { PlaygroundArmControls } from './arm-controls.js';
+import { streamCameraPreview } from './camera-preview.js';
+import { CodeSetup } from './code-setup.js';
+import { PlaygroundDevices } from './devices.js';
+import { PhonePairings } from './phone-pairings.js';
+import type {
+  PlaygroundSession,
+  SessionContext,
+  SessionInput,
+} from './session.js';
+import { StatusPanel } from './status-panel.js';
+import { PlaygroundTasks } from './tasks.js';
+
+export interface PlaygroundOptions {
+  createAdapter(): RobotArmAdapter | Promise<RobotArmAdapter>;
+  connection?: { adapter: string; options: Record<string, string | number> };
+  connectionDiagram?: 'ethernet';
+  installationId?: string;
+  port?: number;
+  webRoot?: string;
+  /** Additional local frontend origins allowed during development. */
+  developmentOrigins?: string[];
+}
+
+export async function startArmPlayground({
+  createAdapter,
+  connection,
+  connectionDiagram,
+  installationId,
+  port,
+  webRoot,
+  developmentOrigins,
+}: PlaygroundOptions) {
+  if (typeof createAdapter !== 'function')
+    throw new TypeError('createAdapter is required');
+  return startPlaygroundHost({
+    createSetup: (context) =>
+      new CodeSetup(
+        context,
+        createAdapter,
+        installationId,
+        connection,
+        connectionDiagram,
+      ),
+    port,
+    webRoot,
+    developmentOrigins,
+  });
+}
+
+interface HostSetup extends PlaygroundSession {
+  initialize?(): Promise<void>;
+  status(): unknown;
+  reconnect(input: SessionInput): Promise<unknown>;
+  configure?(input: SessionInput): Promise<unknown>;
+}
+type Send = (status: number, data: unknown) => void;
+async function readBody(req: IncomingMessage, limit = 8192) {
+  let text = '';
+  for await (const chunk of req) {
+    text += chunk;
+    if (text.length > limit) throw new Error('Request too large');
+  }
+  return JSON.parse(text || '{}');
+}
+interface HostOptions {
+  createSetup(context: SessionContext): HostSetup;
+  port?: number;
+  webRoot?: string;
+  models?: unknown[];
+  developmentOrigins?: string[];
+  handleRequest?(context: {
+    url: URL;
+    req: IncomingMessage;
+    send: Send;
+    body: typeof readBody;
+    setup: HostSetup;
+  }): Promise<boolean>;
+}
+export async function startPlaygroundHost({
+  createSetup,
+  port = 0,
+  webRoot = fileURLToPath(new URL('../../dist/ui/', import.meta.url)),
+  models = [],
+  handleRequest,
+  developmentOrigins = [],
+}: HostOptions) {
+  let adapterName: string | undefined;
+  let devices: PlaygroundDevices | undefined;
+  let tasks: PlaygroundTasks | undefined;
+  let arm: ArmController | undefined;
+  let armControls: PlaygroundArmControls | undefined;
+  let host: string | undefined;
+  let connecting = false;
+  let connectionError: string | undefined;
+  async function connectionStatus() {
+    if (connecting)
+      return { phase: 'connecting', host, setupSession: setup.session };
+    if (!arm)
+      return {
+        phase: 'disconnected',
+        host,
+        error: connectionError,
+        setupSession: setup.session,
+      };
+    try {
+      const status = await arm.getStatus();
+      const state = status.state;
+      return {
+        phase: state.connected ? 'connected' : 'disconnected',
+        host,
+        state,
+        runtime: status,
+        capabilities: arm.describeCapabilities(),
+        adapter: {
+          name: adapterName,
+          connectionIdentity: arm.connectionIdentity,
+        },
+        setupSession: setup.session,
+        recoveryRequired: status.recoveryRequired,
+        softwarePaused: status.softwarePaused,
+      };
+    } catch (error) {
+      return {
+        phase: 'error',
+        host,
+        error: error instanceof Error ? error.message : String(error),
+        setupSession: setup.session,
+      };
+    }
+  }
+  async function connectArm(
+    adapter: RobotArmAdapter,
+    profileStore: ProfileStore,
+    storageId: string,
+    address?: string,
+  ) {
+    connecting = true;
+    armControls = undefined;
+    connectionError = undefined;
+    try {
+      if (arm) await disconnectArm();
+      host = address;
+      adapterName = adapter.name;
+      const auditStore = new RobotActionAuditStore({
+        filePath: join(robotAuditDirectory(storageId), 'actions.jsonl'),
+      });
+      await auditStore.load();
+      const candidate = new ArmController({
+        auditStore,
+        adapter,
+        profileStore,
+      });
+      try {
+        await candidate.connect();
+        arm = candidate;
+        const pairings = new PhonePairings(
+          join(
+            robotDataRoot(),
+            'phone-pairings',
+            `${createHash('sha256').update(storageId).digest('hex')}.json`,
+          ),
+        );
+        await pairings.load();
+        devices = new PlaygroundDevices(arm, {
+          pairings,
+          phoneLinks: (token) =>
+            Object.values(networkInterfaces())
+              .flat()
+              .filter(
+                (entry): entry is NonNullable<typeof entry> =>
+                  !!entry && entry.family === 'IPv4' && !entry.internal,
+              )
+              .map((entry) => ({
+                name: entry.address,
+                url: `http://${entry.address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
+              })),
+        });
+        tasks = new PlaygroundTasks(devices);
+        armControls = new PlaygroundArmControls(arm, tasks);
+        await devices.startAll();
+      } catch (error) {
+        if (arm) await disconnectArm();
+        else await candidate.close();
+        throw error;
+      }
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      connecting = false;
+    }
+  }
+  async function disconnectArm() {
+    const activeTasks = tasks;
+    const activeDevices = devices;
+    const controller = arm;
+    armControls = undefined;
+    tasks = undefined;
+    devices = undefined;
+    arm = undefined;
+    try {
+      await activeTasks?.close();
+    } finally {
+      try {
+        await activeDevices?.close();
+      } finally {
+        await controller?.close();
+      }
+    }
+  }
+  const context = {
+    getArm: () => arm,
+    replace: connectArm,
+    disconnect: disconnectArm,
+    hasTasks: () =>
+      Boolean(
+        tasks
+          ?.list()
+          .some((task) => task.phase === 'running' || task.phase === 'closing'),
+      ),
+  };
+  const setup = createSetup(context);
+  await setup.initialize?.();
+  const statusPanel = new StatusPanel({
+    setup,
+    getCalibrationSelection(cameraId) {
+      if (!cameraId) return;
+      const session = devices?.entries.get(cameraId)?.calibration;
+      if (session?.phase === 'running' && !session.abort.signal.aborted)
+        return session.host?.service.setup().selection;
+    },
+    getArm: () => arm,
+    getControls: () => armControls,
+  });
+
+  const server = createServer(async (req, res) => {
+    const url = URL.parse(req.url ?? '/', 'http://127.0.0.1');
+    const send: Send = (status, data) => {
+      res.writeHead(status, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      });
+      res.end(JSON.stringify(data));
+    };
+    if (!url) return send(400, { error: 'Invalid URL' });
+    if (url.pathname.startsWith('/phone-calibration')) {
+      try {
+        const calibration = await devices?.resolvePhoneHost(
+          url.searchParams.get('token'),
+        );
+        if (!calibration)
+          return send(503, {
+            error: 'Phone session is not ready. Reconnecting…',
+          });
+        return calibration.handlePhone(req, res);
+      } catch {
+        return send(503, {
+          error: 'Phone session is not ready. Reconnecting…',
+        });
+      }
+    }
+    if (
+      !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+        req.socket.remoteAddress ?? '',
+      )
+    )
+      return send(403, { error: 'Open Playground on the host computer' });
+    // Local browser operations must originate from this app, never a remote site.
+    const origin = req.headers.origin;
+    if (
+      origin &&
+      ![
+        `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        `http://localhost:${(server.address() as AddressInfo).port}`,
+        ...developmentOrigins,
+      ].includes(origin)
+    )
+      return send(403, { error: 'Origin not allowed' });
+    try {
+      if (url.pathname === '/api/arm' && req.method === 'GET')
+        return send(200, await connectionStatus());
+      if (url.pathname === '/api/arm/stop' && req.method === 'POST') {
+        if (!armControls || connecting)
+          return send(409, { error: 'Connect the arm first' });
+        await armControls.stop();
+        return send(200, await connectionStatus());
+      }
+      if (url.pathname === '/api/arm/recover' && req.method === 'POST') {
+        if (!armControls || connecting)
+          return send(409, { error: 'Connect the arm first' });
+        if ((await readBody(req)).confirmed !== true)
+          return send(400, { error: 'Confirm recovery first' });
+        await armControls.recover();
+        return send(200, await connectionStatus());
+      }
+      if (url.pathname === '/api/arm/status-panel' && req.method === 'GET')
+        return send(
+          200,
+          await statusPanel.read(
+            url.searchParams.get('cameraId'),
+            url.searchParams.get('details') === 'true',
+          ),
+        );
+      if (url.pathname === '/api/arm/control' && req.method === 'POST') {
+        await statusPanel.command(await readBody(req));
+        return send(200, { ok: true });
+      }
+      if (url.pathname === '/api/setup' && req.method === 'GET') {
+        return send(200, {
+          setup: setup.status(),
+          setupAdapters: models,
+        });
+      }
+      if (
+        handleRequest &&
+        (await handleRequest({ url, req, send, body: readBody, setup }))
+      )
+        return;
+      if (
+        setup.configure &&
+        url.pathname === '/api/setup/connection' &&
+        req.method === 'POST'
+      )
+        return send(200, await setup.configure(await readBody(req)));
+      if (url.pathname === '/api/setup/reconnect' && req.method === 'POST')
+        return send(200, await setup.reconnect(await readBody(req)));
+      if (url.pathname === '/api/setup/motion-settings')
+        return send(
+          200,
+          await setup.motion(
+            req.method === 'POST' ? await readBody(req) : undefined,
+          ),
+        );
+      if (url.pathname === '/api/setup/disable' && req.method === 'POST')
+        return send(200, await setup.disable(await readBody(req)));
+      if (url.pathname === '/api/arm/connect' && req.method === 'POST') {
+        if (!setup.configure)
+          return send(200, await setup.reconnect(await readBody(req)));
+        return send(409, {
+          error: 'Use the connection form to configure the robot',
+        });
+      }
+      if (url.pathname === '/api/arm/disconnect' && req.method === 'POST') {
+        if (setup.busy)
+          return send(409, {
+            error: 'Wait for the current robot control to finish',
+          });
+        await setup.mutate({ session: setup.session }, async () => {
+          await disconnectArm();
+          setup.phase = 'unconfigured';
+        });
+        return send(200, await connectionStatus());
+      }
+      if (
+        setup.busy &&
+        req.method !== 'GET' &&
+        (url.pathname.startsWith('/api/tasks') ||
+          url.pathname.startsWith('/api/devices'))
+      )
+        return send(409, { error: 'Wait for configuration changes to finish' });
+      if (url.pathname === '/api/tasks') {
+        if (!tasks) return send(409, { error: 'Connect the arm first' });
+        if (req.method === 'GET') return send(200, { tasks: tasks.list() });
+        if (req.method === 'POST') {
+          const input = await readBody(req);
+          if (
+            typeof input.cameraId !== 'string' ||
+            (input.name !== undefined && typeof input.name !== 'string')
+          )
+            return send(400, { error: 'Select a camera' });
+          return send(200, await tasks.create(input.cameraId, input.name));
+        }
+      }
+      const taskRoute = /^\/api\/tasks\/([^/]+)(\/.*)?$/.exec(url.pathname);
+      if (taskRoute) {
+        const id = taskRoute[1];
+        const entry = tasks?.entries.get(id);
+        if (!entry || entry.closed)
+          return send(404, { error: 'Task not found' });
+        if (!taskRoute[2] && req.method === 'DELETE') {
+          await tasks!.remove(id);
+          return send(200, {});
+        }
+        if (taskRoute[2] === '/config' && req.method === 'POST') {
+          await tasks!.configure(id, (await readBody(req)).aiConfig);
+          return send(200, { status: 'ok' });
+        }
+        req.url = `${taskRoute[2] || '/'}${url.search}`;
+        return entry.server.app(req, res);
+      }
+      if (url.pathname === '/api/audit/actions' && req.method === 'GET') {
+        const store = arm && controllerRuntime(arm).auditStore;
+        return send(200, {
+          status: store?.status(),
+          records: store?.recent(100) ?? [],
+        });
+      }
+      const configurationRoute =
+        /^\/api\/devices\/([^/]+)\/(configuration|motion-settings|safe-position)$/.exec(
+          url.pathname,
+        );
+      if (configurationRoute) {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        const id = decodeURIComponent(configurationRoute[1]);
+        if (req.method === 'GET' && configurationRoute[2] === 'configuration')
+          return send(200, await devices.configuration(id));
+        if (req.method !== 'POST' || configurationRoute[2] === 'configuration')
+          return send(405, { error: 'Method not allowed' });
+        if (
+          tasks
+            ?.list()
+            .some(
+              (task) => task.phase === 'running' || task.phase === 'closing',
+            )
+        )
+          return send(409, {
+            error: 'Stop tasks before changing device configuration',
+          });
+        const input = await readBody(req, 16384);
+        const abort = new AbortController();
+        const cancel = () => {
+          if (!res.writableEnded)
+            abort.abort(new Error('Configuration request disconnected'));
+        };
+        res.once('close', cancel);
+        try {
+          return send(
+            200,
+            await devices.updateConfiguration(
+              id,
+              configurationRoute[2],
+              input,
+              abort.signal,
+            ),
+          );
+        } finally {
+          res.off('close', cancel);
+        }
+      }
+      const transferRoute = /^\/api\/devices\/([^/]+)\/transfer$/.exec(
+        url.pathname,
+      );
+      if (transferRoute) {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        const id = decodeURIComponent(transferRoute[1]);
+        if (req.method === 'GET')
+          return send(200, await devices.transferConfiguration(id));
+        if (req.method === 'POST') {
+          const input = await readBody(req, 65536);
+          if (
+            typeof input.targetId !== 'string' ||
+            input.targetId === id ||
+            input.confirmed !== true ||
+            !Array.isArray(input.waypoints) ||
+            input.waypoints.length > 64
+          )
+            return send(400, {
+              error:
+                'Select a different target and confirm the measured transfer corridor',
+            });
+          const abort = new AbortController();
+          const disconnected = () => {
+            if (!res.writableEnded)
+              abort.abort(new Error('Transfer validation cancelled'));
+          };
+          res.once('close', disconnected);
+          try {
+            return send(
+              200,
+              await devices.configureTransfer(
+                id,
+                input.targetId,
+                input,
+                abort.signal,
+              ),
+            );
+          } finally {
+            res.off('close', disconnected);
+          }
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
+      const calibrationRoute =
+        /^\/api\/devices\/([^/]+)\/calibration(?:\/(.*))?$/.exec(url.pathname);
+      if (calibrationRoute) {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        const id = decodeURIComponent(calibrationRoute[1]);
+        const action = calibrationRoute[2];
+        if (action === 'start' && req.method === 'POST')
+          return send(200, await devices.startCalibration(id));
+        if (action === 'status' && req.method === 'GET')
+          return send(200, devices.status(id));
+        if (action === 'cancel' && req.method === 'POST') {
+          await devices.cancelCalibration(id);
+          return send(200, devices.status(id));
+        }
+        const session = devices.entries.get(id)?.calibration;
+        if (!session?.host)
+          return send(409, {
+            error: 'Calibration is not ready',
+            phase: session?.phase,
+          });
+        if (req.method !== 'GET' && session.phase !== 'running')
+          return send(409, { error: 'Calibration has ended' });
+        if (await session.host.handle(req, res)) return;
+      }
+      if (url.pathname === '/api/cameras' && req.method === 'GET') {
+        const cameras = await listCameras({
+          refresh: url.searchParams.get('refresh') === 'true',
+        });
+        return send(200, {
+          error: devices?.discoveryError,
+          cameras: cameras.map((camera) => ({
+            ...camera,
+            hasCorrection: Boolean(
+              devices?.entries.get(camera.id)?.camera.getCorrection(),
+            ),
+            error: devices?.cameraErrors.get(camera.id),
+            stream: devices?.entries.get(camera.id)?.camera.stream.getInfo(),
+          })),
+        });
+      }
+      if (url.pathname === '/api/cameras/start' && req.method === 'POST') {
+        const input = await readBody(req);
+        const cameras = await listCameras();
+        const camera = cameras.find((entry) => entry.id === input.id);
+        if (!camera) return send(404, { error: 'Camera not found' });
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        const { camera: session } = await devices.open(camera.id, true);
+        const stream = session.stream;
+        return send(200, { stream: stream.getInfo() });
+      }
+      if (url.pathname === '/api/cameras/stop' && req.method === 'POST') {
+        const input = await readBody(req);
+        await tasks?.closeCamera(input.id);
+        await devices?.stop(input.id);
+        return send(200, {});
+      }
+      if (url.pathname === '/api/cameras/preview' && req.method === 'GET') {
+        const entry = devices?.entries.get(url.searchParams.get('id') ?? '');
+        if (!entry) return send(404, { error: 'Camera is not running' });
+        const view = url.searchParams.get('view');
+        if (view && !['raw', 'corrected'].includes(view))
+          return send(400, { error: 'Unknown camera view' });
+        await streamCameraPreview(res, entry, view === 'corrected');
+        return;
+      }
+      if (url.pathname === '/api/cameras/frame' && req.method === 'GET') {
+        const stream = devices?.entries.get(url.searchParams.get('id') ?? '')
+          ?.camera.stream;
+        if (!stream) return send(404, { error: 'Camera is not running' });
+        const frame = await stream.getFrame();
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Cache-Control': 'no-store',
+        });
+        return res.end(frame.jpeg);
+      }
+      if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
+        const root = resolve(webRoot);
+        const file = resolve(
+          root,
+          `.${decodeURIComponent(
+            url.pathname === '/' ? '/index.html' : url.pathname,
+          )}`,
+        );
+        if (!file.startsWith(root + sep))
+          return send(404, { error: 'Not found' });
+        const types: Record<string, string> = {
+          '.html': 'text/html',
+          '.js': 'text/javascript',
+          '.css': 'text/css',
+          '.svg': 'image/svg+xml',
+          '.png': 'image/png',
+          '.woff2': 'font/woff2',
+          '.wasm': 'application/wasm',
+          '.json': 'application/json',
+        };
+        try {
+          const data = await readFile(file);
+          res.writeHead(200, {
+            'Content-Type': types[extname(file)] ?? 'application/octet-stream',
+          });
+          return res.end(data);
+        } catch (error) {
+          if (
+            !(
+              error instanceof Error &&
+              'code' in error &&
+              ['ENOENT', 'EISDIR'].includes(String(error.code))
+            )
+          )
+            throw error;
+        }
+      }
+      return send(404, { error: 'Not found' });
+    } catch (error) {
+      if (!res.headersSent && !res.destroyed)
+        send(
+          error instanceof Error &&
+            'status' in error &&
+            typeof error.status === 'number'
+            ? error.status
+            : 500,
+          {
+            error: error instanceof Error ? error.message : String(error),
+            code:
+              error instanceof Error && 'code' in error
+                ? error.code
+                : undefined,
+          },
+        );
+      else res.destroy();
+    }
+  });
+  server.on('upgrade', (req, socket, head) => {
+    const url = URL.parse(req.url ?? '/', 'http://localhost');
+    if (!url) return socket.destroy();
+    const calibration = devices?.phoneHost(url.searchParams.get('token'));
+    if (!calibration) return socket.destroy();
+    calibration.phoneSocket.upgrade(req, socket, head);
+  });
+  await new Promise<void>((accept, reject) => {
+    server.once('error', reject);
+    server.listen(port, '0.0.0.0', () => {
+      server.off('error', reject);
+      accept();
+    });
+  });
+  let closing: Promise<void> | undefined;
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close() {
+      closing ??= (async () => {
+        const drained = new Promise((resolve) => server.close(resolve));
+        server.closeAllConnections();
+        await setup.pending?.catch(() => {});
+        await disconnectArm();
+        await drained;
+      })();
+      return closing;
+    },
+  };
+}

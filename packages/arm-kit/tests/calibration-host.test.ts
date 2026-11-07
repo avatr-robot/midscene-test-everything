@@ -1,0 +1,272 @@
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
+import { expect, it, rstest } from '@rstest/core';
+import sharp from 'sharp';
+import { CalibrationHost } from '../src/calibration-server/host.js';
+import * as detector from '../src/calibration/camera/screen-detector.js';
+import type { CameraSession } from '../src/camera/session.js';
+import { controllerRuntime } from '../src/controller-runtime.js';
+import { ArmController } from '../src/controller.js';
+import { fixture } from './fixtures.js';
+
+it('prepares first-time measured setup without inventing tool geometry or replacing accepted profiles', async () => {
+  const f = await fixture();
+  await f.runtime.shutdown();
+  const arm = new ArmController({ adapter: f.adapter, profileStore: f.store });
+  await arm.connect();
+  const camera = {
+    camera: { id: 'fresh-camera', name: 'Camera' },
+    stream: { getInfo: () => ({ state: 'running' }) },
+    getCorrection: () => undefined,
+  } as unknown as CameraSession;
+  const host = new CalibrationHost({ arm, camera, deviceId: 'new-device' });
+  try {
+    await host.prepare();
+    expect((await host.configuration()).input).toBeUndefined();
+    await expect(host.enable()).rejects.toMatchObject({
+      code: 'SETUP_REQUIRED',
+    });
+    const before = f.store.getTool(f.tool.id);
+    const config = await host.configure({
+      tool: {
+        offsetMm: { x: 0, y: 0, z: -38 },
+        contactDirection: { x: 0, y: 0, z: -1 },
+      },
+      motion: f.screen,
+    });
+    expect(config.output).toEqual({
+      cameraId: 'fresh-camera',
+      width: 720,
+      height: 1280,
+    });
+    expect(config.input?.toolProfileId).not.toBe(f.tool.id);
+    expect(host.service.setup().prepared).toBe(true);
+    expect(f.store.getTool(f.tool.id)).toEqual(before);
+    expect(f.store.deviceBinding('new-device')).toBeUndefined();
+    // Closing a wizard must not discard measurements entered before acceptance.
+    await f.store.load();
+    const reopened = new CalibrationHost({
+      arm,
+      camera,
+      deviceId: 'new-device',
+    });
+    await reopened.prepare();
+    const restored = await reopened.configuration();
+    expect(restored.input?.toolProfileId).toBe(config.input?.toolProfileId);
+    expect(restored.measuredSetup?.tool.offsetMm).toEqual({
+      x: 0,
+      y: 0,
+      z: -38,
+    });
+    expect(f.store.deviceBinding('new-device')).toBeUndefined();
+    await reopened.close();
+    const post = async (body: unknown, path = 'enable') => {
+      const req = Readable.from([JSON.stringify(body)]) as IncomingMessage;
+      req.method = 'POST';
+      req.url = `/api/calibration/${path}`;
+      let status = 0;
+      const res = {
+        writeHead: (code: number) => {
+          status = code;
+        },
+        end: () => undefined,
+      } as unknown as ServerResponse;
+      await host.handle(req, res);
+      return status;
+    };
+    expect(await post({ confirmed: 'true' })).toBe(400);
+    expect((await arm.getState()).enabled).toBe(false);
+    expect(await post({ confirmed: true })).toBe(200);
+    expect((await host.configuration()).ready).toBe(true);
+    const runtime = controllerRuntime(arm);
+    const payloadSpy = rstest
+      .spyOn(runtime, 'applySavedPayload')
+      .mockResolvedValue();
+    const recoverSpy = rstest.spyOn(runtime, 'recover').mockResolvedValue();
+    try {
+      expect(await post({}, 'payload')).toBe(400);
+      expect(payloadSpy).not.toHaveBeenCalled();
+      expect(await post({ confirmed: true }, 'payload')).toBe(200);
+      const selectedTool = f.store.getTool(config.input!.toolProfileId);
+      expect(payloadSpy).toHaveBeenCalledWith({
+        robotProfileId: config.input!.robotProfileId,
+        toolProfileId: selectedTool.id,
+        toolRevision: selectedTool.revision,
+      });
+      expect(await post({}, 'recover')).toBe(200);
+      expect(recoverSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      payloadSpy.mockRestore();
+      recoverSpy.mockRestore();
+    }
+    const live = await runtime.state();
+    const stateSpy = rstest.spyOn(runtime, 'state').mockResolvedValueOnce({
+      ...live,
+      payloadApplication: {
+        ...live.payloadApplication!,
+        status: 'unconfirmed',
+      },
+    });
+    try {
+      expect((await host.configuration()).ready).toBe(false);
+      expect(stateSpy).toHaveBeenCalledWith(config.input?.toolProfileId);
+    } finally {
+      stateSpy.mockRestore();
+    }
+
+    expect(f.adapter.movements).toHaveLength(0);
+    await f.store.acceptDeviceBinding({
+      ...f.binding,
+      deviceId: 'existing-device',
+      cameraId: 'cam',
+      calibrationProfileId: f.calibration.id,
+      revision: 0,
+      vision: {
+        cameraId: 'cam',
+        cameraName: 'Camera',
+        perspectiveProfileKey: 'p',
+        fingerprint: 'f',
+        width: 1000,
+        height: 500,
+        confirmedAt: new Date().toISOString(),
+      },
+    });
+    const reused = await host.configure({
+      width: 720,
+      height: 1280,
+      tool: before,
+      motion: f.screen,
+    });
+    expect(reused.input?.toolProfileId).toBe(before.id);
+    expect(reused.measuredSetup?.tool.offsetMm).toEqual(before.offsetMm);
+    expect(reused.editable).toBe(true);
+    const accepted = f.store.deviceBinding('existing-device');
+    const changed = await host.configure({
+      width: 800,
+      height: 1400,
+      tool: {
+        ...before,
+        offsetMm: { ...before.offsetMm, z: before.offsetMm.z - 5 },
+      },
+    });
+    expect(changed.input?.toolProfileId).not.toBe(before.id);
+    expect(changed.input?.motion).toEqual(f.screen);
+    expect(changed.measuredSetup?.width).toBe(800);
+    const edited = await host.configure({ tool: changed.measuredSetup!.tool });
+    expect(edited.output).toEqual(changed.output);
+    expect(f.store.deviceBinding('existing-device')).toEqual(accepted);
+
+    expect(f.store.getTool(before.id)).toEqual(before);
+    await expect(
+      host.configure({ width: 0, height: 720, tool: before, motion: f.screen }),
+    ).rejects.toMatchObject({ code: 'INVALID_MAPPING' });
+  } finally {
+    await host.close();
+    await arm.close();
+    await f.cleanup();
+  }
+});
+
+it('detects correction with the provided model without exposing credentials or moving the arm', async () => {
+  const f = await fixture();
+  await f.runtime.shutdown();
+  const arm = new ArmController({ adapter: f.adapter, profileStore: f.store });
+  const jpeg = await sharp({
+    create: { width: 640, height: 480, channels: 3, background: '#ffffff' },
+  })
+    .jpeg()
+    .toBuffer();
+  const camera = {
+    camera: { id: 'detect-camera', name: 'Camera' },
+    rawFrame: async () => jpeg,
+    getCorrection: () => undefined,
+  } as unknown as CameraSession;
+  const host = new CalibrationHost({ arm, camera, deviceId: 'detect-device' });
+  try {
+    const points = {
+      topLeft: { x: 100, y: 100 },
+      topRight: { x: 500, y: 100 },
+      bottomRight: { x: 500, y: 400 },
+      bottomLeft: { x: 100, y: 400 },
+    };
+    const detect = rstest
+      .spyOn(detector, 'detectScreenWithModel')
+      .mockResolvedValue({ points } as Awaited<
+        ReturnType<typeof detector.detectScreenWithModel>
+      >);
+    const modelConfig = {
+      modelName: 'test-model',
+      modelFamily: 'qwen',
+      baseUrl: '',
+      apiKey: 'test-only',
+    };
+    try {
+      const req = Readable.from([
+        JSON.stringify({ modelConfig }),
+      ]) as IncomingMessage;
+      req.method = 'POST';
+      req.url = '/api/calibration/camera/detect';
+      let response: any;
+      const res = {
+        writeHead: (status: number) => expect(status).toBe(200),
+        end: (body: string) => {
+          response = JSON.parse(body);
+        },
+      } as unknown as ServerResponse;
+      await host.handle(req, res);
+      expect(detect).toHaveBeenCalledWith(jpeg, modelConfig);
+      expect(response.frameDataUrl).toBe(
+        `data:image/jpeg;base64,${jpeg.toString('base64')}`,
+      );
+      expect(JSON.stringify(response)).not.toContain('test-only');
+    } finally {
+      detect.mockRestore();
+    }
+
+    expect(f.adapter.movements).toHaveLength(0);
+  } finally {
+    await host.close();
+    await arm.close();
+    await f.cleanup();
+  }
+});
+
+it('restores measured length and weight before calibration acceptance, isolated by device', async () => {
+  const f = await fixture();
+  await f.runtime.shutdown();
+  const arm = new ArmController({ adapter: f.adapter, profileStore: f.store });
+  await arm.connect();
+  const camera = {
+    camera: { id: 'remembered-camera', name: 'Camera' },
+    stream: { getInfo: () => ({ state: 'running' }) },
+    getCorrection: () => undefined,
+  } as unknown as CameraSession;
+  const options = { arm, camera, deviceId: 'remembered-device' };
+  const first = new CalibrationHost(options);
+  const next = new CalibrationHost(options);
+  const other = new CalibrationHost({ ...options, deviceId: 'other-device' });
+  try {
+    const tool = {
+      offsetMm: { x: 0, y: 0, z: -42 },
+      contactDirection: { x: 0, y: 0, z: -1 },
+      payload: { massKg: 0.15 },
+    };
+    await first.prepare();
+    await first.configure({ tool, motion: f.screen });
+    await first.close();
+    await f.store.load();
+    await next.prepare();
+    const config = await next.configuration();
+    expect(config.measuredSetup?.tool).toMatchObject(tool);
+    expect(f.store.deviceBinding(options.deviceId)).toBeUndefined();
+    await other.prepare();
+    expect((await other.configuration()).input).toBeUndefined();
+    expect(f.adapter.movements).toHaveLength(0);
+    expect((await arm.getState()).enabled).toBe(false);
+  } finally {
+    await next.close();
+    await other.close();
+    await arm.close();
+    await f.cleanup();
+  }
+});

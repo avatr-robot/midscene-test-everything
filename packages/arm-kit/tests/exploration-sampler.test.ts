@@ -1,0 +1,397 @@
+// Ported upstream simulation scenarios; acceptance is tested separately in Arm Kit.
+import { describe, expect, it } from '@rstest/core';
+import { fitExploration } from '../src/calibration/exploration/fit.js';
+import { runAutoExploration } from '../src/calibration/exploration/sampler.js';
+import type {
+  ApplicationContext,
+  AutoExplorationHost,
+  CalibrationSession,
+} from '../src/calibration/exploration/types.js';
+
+import type { CartesianPose } from '../src/contracts.js';
+import { contactPoint } from '../src/domain.js';
+import { fixture, pose } from './fixtures.js';
+
+describe('first-time automatic exploration', () => {
+  it.each([
+    'standard',
+    'fast-tap',
+    'fast-slide',
+    'fast-adaptive-tap',
+    'fast-adaptive-slide',
+    'fast-hysteresis',
+    'fast-offset-hysteresis',
+    'fast-reported-failure',
+    'press-recovers',
+    'bad-validation',
+    'fast-no-touch',
+    'fast-deep-recovery',
+    'fast-delayed',
+    'initial-touch-offset',
+    'release-missing',
+    'repress-missing',
+    'snapshot-missing',
+    'snapshot-stale',
+    'safety-floor',
+  ])(
+    'explores with %s and preserves independent acceptance',
+    async (mode) => {
+      const f = await fixture();
+      const page = {
+        id: 'page',
+        connected: true,
+        display: { width: 400, height: 800, visible: true },
+        config: { pixelWidth: 1000, pixelHeight: 500 },
+        mapping: { version: 1, displayKey: 'display' },
+        cursor: 0,
+        sampleId: undefined as string | undefined,
+        sampleAcked: false,
+        sampleSnapshot: undefined as
+          | undefined
+          | {
+              sampleId: string;
+              mappingVersion: number;
+              pointerCount: number;
+              screen: { x: number; y: number } | null;
+            },
+      };
+      const startZ = mode === 'fast-reported-failure' ? -194.62645 : 60;
+      const activationZ =
+        mode === 'fast-reported-failure'
+          ? -202.37645
+          : mode === 'fast-offset-hysteresis'
+            ? 30.7
+            : 30;
+      const releaseZ =
+        mode === 'fast-reported-failure'
+          ? -200.12645
+          : mode.includes('hysteresis')
+            ? activationZ + 2.5
+            : activationZ;
+      const initialSteps: number[] = [];
+      let previousHeld = false;
+      let missedPress = false;
+      let contact: { x: number; y: number; z: number } | undefined;
+      let touching = false;
+      let releaseProbeStarted = false;
+      let repressing = false;
+      let delayedUntil = 0;
+      let delayedOnce = false;
+      let delayedMoveCount = 0;
+      const motions: CartesianPose[] = [];
+      let gridSteps = 0;
+      let actualPose = pose(100, -50, startZ);
+      const finishedSampling = false;
+      let reacquisitionLift = false;
+      let lowestZ = Number.POSITIVE_INFINITY;
+      const isFast = mode !== 'standard' && mode !== 'safety-floor';
+      const pagePixel = () =>
+        contact && touching
+          ? {
+              x: (contact.x / 200) * 999,
+              y: (-contact.y / 100) * 499,
+            }
+          : null;
+      const targets = [
+        [0, 0],
+        [0, 1],
+        [0, 2],
+        [1, 0],
+        [1, 1],
+        [1, 2],
+        [2, 0],
+        [2, 1],
+        [2, 2],
+      ].map(([row, column]) => {
+        const x = [100, 500, 900][column];
+        const y = [50, 250, 450][row];
+        return {
+          id: `grid-${row}-${column}`,
+          role:
+            (row === 1 && (column === 0 || column === 2)) ||
+            (row === 2 && column === 1)
+              ? ('validation' as const)
+              : ('fit' as const),
+          css: { x: x / 2.5, y: y / 2 },
+          screen: { x, y },
+        };
+      });
+      const screenCalib = {
+        findMappedSession: async () => ({ ...page }),
+        session: async () => {
+          if (Date.now() < delayedUntil)
+            expect(motions).toHaveLength(delayedMoveCount);
+          return {
+            ...page,
+            sampleSnapshot:
+              mode === 'snapshot-missing' || Date.now() < delayedUntil
+                ? undefined
+                : mode === 'snapshot-stale' && page.sampleSnapshot
+                  ? { ...page.sampleSnapshot, sampleId: 'old-height' }
+                  : page.sampleSnapshot,
+          };
+        },
+        setSample: async (_id: string, sampleId: string) => {
+          let screen = pagePixel();
+          if (
+            mode === 'press-recovers' &&
+            !missedPress &&
+            contact &&
+            Math.abs(contact.z - 29.625) < 1e-6
+          ) {
+            missedPress = true;
+            screen = null;
+          }
+          if (mode === 'fast-delayed' && contact && !delayedOnce) {
+            delayedOnce = true;
+            delayedUntil = Date.now() + 350;
+            delayedMoveCount = motions.length;
+          }
+          if (screen && mode === 'initial-touch-offset' && !repressing)
+            screen.x += 20;
+          if (
+            screen &&
+            mode === 'bad-validation' &&
+            targets.some(
+              (target) =>
+                target.role === 'validation' &&
+                Math.hypot(
+                  target.screen.x - screen.x,
+                  target.screen.y - screen.y,
+                ) < 1,
+            )
+          )
+            screen.x += 20;
+          page.sampleId = sampleId;
+          page.sampleAcked = true;
+          page.sampleSnapshot = {
+            sampleId,
+            mappingVersion: 1,
+            pointerCount: screen ? 1 : 0,
+            screen,
+          };
+          return { ...page };
+        },
+        targets: async () => ({
+          mappingVersion: 1,
+          displayKey: 'display',
+          pixelWidth: 1000,
+          pixelHeight: 500,
+          targets,
+        }),
+        events: async () => {
+          throw new Error('Sampling must use a fresh pointer snapshot');
+        },
+      } as AutoExplorationHost['screenCalib'];
+      const ctx: ApplicationContext = {
+        tool: f.tool,
+        screen: {
+          ...f.screen,
+          physicalWidthMm: 0,
+          physicalHeightMm: 0,
+        },
+      };
+      const session: CalibrationSession = { auto: {} };
+      const constraints = {
+        speed: {
+          ratio: { min: 0.001, max: 1 },
+          linear: { min: 0.01, max: 1000 },
+          angular: { min: 0.01, max: 360 },
+          joints: { min: 0.01, max: 360 },
+        },
+        acceleration: {
+          ratio: { min: 0.001, max: 1 },
+          linear: { min: 0.01, max: 1000 },
+          angular: { min: 0.01, max: 360 },
+          joints: { min: 0.01, max: 360 },
+        },
+      };
+      const host = {
+        adapter: {
+          ...f.adapter,
+          capabilities: f.runtime.capabilities,
+          resolver: {
+            descriptor: (token: string) =>
+              token === 'motion.linear' ? { constraints } : undefined,
+          },
+          getPose: async () => pose(100, -50, startZ),
+        },
+        profileStore: { saveSession: async () => undefined },
+        check: () => undefined,
+        interrupted: () => false,
+        ready: async () => undefined,
+        drag: async () => undefined,
+        target: () => undefined,
+        preflight: async () => undefined,
+        move: async (
+          target: CartesianPose,
+          _ctx: unknown,
+          speed: { kind: string; value?: number },
+        ) => {
+          if (finishedSampling && speed.kind === 'ratio')
+            expect(speed.value).toBeCloseTo(0.1, 8);
+          const point = contactPoint(target, f.tool.offsetMm);
+          const previous = contactPoint(actualPose, f.tool.offsetMm);
+          if (
+            mode === 'fast-adaptive-slide' &&
+            !finishedSampling &&
+            point.x < 50 &&
+            point.y < -75 &&
+            point.z > previous.z &&
+            Math.hypot(point.x - previous.x, point.y - previous.y) < 0.01
+          )
+            reacquisitionLift = true;
+          if (!finishedSampling) motions.push(target);
+          if (point.z > previous.z && previous.z <= 30)
+            releaseProbeStarted = true;
+          if (releaseProbeStarted && point.z < previous.z) repressing = true;
+          actualPose = target;
+          contact = point;
+          lowestZ = Math.min(lowestZ, point.z);
+          previousHeld = touching;
+          const inside =
+            point.x >= 0 && point.x <= 200 && point.y <= 0 && point.y >= -100;
+          touching =
+            inside && (touching ? point.z < releaseZ : point.z <= activationZ);
+          if (mode === 'release-missing' && releaseProbeStarted)
+            touching = true;
+          if (mode === 'repress-missing' && repressing) touching = false;
+          if (mode === 'fast-no-touch' && point.x < 50) touching = false;
+          if (
+            mode.startsWith('fast-adaptive') ||
+            mode === 'fast-deep-recovery'
+          ) {
+            const localZ =
+              point.x < 50
+                ? mode === 'fast-deep-recovery'
+                  ? 28.25
+                  : 29
+                : activationZ;
+            touching =
+              inside &&
+              (previousHeld ? point.z < localZ + 0.1 : point.z <= localZ);
+          }
+          // A remote point that only touches at the floor would need a final
+          // press below that floor. It must be rejected before submission.
+          if (mode === 'safety-floor' && point.x > 105)
+            touching = point.z <= 27.625;
+          return {};
+        },
+        stable: async () => undefined,
+        stationaryPose: async () => pose(100, -50, startZ),
+        hold: async () => undefined,
+        contactAction: async () => {
+          throw new Error('unused');
+        },
+        safeLift: (p: CartesianPose) => p,
+        validateCalibration: () => undefined,
+        validateScreenTargets: () => undefined,
+        currentPose: async () => actualPose,
+        screenCalib,
+        progress: (current: CalibrationSession) => {
+          const progress = current.auto?.progress;
+          // Inspect acquisition independently of subsequent fitting gates.
+          if (
+            mode === 'fast-deep-recovery' &&
+            progress?.phase === 'grid' &&
+            progress.index === 2
+          )
+            throw new Error('Deep recovery collected');
+          if (
+            progress?.message === 'Initial touch' &&
+            progress.probeZMm !== undefined
+          )
+            initialSteps.push(progress.probeZMm);
+          if (progress?.message === 'Initial touch · refine')
+            expect(previousHeld).toBe(false);
+
+          if (
+            current.auto?.progress?.phase === 'search' &&
+            current.auto.progress.index > 0 &&
+            current.auto.progress.message?.startsWith('Grid ')
+          )
+            gridSteps++;
+        },
+      };
+      const job = runAutoExploration(host as never, session, ctx, {
+        startPose: pose(100, -50, startZ),
+        ...(isFast
+          ? {
+              mode: 'fast-horizontal' as const,
+              horizontalConfirmed: true,
+              collection: mode.endsWith('slide')
+                ? ('slide' as const)
+                : ('tap' as const),
+            }
+          : {}),
+      });
+      try {
+        const expected: Record<string, string> = {
+          'release-missing': 'No confirmed release',
+          'repress-missing': 'refined press',
+          'snapshot-missing': 'confirm the current touch state',
+          'snapshot-stale': 'confirm the current touch state',
+          'safety-floor': 'safety floor',
+          'fast-no-touch': 'fast local height-search budget',
+          'fast-deep-recovery': 'Deep recovery collected',
+        };
+        if (expected[mode]) {
+          await expect(job).rejects.toThrow(expected[mode]);
+          if (mode.startsWith('snapshot-')) expect(motions).toHaveLength(0);
+          if (mode === 'safety-floor')
+            expect(lowestZ).toBeGreaterThanOrEqual(27.625);
+          if (mode === 'fast-no-touch')
+            expect(session.auto?.fastAdaptation?.searchSteps).toBe(6);
+          return;
+        }
+        const collection = await job;
+        expect(collection.probes).toHaveLength(3);
+        expect(collection.grid).toHaveLength(isFast ? 6 : 9);
+        const fit = () =>
+          fitExploration(
+            collection,
+            f.tool,
+            f.runtime.capabilities,
+            {
+              id: 'candidate',
+              ...f.binding,
+              robotGeometryRevision: 1,
+              toolGeometryRevision: 1,
+              screenGeometryRevision: 1,
+            },
+            isFast,
+          );
+        if (mode === 'bad-validation') {
+          expect(fit).toThrow('Validation residual');
+          return;
+        }
+        if (mode === 'fast-adaptive-tap') {
+          expect(fit).toThrow('Insufficient plane inliers');
+          return;
+        }
+        const result = fit();
+        expect(result.candidate.acceptanceStatus).toBe('pending');
+        expect(result.measuredSize.physicalWidthMm).toBeCloseTo(
+          200,
+          mode.startsWith('fast-adaptive') ? 1 : 4,
+        );
+        expect(result.measuredSize.physicalHeightMm).toBeCloseTo(
+          100,
+          mode.startsWith('fast-adaptive') ? 1 : 4,
+        );
+        expect(result.coverage).toBeGreaterThan(0.6);
+        expect(result.gridRmsMm).toBeLessThan(0.75);
+        expect(result.evidence.validationMaxMm).toBeLessThan(1);
+        if (mode === 'fast-slide')
+          expect(
+            session.auto?.collectedSamples?.filter((p) => p.method === 'slide'),
+          ).toHaveLength(5);
+        if (mode === 'press-recovers') expect(missedPress).toBe(true);
+        expect(f.store.getScreen(f.screen.id)).toEqual(f.screen);
+      } finally {
+        await f.cleanup();
+      }
+    },
+    90000,
+  );
+});

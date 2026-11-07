@@ -1,0 +1,89 @@
+.joint-guide {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  --joint-alarm: #d4380d;
+  .ant-typography {
+    margin: 0;
+  }
+  .joint-guide-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+  }
+  svg {
+    display: block;
+    width: 100%;
+    height: 180px;
+    border: 1px solid var(--rv-border);
+    border-radius: 12px;
+    background: var(--midscene-surface-muted);
+  }
+  .joint-guide-node circle {
+    fill: var(--midscene-surface);
+    stroke: var(--rv-text-secondary);
+    stroke-width: 2;
+  }
+  .joint-guide-node text {
+    fill: var(--rv-text);
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .joint-guide-node.is-selected circle {
+    stroke: var(--ant-color-primary, #1677ff);
+    stroke-width: 4;
+  }
+  .joint-guide-node.is-faulted circle {
+    stroke: var(--joint-alarm);
+    stroke-width: 4;
+  }
+  .joint-guide-values {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .joint-guide-value {
+    display: grid;
+    gap: 5px;
+    padding: 12px;
+    min-width: 0;
+    text-align: left;
+    color: var(--rv-text);
+    border: 1px solid var(--rv-border);
+    background: var(--midscene-surface);
+    border-radius: 10px;
+    cursor: pointer;
+    font: inherit;
+    overflow-wrap: anywhere;
+  }
+  .joint-guide-value[aria-pressed='true'] {
+    outline: 2px solid var(--ant-color-primary, #1677ff);
+    outline-offset: -2px;
+  }
+  .joint-guide-value:focus-visible {
+    outline: 3px solid var(--ant-color-primary, #1677ff);
+    outline-offset: 2px;
+  }
+  .joint-guide-value.is-faulted {
+    border-color: var(--joint-alarm);
+    color: var(--joint-alarm);
+  }
+  .joint-guide-angle {
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+  }
+  .joint-guide-reference {
+    color: var(--rv-text-secondary);
+    font-size: 12px;
+  }
+}
+[data-theme='dark'] .joint-guide {
+  --joint-alarm: #ff9c6e;
+}
+@media (max-width: 380px) {
+  .joint-guide .joint-guide-values {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

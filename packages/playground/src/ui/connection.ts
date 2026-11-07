@@ -1,0 +1,143 @@
+import { create } from 'zustand';
+import type { EffectiveCapabilities, RuntimeState } from './robot-arm-api';
+
+export type Phase =
+  | 'checking'
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'error'
+  | 'interrupted';
+interface RuntimeSnapshot {
+  runtime?: RuntimeState;
+  capabilities?: EffectiveCapabilities;
+  adapter?: { name?: string; connectionIdentity: string };
+  setupSession?: string;
+}
+interface ConnectionSnapshot extends RuntimeSnapshot {
+  phase: Phase;
+  host?: string;
+  error?: string;
+  recoveryRequired?: boolean;
+  softwarePaused?: boolean;
+  state?: { enabled: boolean; moving: boolean; mode: string };
+}
+async function request(
+  path: string,
+  data?: unknown,
+): Promise<ConnectionSnapshot> {
+  const response = await fetch(`/api/arm${path}`, {
+    method: data === undefined ? 'GET' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: data === undefined ? undefined : JSON.stringify(data),
+    signal: AbortSignal.timeout(15000),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+interface ConnectionStore extends RuntimeSnapshot {
+  recoveryRequired?: boolean;
+  controlPending?: 'stop' | 'recover';
+  controlError?: string;
+  stop: () => Promise<void>;
+  recover: () => Promise<void>;
+  phase: Phase;
+  host: string;
+  error?: string;
+  check: () => Promise<void>;
+  disconnect: () => Promise<void>;
+}
+let controlRevision = 0;
+let checking: Promise<void> | undefined;
+export const useConnection = create<ConnectionStore>((set, get) => ({
+  phase: 'checking',
+  host: '',
+  stop: async () => {
+    const revision = ++controlRevision;
+    set({
+      controlPending: 'stop',
+      controlError: undefined,
+      recoveryRequired: true,
+    });
+    try {
+      const result = await request('/stop', {});
+      if (revision === controlRevision)
+        set({ recoveryRequired: result.recoveryRequired });
+    } catch (error) {
+      if (revision === controlRevision) set({ controlError: String(error) });
+    } finally {
+      if (revision === controlRevision) set({ controlPending: undefined });
+    }
+  },
+  recover: async () => {
+    if (get().controlPending) return;
+    const revision = ++controlRevision;
+    set({ controlPending: 'recover', controlError: undefined });
+    try {
+      const result = await request('/recover', { confirmed: true });
+      if (revision === controlRevision)
+        set({ recoveryRequired: result.recoveryRequired });
+    } catch (error) {
+      if (revision === controlRevision) set({ controlError: String(error) });
+    } finally {
+      if (revision === controlRevision) set({ controlPending: undefined });
+    }
+  },
+  check: () => {
+    if (checking) return checking;
+    checking = (async () => {
+      const revision = controlRevision;
+      if (get().controlPending) return;
+      try {
+        const snapshot = await request('');
+        if (get().controlPending || revision !== controlRevision) return;
+        set({
+          runtime: snapshot.runtime,
+          capabilities: snapshot.capabilities,
+          adapter: snapshot.adapter,
+          setupSession: snapshot.setupSession,
+          recoveryRequired: snapshot.recoveryRequired,
+          phase:
+            snapshot.phase === 'disconnected' && get().phase === 'connected'
+              ? 'interrupted'
+              : snapshot.phase,
+          host: snapshot.host ?? get().host,
+          error: snapshot.error,
+        });
+      } catch (error) {
+        if (!get().controlPending && revision === controlRevision)
+          set({
+            runtime: undefined,
+            capabilities: undefined,
+            adapter: undefined,
+            phase: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          });
+      }
+    })().finally(() => {
+      checking = undefined;
+    });
+    return checking;
+  },
+  disconnect: async () => {
+    ++controlRevision;
+    try {
+      const state = await request('/disconnect', {});
+      set({
+        runtime: undefined,
+        capabilities: undefined,
+        adapter: undefined,
+        phase: state.phase,
+        error: state.error,
+        recoveryRequired: state.recoveryRequired,
+        controlError: undefined,
+      });
+    } catch (error) {
+      set({
+        phase: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+}));

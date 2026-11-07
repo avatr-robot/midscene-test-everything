@@ -1,0 +1,324 @@
+import { createHash, randomUUID } from 'node:crypto';
+import type { ArmController, CalibrationProfile } from '@midscene/arm-kit';
+import {
+  CameraSessionManager,
+  RobotArmDevice,
+  listCameras,
+} from '@midscene/arm-kit';
+import type { CalibrationHost } from '@midscene/arm-kit/internal/calibration-server/host';
+import type { PhonePairings } from './phone-pairings.js';
+
+interface CalibrationSession {
+  abort: AbortController;
+  phase: string;
+  token: string;
+  host?: CalibrationHost;
+  pending?: Promise<void>;
+  ready?: Promise<void>;
+  error?: string;
+}
+export interface DeviceEntry {
+  camera: Awaited<ReturnType<CameraSessionManager['acquire']>>;
+  device: RobotArmDevice;
+  owner: string;
+  calibration?: CalibrationSession;
+}
+type PhoneLinks = (token: string) => { name: string; url: string }[];
+
+/** One camera session shared by preview, calibration and the Midscene Device. */
+export class PlaygroundDevices {
+  entries = new Map<string, DeviceEntry>();
+  readonly cameras: CameraSessionManager;
+  private Device: typeof RobotArmDevice;
+  private phoneLinks: PhoneLinks;
+  private pairings?: PhonePairings;
+  cameraErrors = new Map<string, string>();
+  discoveryError?: string;
+  opening = new Map<string, Promise<DeviceEntry>>();
+  stopping = new Map<string, Promise<void>>();
+  closed = false;
+  constructor(
+    readonly arm: ArmController,
+    {
+      cameras = new CameraSessionManager(),
+      Device = RobotArmDevice,
+      phoneLinks = () => [],
+      pairings,
+    }: {
+      cameras?: CameraSessionManager;
+      Device?: typeof RobotArmDevice;
+      phoneLinks?: PhoneLinks;
+      pairings?: PhonePairings;
+    } = {},
+  ) {
+    this.cameras = cameras;
+    this.Device = Device;
+    this.phoneLinks = phoneLinks;
+    this.pairings = pairings;
+  }
+  async startAll(discover = listCameras) {
+    this.discoveryError = undefined;
+    try {
+      const cameras = await discover({ refresh: true });
+      await Promise.allSettled(cameras.map((camera) => this.open(camera.id)));
+    } catch (error) {
+      this.discoveryError =
+        error instanceof Error ? error.message : String(error);
+    }
+  }
+  async open(id: string, retryFailed = false): Promise<DeviceEntry> {
+    if (this.closed) throw new Error('Device host is closed');
+    if (this.stopping.has(id)) {
+      await this.stopping.get(id);
+      return this.open(id, retryFailed);
+    }
+    if (this.opening.has(id)) return this.opening.get(id)!;
+    const existing = this.entries.get(id);
+    if (
+      existing &&
+      !(retryFailed && existing.camera.stream.getInfo().state === 'failed')
+    )
+      return existing;
+    const pending = (async () => {
+      if (existing) {
+        const { stream } = existing.camera;
+        await stream.restart(stream.getOptions());
+        return existing;
+      }
+      const owner = `preview:${randomUUID()}`;
+      const camera = await this.cameras.acquire(id, owner);
+      const device = new this.Device({
+        arm: this.arm,
+        camera: id,
+        cameraManager: this.cameras,
+      });
+      try {
+        await device.connect();
+        if (this.closed) throw new Error('Device host is closed');
+        const entry = { camera, device, owner };
+        this.entries.set(id, entry);
+        return entry;
+      } catch (error) {
+        await device.destroy();
+        await this.cameras.release(id, owner);
+        throw error;
+      }
+    })();
+    this.opening.set(id, pending);
+    try {
+      const entry = await pending;
+      this.cameraErrors.delete(id);
+      return entry;
+    } catch (error) {
+      this.cameraErrors.set(
+        id,
+        error instanceof Error ? error.message : String(error),
+      );
+      throw error;
+    } finally {
+      this.opening.delete(id);
+    }
+  }
+  stop(id: string) {
+    if (this.stopping.has(id)) return this.stopping.get(id);
+    const pending = (async () => {
+      await this.opening.get(id)?.catch(() => undefined);
+      const entry = this.entries.get(id);
+      if (!entry) return;
+      entry.calibration?.abort.abort();
+      await entry.device.destroy();
+      await this.cameras.release(id, entry.owner);
+      this.entries.delete(id);
+    })();
+    this.stopping.set(id, pending);
+    void pending.finally(() => this.stopping.delete(id)).catch(() => undefined);
+    return pending;
+  }
+  async configuration(id: string) {
+    const { device } = await this.open(id);
+    return device.configuration();
+  }
+  async updateConfiguration(
+    id: string,
+    kind: string,
+    input: Record<string, unknown>,
+    signal: AbortSignal,
+  ) {
+    const { device } = await this.open(id);
+    return kind === 'motion-settings'
+      ? device.updateMotionSettings(input, signal)
+      : device.safePosition(
+          input as Parameters<RobotArmDevice['safePosition']>[0],
+          signal,
+        );
+  }
+  async transferConfiguration(id: string) {
+    const { device } = await this.open(id);
+    const calibration = await device.getCalibration();
+    return {
+      version: createHash('sha256')
+        .update(JSON.stringify(calibration))
+        .digest('hex'),
+      calibration: {
+        id: calibration.id,
+        observationPose: calibration.observationPose,
+        toolProfileId: calibration.toolProfileId,
+      },
+      routes: this.arm
+        .transferRoutes()
+        .filter((route) => route.fromCalibrationId === calibration.id),
+    };
+  }
+  async configureTransfer(
+    fromId: string,
+    toId: string,
+    input: Parameters<RobotArmDevice['configureTransferTo']>[1] & {
+      sourceVersion: string;
+      targetVersion: string;
+    },
+    signal: AbortSignal,
+  ) {
+    if (!fromId || !toId || fromId === toId)
+      throw new Error('Select two different devices');
+    signal?.throwIfAborted();
+    const [from, to] = await Promise.all([this.open(fromId), this.open(toId)]);
+    signal?.throwIfAborted();
+    const [source, target] = await Promise.all([
+      this.transferConfiguration(fromId),
+      this.transferConfiguration(toId),
+    ]);
+    if (
+      input.sourceVersion !== source.version ||
+      input.targetVersion !== target.version
+    ) {
+      const error = new Error(
+        'Calibration changed while editing. Reopen the route editor and review the safe positions.',
+      );
+      throw Object.assign(error, { code: 'TRANSFER_STALE', status: 409 });
+    }
+    await from.device.configureTransferTo(to.device, {
+      waypoints: input.waypoints,
+      confirmed: input.confirmed,
+      signal,
+    });
+    return this.transferConfiguration(fromId);
+  }
+  private calibrationOpening = new Map<string, Promise<unknown>>();
+  startCalibration(id: string): Promise<unknown> {
+    const current = this.calibrationOpening.get(id);
+    if (current) return current;
+    const pending = this.prepareCalibration(id);
+    this.calibrationOpening.set(id, pending);
+    void pending
+      .finally(() => this.calibrationOpening.delete(id))
+      .catch(() => undefined);
+    return pending;
+  }
+  private async prepareCalibration(id: string) {
+    const entry = await this.open(id);
+    if (
+      entry.calibration &&
+      ['queued', 'running'].includes(entry.calibration.phase)
+    )
+      return this.status(id);
+    let ready!: () => void;
+    let failed!: (error: unknown) => void;
+    const prepared = new Promise<void>((resolve, reject) => {
+      ready = resolve;
+      failed = reject;
+    });
+    void prepared.catch(() => undefined);
+    const session: CalibrationSession = {
+      abort: new AbortController(),
+      phase: 'queued',
+      ready: prepared,
+      // Pairing belongs to this device, not to one calibration attempt.
+      token:
+        entry.calibration?.token ??
+        (await this.pairings?.token(id)) ??
+        randomUUID(),
+    };
+    entry.calibration = session;
+    session.pending = entry.device
+      .calibrate({
+        signal: session.abort.signal,
+        basePath: `/api/devices/${encodeURIComponent(id)}/calibration`,
+        phoneLinks: () => this.phoneLinks(session.token),
+        interaction: async (host, signal) => {
+          session.host = host;
+          session.phase = 'running';
+          ready();
+          return new Promise<CalibrationProfile>((resolve, reject) => {
+            const finish = (error?: unknown, result?: CalibrationProfile) => {
+              clearInterval(timer);
+              signal.removeEventListener('abort', abort);
+              if (result) resolve(result);
+              else reject(error);
+            };
+            const abort = () =>
+              finish(signal.reason ?? new Error('Calibration cancelled'));
+            const timer = setInterval(() => {
+              try {
+                const state = host.service.status();
+                if (state?.stage === 'completed' && state.result)
+                  finish(undefined, state.result);
+                else if (state?.stage === 'cancelled')
+                  finish(new Error('Calibration cancelled'));
+              } catch (error) {
+                finish(error);
+              }
+            }, 200);
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted) abort();
+          });
+        },
+      })
+      .then(
+        () => {
+          session.phase = 'completed';
+        },
+        (error) => {
+          session.phase = session.abort.signal.aborted ? 'cancelled' : 'error';
+          session.error = error.message;
+          failed(error);
+        },
+      );
+    return this.status(id);
+  }
+  status(id: string) {
+    const session = this.entries.get(id)?.calibration;
+    return session
+      ? { phase: session.phase, error: session.error }
+      : { phase: 'idle' };
+  }
+  async cancelCalibration(id: string) {
+    await this.opening.get(id)?.catch(() => undefined);
+    const session = this.entries.get(id)?.calibration;
+    session?.abort.abort();
+    await session?.pending;
+  }
+  async resolvePhoneHost(token: string | null) {
+    if (!token || this.closed) return undefined;
+    const active = this.phoneHost(token);
+    if (active) return active;
+    const cameraId = this.pairings?.camera(token);
+    if (!cameraId) return undefined;
+    // Restoring the input page prepares a session, never starts collection.
+    await this.startCalibration(cameraId);
+    await this.entries.get(cameraId)?.calibration?.ready;
+    return this.phoneHost(token);
+  }
+  phoneHost(token: string | null) {
+    if (!token) return undefined;
+    for (const { calibration } of this.entries.values()) {
+      if (calibration?.token === token && calibration.phase === 'running')
+        return calibration.host;
+    }
+  }
+  async close() {
+    this.closed = true;
+    await Promise.allSettled(this.opening.values());
+    await Promise.all([...this.entries.keys()].map((id) => this.stop(id)));
+    await this.cameras.close();
+  }
+}

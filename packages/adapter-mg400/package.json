@@ -1,0 +1,31 @@
+{
+  "name": "@midscene/arm-adapter-mg400",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@midscene/shared": "1.17.5",
+    "@midscene/arm-kit": "workspace:*",
+    "@awo00/smb2": "1.1.1"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "native"],
+  "scripts": {
+    "build": "rslib build",
+    "typecheck": "tsc --noEmit -p tsconfig.build.json",
+    "test": "rstest run"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.3",
+    "@rslib/core": "^0.18.3",
+    "@rstest/core": "0.12.0"
+  }
+}

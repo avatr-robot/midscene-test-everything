@@ -1,0 +1,68 @@
+import { Button, Typography } from 'antd';
+import { Check, Circle } from 'lucide-react';
+import type { CameraEntry } from '../cameras';
+import { usePreferences } from '../i18n';
+import './RobotReadinessCard.less';
+
+export function RobotReadinessCard({
+  camera,
+  onOpenSetup,
+}: { camera: CameraEntry; onOpenSetup(): void }) {
+  const zh = usePreferences((s) => s.language) === 'zh';
+  const steps = [
+    { label: zh ? '机械臂已连接' : 'Arm connected', done: true },
+    {
+      label: zh ? '相机运行中' : 'Camera running',
+      done: camera.stream?.state === 'running',
+    },
+    {
+      label: zh ? '屏幕校正' : 'Screen correction',
+      done: Boolean(camera.hasCorrection),
+    },
+    { label: zh ? '屏幕标定' : 'Screen calibration', done: false },
+  ];
+  return (
+    <section
+      className="robot-readiness-card"
+      aria-label={zh ? '设备准备进度' : 'Device setup progress'}
+    >
+      <div className="robot-readiness-head">
+        <Typography.Text strong>
+          {zh ? '完成设备配置' : 'Finish device setup'}
+        </Typography.Text>
+        <span>
+          {steps.filter((step) => step.done).length} / {steps.length}
+        </span>
+      </div>
+      <ul>
+        {steps.map((step) => (
+          <li key={step.label} data-done={step.done}>
+            <span
+              className="readiness-mark"
+              role="img"
+              aria-label={
+                step.done
+                  ? zh
+                    ? '已完成'
+                    : 'Complete'
+                  : zh
+                    ? '待完成'
+                    : 'Pending'
+              }
+            >
+              {step.done ? (
+                <Check size={18} strokeWidth={2.75} aria-hidden />
+              ) : (
+                <Circle size={14} aria-hidden />
+              )}
+            </span>
+            <span>{step.label}</span>
+          </li>
+        ))}
+      </ul>
+      <Button type="primary" onClick={onOpenSetup}>
+        {zh ? '进入标定' : 'Open calibration'}
+      </Button>
+    </section>
+  );
+}

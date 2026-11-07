@@ -1,0 +1,650 @@
+import { randomUUID } from 'node:crypto';
+import {
+  type CartesianPose,
+  type ControllerMotionSettingsUpdate,
+  type MotionHandle,
+  type MotionOptions,
+  type PayloadApplicationSnapshot,
+  type PayloadInvalidationReason,
+  type RobotArmCapabilities,
+  RobotArmError,
+  type RobotState,
+  type ToolPayload,
+  type Workspace,
+  assertToolPayload,
+} from '../contracts.js';
+import { assertOrientation, assertPose, assertTarget } from '../domain.js';
+import type {
+  LinearMotionSequence,
+  LinearSequenceOptions,
+  LinearSequenceTarget,
+  RobotArmAdapter,
+  RobotStatus,
+} from './contracts.js';
+import { DriverSupport } from './driver-support.js';
+import { validateJoints, validateMotionOptions } from './motion.js';
+import { assertFresh, evaluateReadiness } from './readiness.js';
+
+/** Vendor-neutral state and motion boundary. No screen geometry or vendor branches. */
+export class RobotDriverBoundary {
+  private generation = 0;
+  private payloadInvalidationReason?: PayloadInvalidationReason;
+  private payloadEnabling = false;
+  private readonly payloadSessionId = randomUUID();
+  private readonly createdAt = new Date().toISOString();
+  private payloadEpoch = 0;
+  private payloadUpdatedAt = this.createdAt;
+  private invalidatePayload(reason: PayloadInvalidationReason): void {
+    this.payloadEpoch++;
+    this.payloadUpdatedAt = new Date().toISOString();
+    this.payloadInvalidationReason = reason;
+  }
+  readonly resolver: DriverSupport;
+  readonly id: string;
+  readonly name: string;
+  readonly connectionIdentity: string;
+  constructor(readonly adapter: RobotArmAdapter) {
+    this.resolver = new DriverSupport(adapter);
+    this.id = adapter.id;
+    this.name = adapter.name;
+    this.connectionIdentity = adapter.connectionIdentity;
+  }
+  get capabilities(): RobotArmCapabilities {
+    const adapter = this.adapter;
+    const linear = this.resolver.descriptor('motion.linear');
+    return {
+      jointCount: adapter.kinematics.jointCount,
+      orientation: adapter.kinematics.orientation,
+      fixedOrientation: adapter.kinematics.fixedOrientation,
+      orientationToleranceRadians:
+        adapter.kinematics.orientationToleranceRadians,
+      cartesianDof: adapter.kinematics.cartesianDof,
+      measuredCartesian: Boolean(this.resolver.descriptor('state.cartesian')),
+      workspace: adapter.kinematics.workspace,
+      screenNormalToleranceDegrees:
+        adapter.kinematics.screenNormalToleranceDegrees,
+      linear: Boolean(linear),
+      ptp: Boolean(this.resolver.descriptor('motion.ptp')),
+      stop: Boolean(this.resolver.descriptor('control.stop')),
+      dragMode: Boolean(this.resolver.descriptor('control.drag')),
+      speedModes: Object.keys(
+        linear?.constraints?.speed ?? {},
+      ) as RobotArmCapabilities['speedModes'],
+      accelerationModes: Object.keys(
+        linear?.constraints?.acceleration ?? {},
+      ) as NonNullable<RobotArmCapabilities['accelerationModes']>,
+      maxLinearSpeedMmPerSecond: linear?.constraints?.speed.linear?.max,
+    };
+  }
+  get enterDragMode() {
+    return this.resolver.method('enterDragMode');
+  }
+  get exitDragMode() {
+    return this.resolver.method('exitDragMode');
+  }
+  get pause() {
+    const pause = this.resolver.method('pause');
+    return pause
+      ? () => {
+          this.generation++;
+          if (this.payloadEnabling)
+            this.invalidatePayload('application-interrupted');
+          return pause();
+        }
+      : undefined;
+  }
+  get resume() {
+    return this.resolver.method('resume');
+  }
+  get emergencyStop() {
+    const emergency = this.resolver.method('emergencyStop');
+    return emergency
+      ? () => {
+          this.generation++;
+          this.invalidatePayload('emergency-stop');
+          return emergency();
+        }
+      : undefined;
+  }
+  async connect() {
+    await this.adapter.driver.connect();
+    new DriverSupport(this.adapter);
+  }
+  disconnect() {
+    this.generation++;
+    this.invalidatePayload('disconnected');
+    return this.adapter.driver.disconnect();
+  }
+  async beginLinearSequence(
+    input: readonly LinearSequenceTarget[],
+    options: LinearSequenceOptions,
+  ): Promise<LinearMotionSequence | undefined> {
+    const implementation = this.resolver.method('beginLinearSequence');
+    if (!implementation) return undefined;
+    const targets = structuredClone(input);
+    const generation = this.generation;
+    const check = () => {
+      if (generation !== this.generation || options.signal?.aborted)
+        throw new RobotArmError(
+          'ACTION_STOPPED',
+          'Prepared sequence is no longer valid',
+          409,
+        );
+    };
+    for (const target of targets) {
+      await this.preflightCartesian('linear', target.pose, target.options);
+      validateMotionOptions(
+        target.options,
+        this.resolver.descriptor('motion.linear-sequence')!.constraints!,
+        this.adapter.kinematics.jointCount,
+      );
+      check();
+    }
+    const sequence = await implementation(targets, options);
+    try {
+      check();
+    } catch (error) {
+      sequence.dispose();
+      throw error;
+    }
+    return {
+      submit: (index, mode) => {
+        check();
+        return sequence.submit(index, mode);
+      },
+      waitForHandoff: () => {
+        check();
+        return sequence.waitForHandoff();
+      },
+      waitForCurrent: () => {
+        check();
+        return sequence.waitForCurrent();
+      },
+      check: () => {
+        check();
+        sequence.check();
+      },
+      finish: () => {
+        check();
+        return sequence.finish();
+      },
+      dispose: () => sequence.dispose(),
+    };
+  }
+  feedbackStatus() {
+    return this.adapter.feedbackStatus?.();
+  }
+  controllerMotionSettings() {
+    return this.resolver.require('readMotionSettings')();
+  }
+  updateControllerMotionSettings(request: ControllerMotionSettingsUpdate) {
+    return this.resolver.require('updateMotionSettings')(request);
+  }
+  async controllerState() {
+    const generation = this.generation;
+    const sample = await this.resolver.require('readControllerState')();
+    if (generation !== this.generation)
+      throw new RobotArmError(
+        'QUERY_INTERRUPTED',
+        'Controller read belongs to an older session',
+        409,
+      );
+    if (
+      !sample ||
+      typeof sample.vendor !== 'string' ||
+      !sample.vendor ||
+      typeof sample.receivedAt !== 'string' ||
+      !Number.isFinite(Date.parse(sample.receivedAt)) ||
+      !sample.raw ||
+      typeof sample.raw !== 'object' ||
+      Array.isArray(sample.raw)
+    )
+      throw new RobotArmError(
+        'INVALID_STATE',
+        'Driver returned malformed controller diagnostics',
+        502,
+      );
+    return structuredClone(sample);
+  }
+  /** Passive push-channel sample; absent when the adapter has no such channel. */
+  latestToolVectorSample() {
+    return this.adapter.latestToolVectorSample?.();
+  }
+  async status(fresh = true): Promise<RobotStatus> {
+    const payloadEpoch = this.payloadEpoch;
+    const generation = this.generation;
+    let s: RobotStatus;
+    try {
+      s = await this.adapter.driver.getState({ fresh });
+    } catch (error) {
+      if (
+        error instanceof RobotArmError &&
+        error.code === 'DISCONNECTED' &&
+        payloadEpoch === this.payloadEpoch &&
+        generation === this.generation &&
+        this.payloadInvalidationReason !== 'disconnected'
+      )
+        this.invalidatePayload('connection-lost');
+      throw error;
+    }
+    if (
+      !s ||
+      !s.quality ||
+      !Array.isArray(s.faults) ||
+      !['connected', 'disconnected', 'degraded', 'unknown'].includes(
+        s.connection,
+      ) ||
+      !['idle', 'moving', 'paused', 'stopping', 'unknown'].includes(s.motion) ||
+      !['enabled', 'disabled', 'unknown'].includes(s.enablement)
+    )
+      throw new RobotArmError(
+        'INVALID_STATE',
+        'Driver returned malformed status',
+        502,
+      );
+    for (const [field, values] of Object.entries({
+      authority: ['owned', 'not-owned', 'not-required', 'unknown'],
+      power: ['on', 'off', 'unknown'],
+      operationMode: ['automatic', 'manual', 'teach', 'backdrive', 'unknown'],
+      emergencyStop: ['active', 'inactive', 'unknown'],
+      protectiveStop: ['active', 'inactive', 'unknown'],
+    })) {
+      if (!values.includes(s[field as 'authority'] as string))
+        throw new RobotArmError(
+          'INVALID_STATE',
+          `Invalid status signal ${field}`,
+          502,
+        );
+    }
+    if (fresh)
+      assertFresh(s.quality, this.adapter.readinessPolicy.maxStateAgeMs);
+    const current =
+      payloadEpoch === this.payloadEpoch && generation === this.generation;
+    if (
+      current &&
+      s.connection === 'disconnected' &&
+      this.payloadInvalidationReason !== 'connection-lost'
+    )
+      this.invalidatePayload('connection-lost');
+    if (
+      current &&
+      !this.resolver.descriptor('state.payload-application') &&
+      !this.payloadEnabling &&
+      s.enablement === 'disabled' &&
+      this.appliedPayload()
+    )
+      this.invalidatePayload('disabled');
+    return s;
+  }
+  async getState(fresh = true): Promise<RobotState> {
+    const status = await this.status(fresh);
+    return {
+      status,
+      connected: status.connection === 'connected',
+      enabled: status.enablement === 'enabled',
+      moving:
+        status.motion === 'moving' ||
+        status.motion === 'stopping' ||
+        status.motion === 'unknown',
+      paused: status.motion === 'paused',
+      dragMode: status.operationMode === 'backdrive',
+      faults: status.faults,
+      mode: status.vendorMode ?? status.motion,
+      pose: status.pose && !status.pose.stale ? status.pose.pose : undefined,
+      updatedAt: status.quality.receivedAt,
+    };
+  }
+  async readiness() {
+    return evaluateReadiness(await this.status(), this.adapter.readinessPolicy);
+  }
+  async assertReady() {
+    const result = await this.readiness();
+    if (!result.ready)
+      throw new RobotArmError(
+        result.reasons[0],
+        'Robot is not ready for motion',
+        409,
+        { reasons: result.reasons },
+      );
+  }
+  async readPose() {
+    const sample = await this.resolver.require('readPose')({ fresh: true });
+    assertFresh(sample, this.adapter.readinessPolicy.maxStateAgeMs);
+    assertPose(sample.pose);
+    return sample;
+  }
+  async getPose(): Promise<CartesianPose> {
+    return (await this.readPose()).pose;
+  }
+  async readJoints() {
+    const sample = await this.resolver.require('readJoints')({ fresh: true });
+    assertFresh(sample, this.adapter.readinessPolicy.maxStateAgeMs);
+    if (
+      sample.values.length !== this.adapter.kinematics.jointCount ||
+      sample.values.some((v) => !Number.isFinite(v))
+    )
+      throw new RobotArmError('INVALID_JOINTS', 'Invalid measured joints', 502);
+    return sample;
+  }
+  private async applyPayloadCommand(payload: ToolPayload, applyOnly: boolean) {
+    const generation = this.generation;
+    const apply = applyOnly ? this.resolver.require('applyPayload') : undefined;
+    const enable = applyOnly
+      ? undefined
+      : this.resolver.require('enableWithPayload');
+    assertToolPayload(
+      payload,
+      this.resolver.descriptor('control.enable-with-payload')!.payload,
+    );
+    const source = this.resolver.method('readPayloadApplication');
+    const before = source?.();
+    const previousReason = this.payloadInvalidationReason;
+    this.payloadEnabling = true;
+    this.invalidatePayload('application-failed');
+    try {
+      if (apply) await apply({ ...payload });
+      else await enable!({ ...payload });
+      if (generation !== this.generation)
+        throw new RobotArmError(
+          'ACTION_STOPPED',
+          'Payload application was interrupted',
+          409,
+        );
+      this.payloadInvalidationReason = undefined;
+    } catch (error) {
+      const after = source?.();
+      // A vendor rejecting an already-enabled request before dispatch does not
+      // revoke an unchanged earlier confirmation.
+      if (
+        generation === this.generation &&
+        before?.status === 'confirmed' &&
+        after?.status === 'confirmed' &&
+        JSON.stringify(before) === JSON.stringify(after)
+      )
+        this.payloadInvalidationReason = previousReason;
+      else if (
+        this.payloadInvalidationReason === 'application-failed' &&
+        after?.reason
+      )
+        this.payloadInvalidationReason = after.reason;
+      throw error;
+    } finally {
+      this.payloadEnabling = false;
+      this.payloadEpoch++;
+      this.payloadUpdatedAt = new Date().toISOString();
+    }
+  }
+  applyPayload(payload: ToolPayload) {
+    return this.applyPayloadCommand(payload, true);
+  }
+  async enable(payload?: ToolPayload) {
+    if (payload !== undefined) return this.applyPayloadCommand(payload, false);
+    this.invalidatePayload('not-applied');
+    return this.resolver.require('enable')();
+  }
+  payloadApplicationSnapshot(): PayloadApplicationSnapshot | undefined {
+    if (!this.resolver.descriptor('control.enable-with-payload'))
+      return undefined;
+    const source = this.resolver.method('readPayloadApplication');
+    const raw = source?.();
+    if (source && !raw)
+      throw new RobotArmError(
+        'INVALID_STATE',
+        'Payload application capability returned no evidence',
+        502,
+      );
+    const legacy = source ? undefined : this.adapter.driver.appliedPayload?.();
+    const snapshot: PayloadApplicationSnapshot = raw ?? {
+      status: this.payloadEnabling
+        ? 'applying'
+        : legacy
+          ? 'confirmed'
+          : 'unconfirmed',
+      sessionId: this.payloadSessionId,
+      generation: this.payloadEpoch,
+      updatedAt: this.payloadInvalidationReason
+        ? this.payloadUpdatedAt
+        : (legacy?.confirmedAt ?? this.createdAt),
+      applied: this.payloadEnabling ? undefined : legacy,
+      reason: legacy ? undefined : 'not-applied',
+    };
+    if (
+      !['confirmed', 'unconfirmed', 'applying'].includes(snapshot.status) ||
+      typeof snapshot.sessionId !== 'string' ||
+      !snapshot.sessionId ||
+      !Number.isInteger(snapshot.generation) ||
+      snapshot.generation < 0 ||
+      !Number.isFinite(Date.parse(snapshot.updatedAt)) ||
+      (snapshot.status !== 'confirmed' &&
+        snapshot.applied !== undefined &&
+        source !== undefined) ||
+      (snapshot.status === 'confirmed' &&
+        (!snapshot.applied ||
+          !Number.isFinite(Date.parse(snapshot.applied.confirmedAt))))
+    )
+      throw new RobotArmError(
+        'INVALID_STATE',
+        'Malformed payload application evidence',
+        502,
+      );
+    if (snapshot.status === 'confirmed')
+      assertToolPayload(
+        snapshot.applied!.payload,
+        this.resolver.descriptor('control.enable-with-payload')?.payload,
+      );
+    if (
+      source &&
+      snapshot.status === 'confirmed' &&
+      snapshot.applied?.source === 'controller-readback' &&
+      !this.payloadEnabling &&
+      ['connection-lost', 'disconnected', 'disabled', 'not-applied'].includes(
+        this.payloadInvalidationReason ?? '',
+      ) &&
+      Date.parse(snapshot.applied.confirmedAt) >=
+        Date.parse(this.payloadUpdatedAt)
+    )
+      this.payloadInvalidationReason = undefined;
+    if (
+      this.payloadEnabling &&
+      this.payloadInvalidationReason === 'application-failed'
+    )
+      return {
+        ...structuredClone(snapshot),
+        status: 'applying',
+        applied: undefined,
+        reason: undefined,
+      };
+    return structuredClone(
+      this.payloadInvalidationReason
+        ? {
+            ...snapshot,
+            status: 'unconfirmed' as const,
+            applied: undefined,
+            reason: this.payloadInvalidationReason,
+          }
+        : snapshot,
+    );
+  }
+  appliedPayload() {
+    const snapshot = this.payloadApplicationSnapshot();
+    if (snapshot)
+      return snapshot.status === 'confirmed' ? snapshot.applied : undefined;
+    return this.adapter.driver.appliedPayload?.();
+  }
+  disable() {
+    this.invalidatePayload('disabled');
+    return this.resolver.require('disable')();
+  }
+  clearFaults() {
+    return this.resolver.require('clearFaults')();
+  }
+  async stop() {
+    this.generation++;
+    if (this.payloadEnabling) this.invalidatePayload('application-interrupted');
+    try {
+      await this.resolver.require('stop')();
+    } catch (error) {
+      this.invalidatePayload('stop-unconfirmed');
+      throw error;
+    }
+  }
+  validateCartesian(
+    kind: 'linear' | 'ptp',
+    pose: CartesianPose,
+    options: MotionOptions,
+    workspace?: Workspace,
+  ) {
+    assertOrientation(pose, this.capabilities);
+    if (
+      !workspace &&
+      !this.resolver.descriptor('kinematics.inverse') &&
+      !this.resolver.descriptor('kinematics.reachability')
+    )
+      throw new RobotArmError(
+        'REACHABILITY_UNAVAILABLE',
+        'Adapter cannot validate Cartesian target reachability',
+        422,
+      );
+    if (workspace) assertTarget(pose, workspace);
+    if (this.capabilities.workspace)
+      assertTarget(pose, this.capabilities.workspace);
+    const implementation = this.resolver.require(
+      kind === 'linear' ? 'moveLinear' : 'movePtp',
+    );
+    validateMotionOptions(
+      options,
+      this.adapter.motionLimits![kind]!,
+      this.adapter.kinematics.jointCount,
+    );
+    return implementation;
+  }
+  async preflightCartesian(
+    kind: 'linear' | 'ptp',
+    pose: CartesianPose,
+    options: MotionOptions,
+    workspace?: Workspace,
+  ): Promise<void> {
+    const generation = this.generation;
+    this.validateCartesian(kind, pose, options, workspace);
+    await this.assertReady();
+    await this.assertCartesianFreedom(pose);
+    const inverse = this.resolver.method('inverseKinematics');
+    if (inverse) {
+      validateJoints(
+        await inverse(structuredClone(pose)),
+        this.adapter.kinematics,
+      );
+    } else {
+      const reachability = this.resolver.method('checkReachability');
+      if (!reachability)
+        throw new RobotArmError(
+          'REACHABILITY_UNAVAILABLE',
+          'Adapter cannot validate Cartesian target reachability',
+          422,
+        );
+      await reachability(structuredClone(pose));
+    }
+    if (generation !== this.generation)
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'Motion interrupted during target preflight',
+        409,
+      );
+    await this.assertReady();
+  }
+  private async assertCartesianFreedom(pose: CartesianPose): Promise<void> {
+    const lockedAxes = (['x', 'y', 'z'] as const).filter(
+      (axis) => !this.adapter.kinematics.cartesianDof.includes(axis),
+    );
+    if (!lockedAxes.length) return;
+    const measured = await this.readPose();
+    if (
+      lockedAxes.some(
+        (axis) =>
+          Math.abs(pose.positionMm[axis] - measured.pose.positionMm[axis]) >
+          0.01,
+      )
+    )
+      throw new RobotArmError(
+        'CARTESIAN_DOF_UNSUPPORTED',
+        'Target changes an uncontrolled Cartesian axis',
+        422,
+      );
+  }
+  validateJointMotion(
+    values: number[],
+    options: MotionOptions,
+    bounds?: { min: number; max: number }[],
+  ) {
+    validateJoints(values, this.adapter.kinematics, bounds);
+    const implementation = this.resolver.require('moveJoints');
+    validateMotionOptions(
+      options,
+      this.resolver.descriptor('motion.joints')!.constraints!,
+      this.adapter.kinematics.jointCount,
+    );
+    return implementation;
+  }
+  private async move(
+    kind: 'linear' | 'ptp',
+    pose: CartesianPose,
+    options: MotionOptions,
+    workspace?: Workspace,
+  ): Promise<MotionHandle> {
+    pose = structuredClone(pose);
+    options = structuredClone(options);
+    workspace = workspace && structuredClone(workspace);
+    const generation = this.generation;
+    const implementation = this.validateCartesian(
+      kind,
+      pose,
+      options,
+      workspace,
+    );
+    // Explicit SDK bounds retain their existing semantics. Workstation moves
+    // have no user bounds and must recheck reachability before every submission.
+    if (!workspace) await this.preflightCartesian(kind, pose, options);
+    await this.assertCartesianFreedom(pose);
+    await this.assertReady();
+    if (generation !== this.generation)
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'Motion interrupted before submission',
+        409,
+      );
+    return implementation(pose, options);
+  }
+  moveLinear(
+    pose: CartesianPose,
+    options: MotionOptions = {},
+    workspace?: Workspace,
+  ) {
+    return this.move('linear', pose, options, workspace);
+  }
+  movePtp(
+    pose: CartesianPose,
+    options: MotionOptions = {},
+    workspace?: Workspace,
+  ) {
+    return this.move('ptp', pose, options, workspace);
+  }
+  async moveJoints(
+    values: number[],
+    options: MotionOptions,
+    bounds?: { min: number; max: number }[],
+  ) {
+    values = [...values];
+    options = structuredClone(options);
+    bounds = bounds && structuredClone(bounds);
+    const generation = this.generation;
+    const implementation = this.validateJointMotion(values, options, bounds);
+    await this.assertReady();
+    if (generation !== this.generation)
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'Motion interrupted before submission',
+        409,
+      );
+    return implementation(values, options);
+  }
+}

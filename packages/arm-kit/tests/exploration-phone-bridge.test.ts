@@ -1,0 +1,184 @@
+import { afterEach, expect, it, rstest } from '@rstest/core';
+import {
+  type AutomaticExplorationMode,
+  type CalibrationPageUpdate,
+  calibrationPageMarkers,
+} from '../src/assisted-contracts.js';
+import { AutomaticCapture } from '../src/calibration/exploration/capture.js';
+import { phonePointMm, screenContact } from '../src/calibration/geometry.js';
+import { fixture, pose } from './fixtures.js';
+rstest.mock('node:timers/promises', () => ({
+  setTimeout: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+}));
+afterEach(() => rstest.useRealTimers());
+it.each([
+  'standard',
+  'fast',
+  'slide',
+  'page-reload',
+  'missing-ack',
+  'ambiguous',
+  'cancel',
+] as const)(
+  'bridges upstream sampling to phone current snapshots: %s',
+  async (mode) => {
+    const f = await fixture();
+    rstest.useFakeTimers({
+      toFake: [
+        'setTimeout',
+        'clearTimeout',
+        'setInterval',
+        'clearInterval',
+        'performance',
+      ],
+    });
+    const abort = new AbortController();
+    const layout = {
+      revision: 1,
+      width: 400,
+      height: 800,
+      screen: { width: 400, height: 800, devicePixelRatio: 1 },
+      markers: calibrationPageMarkers(400, 800),
+    };
+    let current = pose(50, -50, 40);
+    let sequence = 0;
+    let touching = false;
+    const motions: Array<{ z: number; speed: unknown }> = [];
+    let collector: AutomaticCapture;
+    const send = () => {
+      const capture = collector.snapshot().capture;
+      const point = {
+        x: current.positionMm.x * 4,
+        y: -current.positionMm.y * 8,
+      };
+      const contact = touching
+        ? { id: 'pen', motionRevision: 0, point }
+        : undefined;
+      const step = capture?.step;
+      const update: CalibrationPageUpdate = {
+        pageId:
+          mode === 'page-reload' && motions.length > 1 ? 'new-page' : 'page',
+        sequence: ++sequence,
+        visible: true,
+        layout,
+        contact,
+        targetReady: capture?.target.id,
+        stepFeedback:
+          step && mode !== 'missing-ack'
+            ? {
+                ...step,
+                outcome:
+                  mode === 'ambiguous'
+                    ? 'unknown'
+                    : touching
+                      ? 'touched'
+                      : 'no_touch',
+                point: touching ? point : undefined,
+              }
+            : undefined,
+      };
+      collector.receive(update);
+    };
+    collector = new AutomaticCapture(
+      layout,
+      f.tool.offsetMm,
+      () => queueMicrotask(send),
+      (['fast', 'slide'].includes(mode)
+        ? mode
+        : 'standard') as AutomaticExplorationMode,
+    );
+    send();
+    const timer = setInterval(send, 20);
+    const job = collector
+      .run(
+        {
+          signal: abort.signal,
+          check: () => abort.signal.throwIfAborted(),
+          read: async () => current,
+          move: async (target, options) => {
+            current = structuredClone(target);
+            motions.push({ z: target.positionMm.z, speed: options?.speed });
+            touching = current.positionMm.z <= (touching ? 32 : 30);
+            if (mode === 'cancel' && motions.length === 2)
+              abort.abort(new Error('operator stopped'));
+            send();
+          },
+        },
+        current,
+        {
+          tool: f.tool,
+          screen: {
+            ...f.screen,
+            pixelWidth: 401,
+            pixelHeight: 801,
+            actionSpeed: { kind: 'ratio', value: 0.8 },
+          },
+          webToImage: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+        },
+      )
+      .then(
+        () => undefined,
+        (error) => error as Error,
+      );
+    try {
+      await rstest.advanceTimersByTimeAsync(60000);
+      const error = await job;
+      if (['standard', 'fast', 'slide'].includes(mode)) {
+        expect(error).toBeUndefined();
+        expect(collector.localPoints).toHaveLength(3);
+        expect(collector.points).toHaveLength(mode === 'standard' ? 9 : 6);
+        for (const motion of motions)
+          expect((motion.speed as { value: number }).value).toBeCloseTo(
+            mode === 'standard' ? 0.08 : 0.2,
+          );
+        expect(collector.upstreamResult).toBeDefined();
+      } else {
+        expect(error).toBeInstanceOf(Error);
+        expect(collector.upstreamResult).toBeUndefined();
+        if (mode === 'missing-ack' || mode === 'ambiguous')
+          expect(motions).toHaveLength(0);
+      }
+    } finally {
+      clearInterval(timer);
+      rstest.useRealTimers();
+      await f.cleanup();
+    }
+  },
+);
+it('uses the same full-screen coordinates for phone verification and image actions', async () => {
+  const f = await fixture();
+  try {
+    const c = { ...f.calibration, geometryFrame: 'screen' as const };
+    const metric = phonePointMm(c, f.screen, { x: 200, y: 400 });
+    expect(metric.x).toBeCloseTo(100);
+    expect(metric.y).toBeCloseTo(50);
+    const point = screenContact(c, f.screen, { x: 499.5, y: 249.5 });
+    expect(point.x).toBeCloseTo(c.origin.x + 100);
+    expect(point.y).toBeCloseTo(c.origin.y - 50);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it('forwards upstream motion ratios through the runtime instead of forcing one percent', async () => {
+  const f = await fixture();
+  try {
+    const move = rstest.spyOn(f.adapter, 'moveLinear');
+    await f.runtime.collectAutomaticPoints(f.binding, (host) =>
+      host.move(pose(100, -50, 101), {
+        speed: { kind: 'ratio', value: 0.025 },
+        acceleration: { kind: 'ratio', value: 0.025 },
+        timeoutMs: 10000,
+      }),
+    );
+    expect(move).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        speed: { kind: 'ratio', value: 0.025 },
+        acceleration: { kind: 'ratio', value: 0.025 },
+      }),
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

@@ -1,0 +1,228 @@
+// Migrated from robot-vision/App.less; shell dimensions from PlaygroundShell.less.
+.camera-stage {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.camera-stage-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.camera-stage-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  min-width: 0;
+
+  h4.ant-typography {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+.camera-stage-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  font-size: 12px;
+
+  .ant-tag {
+    margin-inline-end: 0;
+  }
+  > .ant-typography {
+    font-size: inherit;
+    white-space: nowrap;
+  }
+}
+.camera-stage-actions {
+  display: flex;
+  align-items: center;
+  .ant-btn-icon-only { width: 32px; padding-inline: 0; }
+  .ant-btn-icon { display: inline-flex; }
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Keep the stage at the frame's ratio while capping its height. */
+.camera-stage-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  max-height: 64vh;
+  justify-self: center;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--rv-preview-bg);
+}
+
+.camera-stage-preview .stream-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.camera-rail {
+  display: grid;
+  grid-auto-columns: minmax(140px, 1fr);
+  grid-auto-flow: column;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.camera-rail-item {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--rv-border);
+  border-radius: 10px;
+  background: var(--midscene-surface);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.camera-rail-item:hover {
+  background: var(--midscene-surface-hover);
+}
+
+.camera-rail-item.is-active {
+  border-color: var(--midscene-accent);
+  box-shadow: 0 0 0 1px var(--midscene-accent);
+}
+
+.camera-rail-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 6px;
+  color: var(--midscene-text-tertiary);
+  background: var(--rv-preview-bg);
+}
+
+.camera-rail-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.camera-rail-index,
+.camera-rail-role {
+  position: absolute;
+  top: 4px;
+  padding: 1px 5px;
+  border: 1px solid rgb(255 255 255 / 24%);
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(0 0 0 / 62%);
+  font-size: 10px;
+  line-height: 14px;
+  pointer-events: none;
+}
+
+.camera-rail-index {
+  left: 4px;
+}
+
+.camera-rail-role {
+  right: 4px;
+}
+
+.camera-rail-role.is-screen {
+  border-color: transparent;
+  background: var(--midscene-accent);
+}
+
+.camera-rail-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.camera-rail-name {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rv-segmented.ant-segmented {
+  padding: 1px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--midscene-surface-muted, #f5f5f5);
+  color: var(--midscene-text-secondary, rgb(0 0 0 / 70%));
+
+  /* Equal halves: a two-track grid gives each side the width of the longer
+     label, so the pair reads as one control instead of two. Flex cannot do
+     this here, because an item never shrinks below its own text. */
+  .ant-segmented-group {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    /* antd leaves `justify-items: flex-start` on the group, which keeps each
+       grid item at its own text width. */
+    justify-items: stretch;
+  }
+
+  .ant-segmented-item-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 28px;
+    padding: 0 12px;
+    line-height: 28px;
+  }
+
+  .ant-segmented-item {
+    border-radius: 6px;
+    color: var(--midscene-text-secondary, rgb(0 0 0 / 70%));
+    transition: color 120ms ease-out;
+  }
+
+  .ant-segmented-item:hover:not(.ant-segmented-item-selected) {
+    color: var(--midscene-text-primary, rgb(0 0 0 / 85%));
+  }
+
+  .ant-segmented-item-selected,
+  .ant-segmented-thumb {
+    border-radius: 6px;
+    background: var(--midscene-surface, #fff);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
+  }
+
+  .ant-segmented-item-selected {
+    color: var(--midscene-text-primary, rgb(0 0 0 / 85%));
+    font-weight: 500;
+  }
+
+  /* Keyboard focus lands on antd's hidden input. */
+  .ant-segmented-item:has(.ant-segmented-item-input:focus-visible) {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--midscene-surface-muted, #f5f5f5),
+      0 0 0 4px var(--midscene-accent, #2b83ff);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rv-segmented.ant-segmented .ant-segmented-item,
+  .rv-segmented.ant-segmented .ant-segmented-thumb {
+    transition: none;
+  }
+}
