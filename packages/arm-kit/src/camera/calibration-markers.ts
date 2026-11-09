@@ -2,6 +2,7 @@ import aruco from 'js-aruco2';
 import sharp from 'sharp';
 import type { CalibrationPageLayout } from '../assisted-contracts.js';
 import { RobotVisionError } from './errors.js';
+import { MarkerCalibrationDetector } from './screen-marker-detector.js';
 import {
   applyHomography,
   computeHomography,
@@ -10,7 +11,6 @@ import {
   quadFromArray,
   quadMedian,
   quadToArray,
-  validateQuad,
 } from './vision-geometry.js';
 import type { ScreenQuad } from './vision-types.js';
 
@@ -32,7 +32,30 @@ export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
       .ensureAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });
-    return detector.detect({ data, width: info.width, height: info.height });
+    const found = detector.detect({
+      data,
+      width: info.width,
+      height: info.height,
+    });
+    // A sharp, front-facing border can decode twice, from its outer and inner contours.
+    // Use the outside corners for fitting and keep spatially distinct copies ambiguous.
+    const diagonal = (m: (typeof found)[number]) =>
+      pointDistance(m.corners[0], m.corners[2]);
+    const unique: typeof found = [];
+    for (const marker of found.sort((a, b) => diagonal(b) - diagonal(a))) {
+      if (
+        !unique.some(
+          (other) =>
+            other.id === marker.id &&
+            marker.corners.every(
+              (p, i) =>
+                pointDistance(p, other.corners[i]) <= 0.08 * diagonal(other),
+            ),
+        )
+      )
+        unique.push(marker);
+    }
+    return unique;
   }
   let observed = await decode(false);
   const counts = markers.map(
@@ -100,10 +123,10 @@ export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
   };
 }
 
-export async function detectScreenFromMarkers(
-  rawFrame: () => Promise<Buffer>,
+/** Also serialized into the phone page; use only the supplied layout. */
+export function screenBoundsProblem(
   layout: CalibrationPageLayout,
-) {
+): string | undefined {
   const { screen, width, height } = layout;
   const gap = screen.height - height;
   if (
@@ -111,80 +134,105 @@ export async function detectScreenFromMarkers(
     gap < -3 ||
     gap > screen.height * 0.25
   )
-    throw new RobotVisionError(
-      'CALIBRATION_MISMATCH',
-      'Open the phone helper at normal zoom with the entire screen visible.',
-    );
-  // Screen minus viewport gives only the total chrome, not its distribution.
-  // Real iOS captures can report zero safe areas and identical screen/client
-  // touch coordinates. Never turn that missing evidence into a top-only inset.
+    return 'Open the phone helper at normal zoom with the entire screen visible.';
+  // A toolbar gap alone cannot tell us how much chrome lies above the page.
   if (gap > 3 && layout.topInset === undefined)
-    throw new RobotVisionError(
-      'CALIBRATION_MISMATCH',
-      'The browser did not report the page position within the screen. Automatic screen boundary detection is unavailable.',
-    );
-  const top = -(layout.topInset ?? 0);
-  const bottom = top + Math.max(screen.height, height);
-  const bounds = [
+    return 'The browser did not report the page position within the screen. Automatic screen boundary detection is unavailable.';
+}
+function screenCorners(width: number, top: number, bottom: number) {
+  return [
     { x: 0, y: top },
     { x: width, y: top },
     { x: width, y: bottom },
     { x: 0, y: bottom },
   ];
+}
+/** Optical preview uses the old workstation's four-visible-marker fit on eight fresh frames. */
+export async function recognizeScreenMarkers(
+  rawFrame: () => Promise<Buffer>,
+  layout: CalibrationPageLayout,
+) {
+  const problem = screenBoundsProblem(layout);
+  if (problem) throw new RobotVisionError('CALIBRATION_MISMATCH', problem);
+  const top = -(layout.topInset ?? 0);
+  const bottom = top + Math.max(layout.screen.height, layout.height);
+  const target = {
+    points: quadFromArray(screenCorners(layout.width, top, bottom)),
+    markers: layout.markers.map((m) => ({
+      id: m.code,
+      center: { x: m.x, y: m.y },
+      side: m.size,
+    })),
+  };
+  const detector = new MarkerCalibrationDetector();
   const quads: ScreenQuad[] = [];
-  let sourceWidth = 0;
-  let sourceHeight = 0;
-  let lastError: unknown;
-  for (let i = 0; i < 8; i++) {
+  let reference: Awaited<ReturnType<typeof detector.detectFrame>> | undefined;
+  let frame: Buffer | undefined;
+  let lastFailure: unknown;
+  const frameCount = 8;
+  for (let i = 0; i < frameCount; i++) {
     const jpeg = await rawFrame();
-    const meta = await sharp(jpeg).metadata();
-    if (i && (sourceWidth !== meta.width || sourceHeight !== meta.height))
-      throw new RobotVisionError(
-        'CALIBRATION_MISMATCH',
-        'Camera dimensions changed during detection',
-      );
-    sourceWidth = meta.width!;
-    sourceHeight = meta.height!;
     try {
-      const result = await detectCalibrationMarkers(jpeg, layout.markers);
-      const quad = quadFromArray(
-        bounds.map((p) => applyHomography(result.webToImage, p)),
-      );
-      validateQuad(quad);
+      const detection = await detector.detectFrame(jpeg, target);
       if (
-        quadToArray(quad).some(
-          (p) =>
-            p.x < 0 || p.x >= sourceWidth || p.y < 0 || p.y >= sourceHeight,
-        )
+        reference &&
+        (reference.imageWidth !== detection.imageWidth ||
+          reference.imageHeight !== detection.imageHeight)
       )
         throw new RobotVisionError(
-          'NO_SCREEN_DETECTED',
-          'Full screen extends beyond the camera frame',
+          'CALIBRATION_MISMATCH',
+          'Camera dimensions changed during detection',
         );
-      quads.push(quad);
+      quads.push(detection.points);
+      reference = detection;
+      frame = jpeg;
     } catch (error) {
-      if (!(error instanceof RobotVisionError)) throw error;
-      lastError = error;
+      if (
+        !(error instanceof RobotVisionError) ||
+        error.code !== 'NO_SCREEN_DETECTED'
+      )
+        throw error;
+      lastFailure = error;
     }
   }
-  if (quads.length < 4)
-    throw (
-      lastError ??
-      new RobotVisionError('NO_SCREEN_DETECTED', 'Insufficient valid frames')
+  if (!reference || !frame || quads.length < 4)
+    throw new RobotVisionError(
+      'NO_SCREEN_DETECTED',
+      `Only ${quads.length} of 8 frames passed. ${lastFailure instanceof Error ? lastFailure.message : ''}`,
     );
   const points = quadMedian(quads);
+  const jitterPx = Math.max(
+    ...quads.flatMap((q) =>
+      quadToArray(q).map((p, i) => pointDistance(p, quadToArray(points)[i])),
+    ),
+  );
   if (
-    quads.some((q) =>
-      quadToArray(q).some(
-        (p, i) =>
-          pointDistance(p, quadToArray(points)[i]) >
-          Math.max(3, Math.hypot(sourceWidth, sourceHeight) * 0.002),
-      ),
-    )
+    jitterPx >
+    Math.max(3, Math.hypot(reference.imageWidth, reference.imageHeight) * 0.002)
   )
     throw new RobotVisionError(
       'CALIBRATION_MISMATCH',
       'Screen moved between frames. Keep the phone and camera fixed.',
     );
-  return { points, sourceWidth, sourceHeight, rotation: 0 as const };
+  return {
+    correction: {
+      points,
+      sourceWidth: reference.imageWidth,
+      sourceHeight: reference.imageHeight,
+      rotation: 0 as const,
+    },
+    jpeg: frame.toString('base64'),
+    markerIds: reference.markerIds,
+    validFrames: quads.length,
+    frameCount,
+    jitterPx,
+    errorPx: reference.reprojectionRmsePx,
+  };
+}
+
+export async function detectScreenFromMarkers(
+  rawFrame: () => Promise<Buffer>,
+  layout: CalibrationPageLayout,
+) {
+  return (await recognizeScreenMarkers(rawFrame, layout)).correction;
 }

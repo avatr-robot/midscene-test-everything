@@ -5,6 +5,7 @@ import {
   detectCalibrationMarkers,
   detectScreenFromMarkers,
   markerSvg,
+  recognizeScreenMarkers,
 } from '../src/camera/calibration-markers.js';
 
 const layout = {
@@ -38,6 +39,28 @@ test('requires every fitting and independent check marker to be visible', async 
       `Calibration marker ${code} could not be decoded uniquely (0 matches)`,
     );
   }
+});
+
+test('uses the outer contour when a sharp front-facing marker decodes twice', async () => {
+  const markers = calibrationPageMarkers(400, 800);
+  const tags = markers
+    .map((m) =>
+      markerSvg(m.code).replace(
+        '<svg ',
+        `<svg x="${m.x - m.size / 2}" y="${m.y - m.size / 2}" width="${m.size}" height="${m.size}" `,
+      ),
+    )
+    .join('');
+  const image = await sharp(
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><rect width="400" height="800" fill="white"/>${tags}</svg>`,
+    ),
+  )
+    .extend({ top: 50, bottom: 50, left: 50, right: 50, background: '#888' })
+    .jpeg()
+    .toBuffer();
+  const result = await detectCalibrationMarkers(image, markers);
+  expect(result.accuracy.validation.count).toBe(2);
 });
 
 test('rejects a duplicate marker even when another one is missing', async () => {
@@ -92,7 +115,7 @@ test('independently displaced markers prevent a correction', async () => {
   const frame = await photograph(true);
   await expect(
     detectScreenFromMarkers(async () => frame, layout),
-  ).rejects.toThrow('Independent check');
+  ).rejects.toThrow(/Only 0 of 8 frames passed.*consistent screen plane/);
 });
 
 test('locates one trial disk without a target coordinate and rejects ambiguous frames', async () => {
@@ -160,3 +183,21 @@ test('does not extrapolate the observed iPhone chrome gap without an origin', as
   ).rejects.toThrow('Automatic screen boundary detection is unavailable');
   expect(captures).toBe(0);
 });
+
+test('preview finds the screen with two obscured markers and four good frames, and rejects three good frames', async () => {
+  const visible = await photograph(false, layout.markers.slice(0, 4));
+  const obscured = await photograph(false, layout.markers.slice(0, 3));
+  for (const validFrames of [4, 3]) {
+    let i = 0;
+    const read = () => Promise.resolve(i++ < validFrames ? visible : obscured);
+    const result = recognizeScreenMarkers(read, layout);
+    if (validFrames === 4) {
+      const value = await result;
+      expect(value.validFrames).toBe(4);
+      expect(value.markerIds).toEqual([10, 11, 12, 13]);
+      expect(value.jpeg).toBe(visible.toString('base64'));
+      expect(value.correction.points.topLeft.x).toBeCloseTo(95, -1);
+    } else await expect(result).rejects.toThrow('Only 3 of 8 frames passed');
+    expect(i).toBe(8);
+  }
+}, 20000);
