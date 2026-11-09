@@ -50,6 +50,7 @@ export class StatusPanel {
     if (calibration && calibration.cameraId !== cameraId) return;
     const binding =
       calibration ??
+      profiles.devices?.find((item) => item.deviceId === cameraId) ??
       profiles.devices?.find((item) => item.cameraId === cameraId) ??
       (profiles.workstation?.cameraId === cameraId
         ? profiles.workstation

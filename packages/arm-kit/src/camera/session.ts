@@ -16,7 +16,9 @@ import { CameraStreamManager } from './camera-stream-manager.js';
 import type { CameraStream } from './camera-stream.js';
 import { cameraBackend } from './index.js';
 import { jpegSize } from './jpeg-size.js';
+import { PerspectiveMonitor } from './perspective-monitor.js';
 import { PerspectiveTransformer } from './perspective-transformer.js';
+import { checkPerspectiveValidity } from './perspective-validity.js';
 import type { CameraBackend, CameraDevice } from './types.js';
 import { validateQuad } from './vision-geometry.js';
 
@@ -26,15 +28,32 @@ export class CameraSession implements CalibrationVision {
   private correction?: CameraCorrection;
   private writeChain = Promise.resolve();
   private readonly transformer = new PerspectiveTransformer();
+  private readonly perspective = new PerspectiveMonitor({
+    file: () => `${this.correctionFile}.validity.json`,
+    key: () => this.fingerprint(0, 0),
+    correction: () => this.getCorrection(),
+    frame: async () => {
+      if (this.stream.getInfo().state !== 'running')
+        throw new RobotArmError('VISION_UNAVAILABLE', 'Camera is not running');
+      return this.stream.getFrame({ timeoutMs: 2_000 });
+    },
+  });
   constructor(
     readonly camera: CameraDevice,
     readonly stream: CameraStream,
     private readonly directory: string,
+    private readonly screenId?: string,
   ) {}
   private get correctionFile() {
     return path.join(
       this.directory,
-      `${createHash('sha256').update(this.camera.id).digest('hex')}.json`,
+      `${createHash('sha256')
+        .update(
+          this.screenId
+            ? JSON.stringify([this.camera.id, this.screenId])
+            : this.camera.id,
+        )
+        .digest('hex')}.json`,
     );
   }
   async load(): Promise<void> {
@@ -50,6 +69,17 @@ export class CameraSession implements CalibrationVision {
       throw new Error('Stored camera identity does not match');
     this.validate(data.correction);
     this.correction = data.correction;
+    await this.perspective.load();
+  }
+  async forScreen(screenId: string): Promise<CameraSession> {
+    const scoped = new CameraSession(
+      this.camera,
+      this.stream,
+      this.directory,
+      screenId,
+    );
+    await scoped.load();
+    return scoped;
   }
   getCorrection(): CameraCorrection | undefined {
     return this.correction && structuredClone(this.correction);
@@ -87,6 +117,7 @@ export class CameraSession implements CalibrationVision {
       );
       await rename(temporary, this.correctionFile);
       this.correction = correction;
+      await this.perspective.reset();
     });
     this.writeChain = operation.catch(() => undefined);
     return operation;
@@ -118,26 +149,73 @@ export class CameraSession implements CalibrationVision {
         'MAPPING_REQUIRED',
         'Correct the camera image before calibration',
       );
-    const capture = this.stream.getOptions();
-    const fingerprint = createHash('sha256')
-      .update(
-        JSON.stringify([
-          this.camera.id,
-          correction,
-          capture,
-          options.width,
-          options.height,
-        ]),
-      )
-      .digest('hex');
+    const fingerprint = this.fingerprint(options.width, options.height);
     return {
       cameraId: this.camera.id,
       cameraName: this.camera.name,
-      perspectiveProfileKey: this.camera.id,
+      perspectiveProfileKey: this.screenId ?? this.camera.id,
       fingerprint,
       width: options.width,
       height: options.height,
+      validity: this.perspective.summary(),
     };
+  }
+  private fingerprint(width: number, height: number) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify([
+          this.camera.id,
+          this.correction,
+          this.stream.getOptions(),
+          width,
+          height,
+        ]),
+      )
+      .digest('hex');
+  }
+  isBindingCurrent(binding: VisionBinding): boolean {
+    return Boolean(
+      this.correction &&
+        this.perspective.summary()?.state !== 'invalid' &&
+        binding.cameraId === this.camera.id &&
+        binding.fingerprint === this.fingerprint(binding.width, binding.height),
+    );
+  }
+  getPerspectiveValidity() {
+    return this.perspective.summary();
+  }
+  checkPerspective(options?: { signal?: AbortSignal; maxAgeMs?: number }) {
+    return this.perspective.check(options);
+  }
+  assertPerspectiveCurrent() {
+    return this.perspective.assertCurrent();
+  }
+  async checkCorrection(correction: CameraCorrection, jpeg?: Buffer) {
+    this.validate(correction);
+    const image = jpeg ?? (await this.rawFrame());
+    const size = jpegSize(image);
+    if (
+      size.width !== correction.sourceWidth ||
+      size.height !== correction.sourceHeight
+    )
+      throw new RobotArmError(
+        'VISION_BINDING_CHANGED',
+        'Camera image dimensions changed; repeat correction',
+        409,
+      );
+    const result = await checkPerspectiveValidity({
+      jpeg: image,
+      points: correction.points,
+      sourceWidth: size.width,
+      sourceHeight: size.height,
+    });
+    if (result.state === 'invalid')
+      throw new RobotArmError(
+        'CALIBRATION_MISMATCH',
+        'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
+        409,
+      );
+    return result;
   }
   async correctedFrame(
     correction: CameraCorrection,
@@ -162,6 +240,7 @@ export class CameraSession implements CalibrationVision {
     });
   }
   async snapshot(options: CalibrationVisionOptions): Promise<VisionSnapshot> {
+    await this.assertPerspectiveCurrent();
     const before = await this.binding(options);
     const correction = this.getCorrection()!;
     const image = await this.correctedFrame(correction, options);
@@ -185,6 +264,7 @@ export class CameraSession implements CalibrationVision {
 export class CameraSessionManager {
   private readonly streams: CameraStreamManager;
   private readonly sessions = new Map<string, CameraSession>();
+  private readonly screenSessions = new Map<string, CameraSession>();
   private readonly operations = new Map<string, Promise<unknown>>();
   private closing?: Promise<void>;
   private readonly owners = new Map<string, Set<string>>();
@@ -214,7 +294,11 @@ export class CameraSessionManager {
       .catch(() => undefined);
     return pending;
   }
-  acquire(cameraId: string, ownerId: string): Promise<CameraSession> {
+  acquire(
+    cameraId: string,
+    ownerId: string,
+    screenId?: string,
+  ): Promise<CameraSession> {
     return this.serialize(cameraId, async () => {
       if (this.closed) throw new Error('Camera manager is closed');
       const owners = this.owners.get(cameraId) ?? new Set<string>();
@@ -228,6 +312,24 @@ export class CameraSessionManager {
           throw new Error('Camera manager is closed');
         }
         this.sessions.set(cameraId, session);
+      }
+      if (screenId) {
+        const key = JSON.stringify([cameraId, screenId]);
+        let scoped = this.screenSessions.get(key);
+        if (!scoped) {
+          try {
+            scoped = await session.forScreen(screenId);
+            if (this.closed) throw new Error('Camera manager is closed');
+          } catch (error) {
+            if (!owners.size) {
+              await this.streams.delete(session.stream.id);
+              this.sessions.delete(cameraId);
+            }
+            throw error;
+          }
+          this.screenSessions.set(key, scoped);
+        }
+        session = scoped;
       }
       owners.add(ownerId);
       this.owners.set(cameraId, owners);
@@ -260,6 +362,8 @@ export class CameraSessionManager {
       if (session) await this.streams.delete(session.stream.id);
       this.owners.delete(cameraId);
       this.sessions.delete(cameraId);
+      for (const key of this.screenSessions.keys())
+        if (JSON.parse(key)[0] === cameraId) this.screenSessions.delete(key);
     });
   }
   close(): Promise<void> {
@@ -268,6 +372,7 @@ export class CameraSessionManager {
       await Promise.allSettled(this.operations.values());
       await this.streams.close();
       this.sessions.clear();
+      this.screenSessions.clear();
       this.owners.clear();
     })();
     return this.closing;

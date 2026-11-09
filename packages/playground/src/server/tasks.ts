@@ -111,7 +111,7 @@ export class PlaygroundTasks {
   }
   private async createEntry(cameraId: string, name?: string) {
     if (this.closed) throw new Error('Task host is closed');
-    await this.devices.open(cameraId);
+    const source = await this.devices.open(cameraId);
     const entry: TaskEntry = {
       id: randomUUID(),
       cameraId,
@@ -123,7 +123,9 @@ export class PlaygroundTasks {
       if (entry.cleanupError) throw entry.cleanupError;
       const device = new this.Device({
         arm: this.devices.arm,
-        camera: cameraId,
+        camera: source.cameraId,
+        id: cameraId,
+        screenId: source.cameraId === cameraId ? undefined : cameraId,
         cameraManager: this.devices.cameras,
       });
       try {

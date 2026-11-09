@@ -276,3 +276,32 @@ it('safe position requires confirmation and current calibration; record does not
     await f.dispose();
   }
 });
+
+it('rejects drift evidence before Agent screenshots or queued touch actions without changing geometry identity', async () => {
+  const f = await setup();
+  try {
+    const device = f.create();
+    await device.screenshotBase64();
+    Object.assign(f.vision, {
+      validity: {
+        state: 'invalid',
+        reasonCode: 'SHIFTED',
+        confidence: 'high',
+        driftRatio: 0.02,
+        checkedAt: new Date().toISOString(),
+        ageMs: 0,
+        expired: false,
+      },
+    });
+    await expect(device.screenshotBase64()).rejects.toMatchObject({
+      code: 'CALIBRATION_MISMATCH',
+    });
+    await expect(
+      device.inputPrimitives.pointer!.tap!({ x: 500, y: 250 }),
+    ).rejects.toMatchObject({ code: 'CALIBRATION_MISMATCH' });
+    expect(f.adapter.movements).toHaveLength(0);
+    expect(f.vision.fingerprint).toBe('f');
+  } finally {
+    await f.dispose();
+  }
+});

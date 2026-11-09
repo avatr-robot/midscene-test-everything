@@ -307,6 +307,8 @@ export interface AssistedCalibrationSetup {
     AssistedCalibrationInput,
     'robotProfileId' | 'toolProfileId' | 'cameraId' | 'width' | 'height'
   >;
+  teaching?: import('./contracts.js').InstallationTeaching;
+  markerCapture?: { request: string; attempt: number; captureAt: number };
   prepared: boolean;
   phoneConnected: boolean;
   layout?: CalibrationPageLayout;
@@ -341,7 +343,11 @@ export interface WebVerificationEvidence {
 }
 export interface AssistedCalibrationState {
   id: string;
+  cameraBoundaryPosition?: CartesianPose;
+  teachingId?: string;
   stage:
+    | 'positioning-boundary'
+    | 'avoiding-camera'
     | 'ready'
     | 'positioning-safe'
     | 'positioning'
@@ -409,6 +415,7 @@ export interface AssistedCalibrationState {
   result?: CalibrationProfile;
 }
 export interface AutomaticCaptureHost {
+  preflight?(poses: CartesianPose[]): Promise<void>;
   signal: AbortSignal;
   check(): void;
   read(): Promise<CartesianPose>;
@@ -457,6 +464,9 @@ export interface ScreenCornerDetection {
   attempt: ScreenDetectionAttempt;
 }
 export type AssistedCalibrationAction =
+  | 'position-boundary'
+  | 'record-boundary'
+  | 'save-teaching'
   | 'auto-repair'
   | 'reprobe'
   | 'apply-reprobe'
@@ -489,4 +499,107 @@ export interface AssistedCalibrationRecording {
   safePosition?: CartesianPose;
   /** Previous failed targets are diagnostics only, never acceptance evidence. */
   failedAttempts?: WebVerificationAttempt[];
+}
+
+export interface CalibrationBatchState {
+  id: string;
+  revision: number;
+  status:
+    | 'running'
+    | 'waiting'
+    | 'stopping'
+    | 'stopped'
+    | 'completed'
+    | 'failed';
+  cameraId?: string;
+  robotProfileId?: string;
+  toolProfileId?: string;
+  acceptance?: 'manual' | 'automatic';
+  error?: string;
+  planVersion?: string;
+  contextVersion?: string;
+  transfer?: CalibrationBatchPlan['transfer'];
+  currentIndex: number;
+  items: Array<{
+    deviceId: string;
+    screenId: string;
+    screenProfileId?: string;
+    name: string;
+    runIds: string[];
+    progress?: {
+      phase: string;
+      message?: string;
+      index: number;
+      total: number;
+    };
+    note?: string;
+    status:
+      | 'pending'
+      | 'preparing'
+      | 'transferring'
+      | 'awaiting-mapping'
+      | 'awaiting-setup'
+      | 'awaiting-phone'
+      | 'awaiting-placement'
+      | 'exploring'
+      | 'awaiting-acceptance'
+      | 'completed'
+      | 'failed'
+      | 'skipped'
+      | 'stopped';
+    attempts: number;
+    error?: string;
+    calibrationProfileId?: string;
+  }>;
+}
+
+export interface CalibrationBatchPlan {
+  cameraId: string;
+  version: string;
+  screens: {
+    screenId: string;
+    name: string;
+    calibrated: boolean;
+    startsHere: boolean;
+    expectedCenterMm?: WebPoint;
+    expectedSource?: 'calibration' | 'estimate';
+  }[];
+  transfer?: {
+    travelTipZMm: number;
+    highestObstacleZMm: number;
+    clearanceMm: number;
+    corridor: { minX: number; maxX: number; minY: number; maxY: number };
+    waypoints: WebPoint[];
+    corridorConfirmed: true;
+  };
+}
+export interface WorkstationScreenState {
+  cameraId: string;
+  screenId: string;
+  name: string;
+  screenProfileId?: string;
+  calibrationProfileId?: string;
+  expectedCenterMm?: WebPoint;
+  expectedSource?: 'calibration' | 'estimate';
+  selected: boolean;
+  ready: boolean;
+  status:
+    | 'unconfigured'
+    | 'unavailable'
+    | 'mapping-required'
+    | 'calibration-required'
+    | 'acceptance-required'
+    | 'ready';
+}
+export interface CalibrationBatchCommand {
+  revision: number;
+  action:
+    | 'continue'
+    | 'retry'
+    | 'skip'
+    | 'stop'
+    | 'accept'
+    | 'record-safe-position'
+    | 'enter-drag'
+    | 'exit-drag';
 }

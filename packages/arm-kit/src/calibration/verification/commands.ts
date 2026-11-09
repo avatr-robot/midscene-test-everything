@@ -23,6 +23,7 @@ import {
 } from '../../screen-interaction/motion-policy.js';
 import { phonePointMm, screenPoseMm } from '../geometry.js';
 import { runBoundaryVerification } from './boundary.js';
+import { avoidCamera } from './camera-avoidance.js';
 import { returnToObservation } from './safe-position.js';
 import { resetCalibrationVerification } from './session-state.js';
 
@@ -72,6 +73,14 @@ export async function applyCalibrationCommand(
   command: CalibrationCommand,
   ctx: ApplicationContext,
 ): Promise<void> {
+  if (s.auto?.minimumTravelTipZMm !== undefined)
+    ctx = {
+      ...ctx,
+      minimumTravelTipZMm: Math.max(
+        ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+        s.auto.minimumTravelTipZMm,
+      ),
+    };
   switch (command.type) {
     case 'verify-automatic-boundary': {
       if (!s.auto || !s.candidate || command.accepted !== true)
@@ -96,9 +105,10 @@ export async function applyCalibrationCommand(
         returnPose: s.auto.startPose,
         fast,
       });
-      // No camera-avoidance estimate in this host: use dev's manual Safe Position handoff.
-      s.stage = 'observation';
-      s.auto.observationRecorded = false;
+      if (!(await avoidCamera(this, s, ctx))) {
+        s.stage = 'observation';
+        s.auto.observationRecorded = false;
+      }
       break;
     }
     case 'record-observation': {
@@ -117,6 +127,14 @@ export async function applyCalibrationCommand(
       assertPose(pose);
       this.target(pose, ctx);
       const contact = contactPoint(pose, ctx.tool.offsetMm);
+      if (
+        contact.z <
+        (ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY) - 1e-6
+      )
+        throw new RobotArmError(
+          'UNSAFE_OBSERVATION',
+          'Record the safe position at or above the taught reference height',
+        );
       const height =
         (dot(s.candidate.plane.normal, contact) - s.candidate.plane.offset) /
         dot(s.candidate.plane.normal, s.candidate.inward);

@@ -11,6 +11,8 @@ export interface CalibrationVisionOptions {
 }
 /** In-process seam shared by SDK calibration and the Playground host. */
 export interface CalibrationVision {
+  /** Optional for injected providers; built-in cameras verify current outlines. */
+  assertPerspectiveCurrent?(): Promise<void>;
   binding(options: CalibrationVisionOptions): Promise<VisionBinding>;
   snapshot(options: CalibrationVisionOptions): Promise<VisionSnapshot>;
   detectMarkers(

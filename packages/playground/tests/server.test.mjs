@@ -83,6 +83,26 @@ test('code-configured arm connects, reports its own settings, retries and releas
     assert.equal((await updated.json()).values.linearSpeed, 42);
     assert.equal(updateMotionSettings.mock.calls.length, 1);
     assert.equal(arm.adapter.name, 'Independent adapter fake');
+    // The camera stage checks saved outlines before a wizard/session exists.
+    const outlineHost = rstest
+      .spyOn(PlaygroundDevices.prototype, 'ensureHost')
+      .mockResolvedValue({
+        async handle(_req, res) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ validity: { state: 'invalid' } }));
+          return true;
+        },
+      });
+    try {
+      const check = await fetch(
+        `${server.url}/api/devices/cam/calibration/camera/validity`,
+      );
+      assert.equal(check.status, 200);
+      assert.equal((await check.json()).validity.state, 'invalid');
+      assert.equal(outlineHost.mock.calls[0][0], 'cam');
+    } finally {
+      outlineHost.mockRestore();
+    }
     assert.equal(
       (await fetch(`${server.url}/api/setup/network-ports`)).status,
       404,

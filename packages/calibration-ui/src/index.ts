@@ -17,3 +17,15 @@ export {
 export { CalibrationWorkspace } from './CalibrationWorkspace';
 
 export { SetupIllustration } from './components/robot-arm/SetupIllustration';
+
+export {
+  useBrowserVoice,
+  useVoiceSettings,
+  robotVoice,
+  robotCue,
+} from './voice/browser';
+export { VoiceSettings } from './voice/VoiceSettings';
+
+export { GuidedCalibrationWorkspace } from './GuidedCalibrationWorkspace';
+export { PerspectiveObservationCard } from './components/PerspectiveObservationCard';
+export { usePerspectiveValidity } from './hooks/usePerspectiveValidity';

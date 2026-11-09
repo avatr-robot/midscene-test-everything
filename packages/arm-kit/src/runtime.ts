@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { MotionTarget } from './application/context.js';
+import { assertCameraBoundary } from './application/teaching-constraints.js';
 import { screenPoseMm } from './calibration/geometry.js';
 import { contactDepthMm, surfaceClearanceMm } from './calibration/surface.js';
 import { applyCalibrationCommand } from './calibration/verification/commands.js';
@@ -10,6 +11,7 @@ import {
   sameCalibrationGeometry,
   verificationContextKey,
 } from './calibration/verification/session-state.js';
+import { atTravelHeight } from './calibration/verification/travel-height.js';
 import {
   type ActionRequest,
   type ActionResult,
@@ -48,8 +50,10 @@ import {
   distance,
   dot,
   flangePose,
+  rotate,
   scale,
   sub,
+  unit,
 } from './domain.js';
 import type { JogTarget, MotionRequest } from './kernel/contracts.js';
 import type {
@@ -120,9 +124,23 @@ const JOG_RELEASE_COOLDOWN_MS = 250;
 const JOG_RETRY_MS = 400;
 const JOG_STOP_ATTEMPTS = 3;
 export class RobotArmRuntime extends RobotKernel {
+  private stopGeneration = 0;
+  get stopRevision() {
+    return this.stopGeneration;
+  }
+  assertStopRevision(revision: number) {
+    if (revision !== this.stopGeneration)
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'A safety stop interrupted this operation',
+        409,
+      );
+  }
   /** Uncalibrated probing still owns the normal motion lease and driver checks. */
   async collectAutomaticPoints<T>(
-    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'> & {
+      cameraId?: string;
+    },
     work: (
       host: import('./assisted-contracts.js').AutomaticCaptureHost,
     ) => Promise<T>,
@@ -168,7 +186,30 @@ export class RobotArmRuntime extends RobotKernel {
     } else this.acquire('calibration');
     const operationId = this.operation!.requestId;
     const signal = this.abort!.signal;
+    const initialTeaching =
+      input.cameraId &&
+      this.profileStore.installationTeaching({
+        ...input,
+        cameraId: input.cameraId,
+      });
     const check = () => {
+      if (
+        input.cameraId &&
+        (initialTeaching ||
+          this.profileStore.installationTeaching({
+            ...input,
+            cameraId: input.cameraId,
+          })) &&
+        this.profileStore.installationTeaching({
+          ...input,
+          cameraId: input.cameraId,
+        })?.id !== (initialTeaching || undefined)?.id
+      )
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'Installation teaching changed during collection',
+          409,
+        );
       signal.throwIfAborted();
       this.check();
       if (
@@ -195,6 +236,25 @@ export class RobotArmRuntime extends RobotKernel {
         signal,
         check,
         stop: () => this.adapter.stop(),
+        preflight: async (poses) => {
+          for (const pose of poses) {
+            check();
+            assertPose(pose);
+            assertOrientation(pose, this.capabilities);
+            if (initialTeaching)
+              assertCameraBoundary(pose, initialTeaching, { tool });
+            await this.adapter.preflightCartesian(
+              'linear',
+              pose,
+              {
+                speed: { kind: 'ratio', value: 0.01 },
+                acceleration: { kind: 'ratio', value: 0.01 },
+              },
+              robot.workspace,
+            );
+          }
+          check();
+        },
         read: async () => {
           check();
           await this.ready(tool);
@@ -212,6 +272,13 @@ export class RobotArmRuntime extends RobotKernel {
           checkSubmission();
           await this.ready(tool);
           assertPose(pose);
+          const teaching =
+            input.cameraId &&
+            this.profileStore.installationTeaching({
+              ...input,
+              cameraId: input.cameraId,
+            });
+          if (teaching) assertCameraBoundary(pose, teaching, { tool });
           assertOrientation(pose, this.capabilities);
           const options = {
             speed: probeOptions?.speed ?? {
@@ -291,7 +358,9 @@ export class RobotArmRuntime extends RobotKernel {
 
   /** Passive hand-guided sampling owns the same lease as every motion task. */
   async collectWebPoints<T>(
-    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'> & {
+      cameraId?: string;
+    },
     work: (
       host: import('./assisted-contracts.js').AssistedCaptureHost,
     ) => Promise<T>,
@@ -428,7 +497,7 @@ export class RobotArmRuntime extends RobotKernel {
     id: string,
     evidence:
       | import('./assisted-contracts.js').WebVerificationEvidence
-      | { protocol: 'auto-boundary-v1' },
+      | { protocol: 'auto-boundary-v1'; automatic?: boolean },
   ): Promise<CalibrationProfile> {
     if (
       this.commandBusy ||
@@ -471,7 +540,11 @@ export class RobotArmRuntime extends RobotKernel {
         c.verification = {
           protocol: 'auto-boundary-v1',
           boundary: { ...s.boundary },
-          auto: { ...structuredClone(s.auto.evidence), humanAccepted: true },
+          auto: {
+            ...structuredClone(s.auto.evidence),
+            humanAccepted: evidence.automatic !== true,
+            automaticAccepted: evidence.automatic === true,
+          },
           hoverMotion: true,
           hoverHuman: false,
           confirmedAt: new Date().toISOString(),
@@ -802,13 +875,16 @@ export class RobotArmRuntime extends RobotKernel {
       readinessPolicy: this.adapter.adapter.readinessPolicy,
     };
   }
-  async state(toolProfileId?: string): Promise<RuntimeState> {
+  async state(
+    toolProfileId?: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<RuntimeState> {
     // A failed read is a connection problem, not a physical interruption. The
     // recovery gate is latched by actions that actually moved the arm, by Stop
     // and Pause confirmation, and by faults — never by an unreachable
     // controller, otherwise a dropped channel would demand recovery that itself
     // needs the channel to clear.
-    const state = await this.adapter.getState(false);
+    const state = await this.adapter.getState(options.fresh === true);
     if (state.faults.length) this.recoveryRequired = true;
     if (state.connected) this.connectionEstablished = true;
     this.recordPayloadEvidence();
@@ -817,6 +893,7 @@ export class RobotArmRuntime extends RobotKernel {
       operation: this.operation ? { ...this.operation } : undefined,
       recoveryRequired: this.recoveryRequired,
       softwarePaused: this.softwarePaused,
+      stopRevision: this.stopGeneration,
       appliedPayload: this.adapter.appliedPayload(),
       payloadApplication: this.payloadState(toolProfileId, state),
       aiRun: this.aiTaskRequestId
@@ -847,7 +924,28 @@ export class RobotArmRuntime extends RobotKernel {
     // Workstation sampling and screen actions do not use stored user bounds.
     // Keep the Profile field for callers that explicitly request bounded SDK motion.
     const { workspace: _workspace, ...installation } = robot;
-    return { robot: installation, tool, screen };
+    const data = this.profileStore.list();
+    const cameraId =
+      data.devices?.find((d) => d.screenProfileId === screen.id)?.cameraId ??
+      (data.workstation?.screenProfileId === screen.id
+        ? data.workstation.cameraId
+        : undefined);
+    const teaching =
+      cameraId &&
+      this.profileStore.installationTeaching({
+        robotProfileId: robot.id,
+        toolProfileId: tool.id,
+        cameraId,
+      });
+    return {
+      robot: installation,
+      tool,
+      screen,
+      installationTeaching: teaching || undefined,
+      minimumTravelTipZMm: teaching
+        ? contactPoint(teaching.referencePose, tool.offsetMm).z
+        : undefined,
+    };
   }
   private async ready(tool?: ToolProfile): Promise<void> {
     if (this.softwarePaused)
@@ -983,6 +1081,8 @@ export class RobotArmRuntime extends RobotKernel {
     return this.exclusive(work, true);
   }
   private target(p: CartesianPose, _ctx: Context): void {
+    if (_ctx.installationTeaching)
+      assertCameraBoundary(p, _ctx.installationTeaching, _ctx);
     assertOrientation(p, this.adapter.capabilities);
     if (this.adapter.capabilities.workspace)
       assertTarget(p, this.adapter.capabilities.workspace);
@@ -1602,6 +1702,12 @@ export class RobotArmRuntime extends RobotKernel {
         const mapping = ctx.screen.phoneMapping;
         const vision =
           deviceVision ?? this.profileStore.list().workstation?.vision;
+        if (vision?.validity?.state === 'invalid')
+          throw new RobotArmError(
+            'CALIBRATION_MISMATCH',
+            'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
+            409,
+          );
         if (
           !mapping ||
           !vision ||
@@ -1835,8 +1941,9 @@ export class RobotArmRuntime extends RobotKernel {
       actual.orientation,
       ctx.tool.offsetMm,
     );
-    this.target(pose, ctx);
-    return pose;
+    const travel = atTravelHeight(pose, ctx);
+    this.target(travel, ctx);
+    return travel;
   }
   private async recoverLift(
     c: CalibrationProfile,
@@ -1910,6 +2017,7 @@ export class RobotArmRuntime extends RobotKernel {
     }
   }
   async stop(): Promise<void> {
+    this.stopGeneration++;
     // A jog is not part of the motion queue, so Stop must release it explicitly.
     if (this.jogTimer) await this.stopJog().catch(() => undefined);
     const eventId = this.operation?.requestId ?? randomUUID();
@@ -1997,6 +2105,7 @@ export class RobotArmRuntime extends RobotKernel {
    * fault; only an unconfirmable stop fails here.
    */
   async emergencyStop(): Promise<void> {
+    this.stopGeneration++;
     if (this.jogTimer) await this.stopJog().catch(() => undefined);
     const send = this.adapter.emergencyStop?.bind(this.adapter);
     if (!send)
@@ -2031,6 +2140,7 @@ export class RobotArmRuntime extends RobotKernel {
    * running, and it leaves the runtime requiring an explicit recovery check.
    */
   async pause(): Promise<void> {
+    this.stopGeneration++;
     const send = this.adapter.pause?.bind(this.adapter);
     if (!send)
       throw new RobotArmError(
@@ -2481,13 +2591,287 @@ export class RobotArmRuntime extends RobotKernel {
       lease: leaseId ?? null,
     });
   }
-  async enterDragMode(): Promise<void> {
+  private teachingContext(input: {
+    robotProfileId: string;
+    toolProfileId: string;
+    cameraId: string;
+    screenProfileId: string;
+  }) {
+    const robot = this.profileStore.getRobot(input.robotProfileId);
+    const tool = this.profileStore.getTool(input.toolProfileId);
+    if (
+      robot.adapterId !== this.id ||
+      robot.connectionIdentity !== this.connectionIdentity
+    )
+      throw new RobotArmError(
+        'PROFILE_MISMATCH',
+        'Select the current robot installation',
+        409,
+      );
+    return JSON.stringify([
+      'camera-boundary-v2',
+      robot.id,
+      tool.id,
+      input.cameraId,
+      input.screenProfileId,
+      robot.geometryRevision,
+      tool.geometryRevision,
+    ]);
+  }
+  installationTeachingDraft(input: {
+    robotProfileId: string;
+    toolProfileId: string;
+    cameraId: string;
+    screenProfileId: string;
+  }) {
+    return (
+      this.profileStore
+        .list()
+        .installationTeachingDrafts?.find(
+          (t) => t.context === this.teachingContext(input),
+        ) ?? null
+    );
+  }
+  private teachingCaptureBusy = false;
+  async captureInstallationPoint(
+    input: {
+      robotProfileId: string;
+      toolProfileId: string;
+      cameraId: string;
+      screenProfileId: string;
+    },
+    point: import('./contracts.js').InstallationTeachingPoint,
+  ) {
+    if (!['reference', 'cameraBoundary'].includes(point))
+      throw new RobotArmError(
+        'INVALID_ARGUMENT',
+        'Unknown installation position',
+      );
+    if (this.teachingCaptureBusy)
+      throw new RobotArmError(
+        'BUSY',
+        'A teaching capture is already running',
+        409,
+      );
+    const capture = async () => {
+      const abort = this.abort;
+      const check = () => {
+        if (abort !== this.abort || abort?.signal.aborted)
+          throw new RobotArmError(
+            'ACTION_STOPPED',
+            'Teaching capture interrupted',
+            409,
+          );
+        this.check();
+      };
+      check();
+      const state = await this.state(input.toolProfileId);
+      const pose = state.state.pose;
+      if (
+        !pose ||
+        !state.state.connected ||
+        !state.state.enabled ||
+        state.state.moving ||
+        state.state.faults.length ||
+        state.state.status?.quality.stale
+      )
+        throw new RobotArmError(
+          'NOT_READY',
+          'Enable the robot and hold it still before recording',
+          409,
+        );
+      const tool = this.profileStore.getTool(input.toolProfileId);
+      this.assertAppliedPayload(tool);
+      const measured = await this.motionExecutor.stable(
+        pose,
+        10000,
+        check,
+        (ms) => this.hold(ms),
+      );
+      const latest = await this.adapter.getState();
+      check();
+      if (
+        !latest.connected ||
+        !latest.enabled ||
+        latest.moving ||
+        latest.faults.length ||
+        latest.status?.quality.stale
+      )
+        throw new RobotArmError(
+          'NOT_READY',
+          'Enable the robot and hold it still before recording',
+          409,
+        );
+      const context = this.teachingContext(input);
+      const previous = this.installationTeachingDraft(input);
+      const draft: import('./contracts.js').InstallationTeachingDraft =
+        previous ?? { ...input, id: randomUUID(), context, poses: {} };
+      if (point === 'reference') draft.poses = {};
+      else if (!draft.poses.reference)
+        throw new RobotArmError(
+          'NOT_READY',
+          'Record the reference position first',
+          409,
+        );
+      draft.id = randomUUID();
+      draft.poses[point] = structuredClone(measured);
+      await this.profileStore.saveInstallationTeachingDraft(draft, check);
+      return draft;
+    };
+    this.teachingCaptureBusy = true;
+    try {
+      return this.leased &&
+        this.operation?.kind === 'drag' &&
+        this.operation.status === 'running'
+        ? await capture()
+        : await this.configure(capture);
+    } finally {
+      this.teachingCaptureBusy = false;
+    }
+  }
+  async teachInstallation(input: {
+    binding: {
+      robotProfileId: string;
+      toolProfileId: string;
+      cameraId: string;
+      screenProfileId: string;
+    };
+    draftId: string;
+    corridorConfirmed: boolean;
+  }) {
+    return this.configure(async () => {
+      const { binding } = input;
+      if (input.corridorConfirmed !== true)
+        throw new RobotArmError(
+          'CONFIRMATION_REQUIRED',
+          'Confirm the clear approach corridor before recording installation',
+          409,
+        );
+      const state = await this.state(binding.toolProfileId);
+      if (
+        !state.state.connected ||
+        !state.state.enabled ||
+        state.state.moving ||
+        state.state.dragMode ||
+        state.state.faults.length ||
+        state.state.status?.quality.stale
+      )
+        throw new RobotArmError(
+          'NOT_READY',
+          'Stop teaching motion and confirm the clear approach corridor before recording installation',
+          409,
+        );
+      const draft = this.installationTeachingDraft(binding);
+      if (!draft || draft.id !== input.draftId)
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Record installation positions for the current equipment',
+          409,
+        );
+      const { reference, cameraBoundary } = draft.poses;
+      if (!reference || !cameraBoundary)
+        throw new RobotArmError(
+          'NOT_READY',
+          'Record the reference and camera-side boundary',
+          409,
+        );
+      const tool = this.profileStore.getTool(binding.toolProfileId);
+      this.assertAppliedPayload(tool);
+      const a = contactPoint(reference, tool.offsetMm);
+      const b = contactPoint(cameraBoundary, tool.offsetMm);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const separation = Math.hypot(dx, dy);
+      if (separation < 20)
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Record the camera-side boundary at least 20 mm from the reference',
+        );
+      if (
+        distance(
+          unit(rotate(reference.orientation, tool.contactDirection)),
+          unit(rotate(cameraBoundary.orientation, tool.contactDirection)),
+        ) > 0.005
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Keep the stylus contact direction unchanged; rotation around its axis is allowed',
+        );
+      const teaching: import('./contracts.js').InstallationTeaching = {
+        ...binding,
+        id: randomUUID(),
+        recordedAt: new Date().toISOString(),
+        referenceDeviceId: binding.screenProfileId,
+        robotGeometryRevision: this.profileStore.getRobot(
+          binding.robotProfileId,
+        ).geometryRevision,
+        toolGeometryRevision: tool.geometryRevision,
+        referencePose: reference,
+        poses: { reference, cameraBoundary },
+        cameraBoundary: {
+          point: { x: b.x, y: b.y },
+          normal: { x: dx / separation, y: dy / separation },
+        },
+        corridorConfirmed: true,
+      };
+      await this.profileStore.saveInstallationTeaching(teaching);
+      return teaching;
+    });
+  }
+  async positionInstallationPoint(
+    input: { robotProfileId: string; toolProfileId: string; cameraId: string },
+    point: import('./contracts.js').InstallationTeachingPoint,
+  ) {
+    const teaching = this.profileStore.installationTeaching(input);
+    if (!teaching)
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'Record installation teaching for the current robot, tool and camera',
+        409,
+      );
+    const target =
+      point === 'reference'
+        ? teaching.referencePose
+        : teaching.poses.cameraBoundary;
+    if (!target)
+      throw new RobotArmError(
+        'INVALID_ARGUMENT',
+        'Unknown installation position',
+      );
+    const tool = this.profileStore.getTool(input.toolProfileId);
+    return this.collectAutomaticPoints(input, async (host) => {
+      const current = await host.read();
+      const from = contactPoint(current, tool.offsetMm);
+      const to = contactPoint(target, tool.offsetMm);
+      const z = Math.max(
+        from.z,
+        to.z,
+        contactPoint(teaching.referencePose, tool.offsetMm).z,
+      );
+      const lift = flangePose(
+        { ...from, z },
+        current.orientation,
+        tool.offsetMm,
+      );
+      const above = flangePose({ ...to, z }, target.orientation, tool.offsetMm);
+      await host.preflight!([lift, above, target]);
+      for (const pose of [lift, above, target]) await host.move(pose);
+    });
+  }
+  async enterDragMode(
+    selection?: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+  ): Promise<void> {
     if (this.aiTaskRequestId)
       throw new RobotArmError('BUSY', 'An AI task owns the workstation', 409);
     this.acquire('drag');
     const eventId = this.operation!.requestId;
     try {
-      await this.drag(true);
+      await this.drag(
+        true,
+        selection
+          ? this.profileStore.getTool(selection.toolProfileId)
+          : undefined,
+      );
       this.check();
       this.audit('drag', eventId, 'completed', { control: 'drag-enter' });
     } catch (e) {
@@ -2499,7 +2883,9 @@ export class RobotArmRuntime extends RobotKernel {
   async exitDragMode(): Promise<void> {
     if (this.recoveryRequired && !this.leased) {
       try {
-        await this.drag(false);
+        // Stop invalidated the Drag lease. The measured exit needs a new,
+        // recovery-only control lease so another Stop can still interrupt it.
+        await this.exclusive(() => this.drag(false), true);
         this.audit('drag', randomUUID(), 'completed', {
           control: 'drag-exit',
           standalone: true,

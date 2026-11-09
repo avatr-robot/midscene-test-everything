@@ -1,5 +1,8 @@
 import { armUiTheme } from '@midscene/arm-kit-shared';
-import type { CameraCorrection } from '@midscene/arm-kit-shared/contracts';
+import type {
+  CameraCorrection,
+  PerspectiveValiditySummary,
+} from '@midscene/arm-kit-shared/contracts';
 import {
   Alert,
   Button,
@@ -25,8 +28,10 @@ import {
 import { CameraCornerEditor } from './CameraCornerEditor';
 import { CorrectedPreview } from './CorrectedPreview';
 import { createCalibrationClient } from './client';
+import { PerspectiveObservationCard } from './components/PerspectiveObservationCard';
 import { WebCameraMappingStep } from './components/robot-arm/WebCameraMappingStep';
 import { useAssistedCalibration } from './hooks/useAssistedCalibration';
+import { usePerspectiveValidity } from './hooks/usePerspectiveValidity';
 import { CalibrationLanguageProvider, t, useCalibrationLanguage } from './i18n';
 import { calibrationPowerControl } from './power-state';
 import type {
@@ -37,9 +42,11 @@ import type {
 } from './robot-arm-api';
 import type { RuntimeState } from './robot-arm-api';
 import type { CameraProfile } from './types';
+import { VoiceSettings } from './voice/VoiceSettings';
+import { useBrowserVoice } from './voice/browser';
 import './styles.less';
 import './standalone/page.less';
-interface Configuration {
+export interface Configuration {
   deviceId: string;
   capabilities: EffectiveCapabilities;
   input?: AssistedCalibrationInput;
@@ -48,6 +55,7 @@ interface Configuration {
   correction?: CameraCorrection;
   correctionOutput?: { width: number; height: number };
   correctionKey?: string;
+  perspectiveValidity?: PerspectiveValiditySummary;
   result?: CalibrationProfile;
   ready: boolean;
   armState?: RuntimeState;
@@ -87,6 +95,7 @@ export function CalibrationWorkspace({
   baseUrl?: string;
   onComplete?: () => void;
 }) {
+  useBrowserVoice(!embedded);
   const base = baseUrl.replace(/\/+$/, '');
   const request = useCallback(
     <T,>(path: string, body?: unknown) => requestAt<T>(base, path, body),
@@ -99,6 +108,11 @@ export function CalibrationWorkspace({
     [base],
   );
   const [config, setConfig] = useState<Configuration>();
+  const perspective = usePerspectiveValidity(
+    base,
+    Boolean(config?.correction),
+    config?.correctionKey,
+  );
   const [error, setError] = useState<string>();
   const [pollError, setPollError] = useState<string>();
   const [reviewCamera, setReviewCamera] = useState(false);
@@ -181,6 +195,7 @@ export function CalibrationWorkspace({
                 </Typography.Title>
               </div>
               <Space>
+                {!embedded && <VoiceSettings compact />}
                 {cancelAction}
                 {!embedded && (
                   <Button
@@ -230,6 +245,11 @@ export function CalibrationWorkspace({
           </header>
           <div className="calibration-shell-body">
             <div className="calibration-shell-content">
+              <PerspectiveObservationCard
+                observation={perspective}
+                screenName={config?.camera.name}
+                onRecalibrate={() => setReviewCamera(true)}
+              />
               {(error || pollError) && (
                 <Alert
                   type="error"
@@ -360,6 +380,9 @@ export function CalibrationWorkspace({
                     }
                     client={client}
                     {...config}
+                    ready={
+                      config.ready && perspective.summary?.state !== 'invalid'
+                    }
                     preview={
                       <img
                         className="calibration-preview"
@@ -396,7 +419,7 @@ export function CalibrationWorkspace({
   );
 }
 
-function CalibrationPowerButton({
+export function CalibrationPowerButton({
   config,
   apply,
 }: {

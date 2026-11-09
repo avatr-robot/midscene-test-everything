@@ -201,3 +201,30 @@ test('preview finds the screen with two obscured markers and four good frames, a
     expect(i).toBe(8);
   }
 }, 20000);
+
+test('maps each of two simultaneously visible screens using its own marker IDs', async () => {
+  const second = layout.markers.map((m) => ({ ...m, code: m.code + 10 }));
+  const screen = (markers: typeof layout.markers, x: number) =>
+    `<g transform="translate(${x},50)"><rect width="400" height="800" fill="white"/>${markers.map((m) => markerSvg(m.code).replace('<svg ', `<svg x="${m.x - m.size / 2}" y="${m.y - m.size / 2}" width="${m.size}" height="${m.size}" `)).join('')}</g>`;
+  const image = await sharp(
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="950" height="900"><rect width="100%" height="100%" fill="#888"/>${screen(layout.markers, 50)}${screen(second, 500)}</svg>`,
+    ),
+  )
+    .jpeg()
+    .toBuffer();
+  const left = await detectCalibrationMarkers(image, layout.markers);
+  const right = await detectCalibrationMarkers(image, second);
+  const center = (m: number[]) => ({
+    x: (m[0] * 200 + m[1] * 400 + m[2]) / (m[6] * 200 + m[7] * 400 + m[8]),
+    y: (m[3] * 200 + m[4] * 400 + m[5]) / (m[6] * 200 + m[7] * 400 + m[8]),
+  });
+  expect(Math.abs(center(left.webToImage).x - 250)).toBeLessThan(1);
+  expect(Math.abs(center(right.webToImage).x - 700)).toBeLessThan(1);
+  expect(center(right.webToImage).x - center(left.webToImage).x).toBeCloseTo(
+    450,
+    2,
+  );
+  expect(left.accuracy.validation.maxErrorCssPx).toBeLessThanOrEqual(3);
+  expect(right.accuracy.validation.maxErrorCssPx).toBeLessThanOrEqual(3);
+});

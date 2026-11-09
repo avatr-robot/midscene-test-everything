@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { networkInterfaces } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -13,6 +12,10 @@ import {
 } from '@midscene/arm-kit';
 import type { RobotArmAdapter } from '@midscene/arm-kit';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
+import {
+  discoverWifiInterfaces,
+  phoneAddresses,
+} from '@midscene/arm-kit/internal/network/phone-addresses';
 import type { ProfileStore } from '@midscene/arm-kit/internal/runtime/profile-store';
 import { RobotActionAuditStore } from '@midscene/arm-kit/internal/runtime/robot-action-audit-store';
 import {
@@ -28,6 +31,7 @@ import { CodeSetup } from './code-setup.js';
 import { PlaygroundDevices } from './devices.js';
 import { MarkerPreview } from './marker-preview.js';
 import { PhonePairings } from './phone-pairings.js';
+import { screenConnectPage } from './screen-connect-page.js';
 import type {
   PlaygroundSession,
   SessionContext,
@@ -118,17 +122,14 @@ export async function startPlaygroundHost({
   developmentOrigins = [],
 }: HostOptions) {
   const markerPreviews = new Map<string, MarkerPreview>();
+  const wifiInterfaces = await discoverWifiInterfaces();
   const phoneLinks = (token: string) =>
-    Object.values(networkInterfaces())
-      .flat()
-      .filter(
-        (entry): entry is NonNullable<typeof entry> =>
-          !!entry && entry.family === 'IPv4' && !entry.internal,
-      )
-      .map((entry) => ({
-        name: entry.address,
-        url: `http://${entry.address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
-      }));
+    phoneAddresses({ wifiInterfaces, controllerHost: host }).map(
+      ({ address, name }) => ({
+        name,
+        url: `http://${address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
+      }),
+    );
   const cameraManager = new CameraSessionManager();
   let adapterName: string | undefined;
   let devices: PlaygroundDevices | undefined;
@@ -263,8 +264,10 @@ export async function startPlaygroundHost({
     getCalibrationSelection(cameraId) {
       if (!cameraId) return;
       const session = devices?.entries.get(cameraId)?.calibration;
-      if (session?.phase === 'running' && !session.abort.signal.aborted)
-        return session.host?.service.setup().selection;
+      if (session?.phase === 'running' && !session.abort.signal.aborted) {
+        const selection = session.host?.service.setup().selection;
+        return selection && { ...selection, cameraId };
+      }
     },
     getArm: () => arm,
     getControls: () => armControls,
@@ -282,6 +285,41 @@ export async function startPlaygroundHost({
     if (!url) return send(400, { error: 'Invalid URL' });
     if (url.pathname.startsWith('/phone-calibration')) {
       try {
+        if (
+          url.pathname === '/phone-calibration/connect' &&
+          req.method === 'GET'
+        ) {
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+          });
+          return res.end(screenConnectPage());
+        }
+        if (
+          url.pathname === '/phone-calibration/register' &&
+          req.method === 'POST'
+        ) {
+          if (
+            req.headers.origin &&
+            ![
+              `http://${req.headers.host}`,
+              `https://${req.headers.host}`,
+            ].includes(req.headers.origin)
+          )
+            return send(403, { error: 'Origin not allowed' });
+          if (!devices) return send(409, { error: 'Connect the arm first' });
+          return send(
+            200,
+            await devices.markerCalibration.register(
+              await readBody(req, 16384),
+            ),
+          );
+        }
+        const page = await devices?.markerCalibration.phoneHost(
+          url.searchParams.get('token'),
+        );
+        if (page) return page.handlePhone(req, res);
         const preview = markerPreviews.get(url.searchParams.get('token') ?? '');
         if (
           preview &&
@@ -305,10 +343,18 @@ export async function startPlaygroundHost({
             error: 'Phone session is not ready. Reconnecting…',
           });
         return calibration.handlePhone(req, res);
-      } catch {
-        return send(503, {
-          error: 'Phone session is not ready. Reconnecting…',
-        });
+      } catch (error) {
+        return send(
+          error instanceof Error && 'status' in error
+            ? Number(error.status)
+            : 503,
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : 'Phone session is not ready. Reconnecting…',
+          },
+        );
       }
     }
     if (
@@ -532,12 +578,100 @@ export async function startPlaygroundHost({
         }
         return send(405, { error: 'Method not allowed' });
       }
+      if (
+        url.pathname === '/api/marker-calibrations' ||
+        url.pathname === '/api/screen-pages'
+      ) {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        if (req.method !== 'POST')
+          return send(405, { error: 'Method not allowed' });
+        const input = await readBody(req, 16384);
+        if (!['list', 'displays', 'status'].includes(input.action))
+          devices.assertBatchIdle();
+        return send(
+          200,
+          await (url.pathname === '/api/screen-pages'
+            ? devices.markerCalibration.pageAction(input)
+            : devices.markerCalibration.markerAction(input)),
+        );
+      }
+      if (url.pathname === '/api/calibration-batch') {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        if (req.method === 'GET')
+          return send(200, { batch: devices.batch.read() });
+        if (req.method !== 'POST')
+          return send(405, { error: 'Method not allowed' });
+        const input = await readBody(req, 16384);
+        const batch = devices.batch;
+        if (input.action === 'read') return send(200, batch.read());
+        if (input.action === 'plan')
+          return send(200, await batch.plan(input.cameraId));
+        if (input.action === 'screens')
+          return send(200, await batch.screens(input.cameraId));
+        if (input.action === 'start')
+          return send(200, await batch.start(input));
+        if (input.action === 'clear') {
+          await batch.clear();
+          return send(200, {});
+        }
+        if (input.action === 'delete-calibration') {
+          await arm!.configureForDevice('calibration-delete', async () => {
+            await controllerRuntime(arm!).profileStore.retireCalibration(
+              input.calibrationProfileId,
+            );
+          });
+          return send(200, {});
+        }
+        if (input.action === 'prepare-mapping') {
+          const row = batch
+            .read()
+            ?.items.find(
+              (row) => row.screenProfileId === input.binding?.screenProfileId,
+            );
+          if (!row)
+            return send(409, { error: 'Select the batch screen first.' });
+          await (await devices.ensureHost(row.deviceId)).alignForBatch(
+            AbortSignal.timeout(90000),
+          );
+          return send(200, {});
+        }
+        return send(
+          200,
+          await batch.command(
+            input.revision,
+            input.action === 'command' ? input.command : input.action,
+            input.id,
+          ),
+        );
+      }
+      if (url.pathname === '/api/screens') {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        if (req.method === 'GET')
+          return send(200, { screens: devices.screens() });
+        if (req.method === 'POST') {
+          const input = await readBody(req, 16384);
+          if (
+            typeof input.cameraId !== 'string' ||
+            typeof input.name !== 'string' ||
+            !input.name.trim() ||
+            input.name.length > 100
+          )
+            return send(400, { error: 'Select a camera and screen name' });
+          return send(200, await devices.addScreen(input.cameraId, input.name));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       const calibrationRoute =
         /^\/api\/devices\/([^/]+)\/calibration(?:\/(.*))?$/.exec(url.pathname);
       if (calibrationRoute) {
         if (!devices) return send(409, { error: 'Connect the arm first' });
         const id = decodeURIComponent(calibrationRoute[1]);
         const action = calibrationRoute[2];
+        if (action === 'open' && req.method === 'POST') {
+          await devices.ensureHost(id);
+          return send(200, { phase: 'prepared' });
+        }
+        if (req.method === 'POST') devices.assertBatchIdle();
         if (action === 'start' && req.method === 'POST') {
           const status = await devices.startCalibration(id);
           // A camera-only page can join the calibrated Device without a second scan.
@@ -562,14 +696,18 @@ export async function startPlaygroundHost({
           return send(200, devices.status(id));
         }
         const session = devices.entries.get(id)?.calibration;
-        if (!session?.host)
+        if (req.method === 'POST' && action?.startsWith('assisted-calibration'))
+          devices.assertCalibrationRunning(id);
+        const host =
+          action === 'camera/validity' && req.method === 'GET'
+            ? await devices.ensureHost(id)
+            : (devices.entries.get(id)?.host ?? session?.host);
+        if (!host)
           return send(409, {
             error: 'Calibration is not ready',
             phase: session?.phase,
           });
-        if (req.method !== 'GET' && session.phase !== 'running')
-          return send(409, { error: 'Calibration has ended' });
-        if (await session.host.handle(req, res)) return;
+        if (await host.handle(req, res)) return;
       }
       if (url.pathname === '/api/cameras/markers') {
         const id = url.searchParams.get('id');
@@ -758,14 +896,20 @@ export async function startPlaygroundHost({
       else res.destroy();
     }
   });
-  server.on('upgrade', (req, socket, head) => {
-    const url = URL.parse(req.url ?? '/', 'http://localhost');
-    if (!url) return socket.destroy();
-    const token = url.searchParams.get('token');
-    const calibration =
-      markerPreviews.get(token ?? '') ?? devices?.phoneHost(token);
-    if (!calibration) return socket.destroy();
-    calibration.phoneSocket.upgrade(req, socket, head);
+  server.on('upgrade', async (req, socket, head) => {
+    try {
+      const url = URL.parse(req.url ?? '/', 'http://localhost');
+      if (!url) return socket.destroy();
+      const token = url.searchParams.get('token');
+      const calibration =
+        markerPreviews.get(token ?? '') ??
+        (await devices?.markerCalibration.phoneHost(token)) ??
+        (await devices?.resolvePhoneHost(token));
+      if (!calibration) return socket.destroy();
+      calibration.phoneSocket.upgrade(req, socket, head);
+    } catch {
+      socket.destroy();
+    }
   });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);

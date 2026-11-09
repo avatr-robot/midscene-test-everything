@@ -234,6 +234,31 @@ export class ArmController {
     );
   }
 
+  /** @internal Hold the shared Controller queue across every screen and operator wait. */
+  calibrationBatchForDevices<T>(
+    ownerId: string,
+    work: (
+      signal: AbortSignal,
+    ) => Promise<{ value: T; lastCalibration?: CalibrationProfile }>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.deviceActions.enqueue(
+      ownerId,
+      async (abort) => {
+        await this.connect();
+        abort.throwIfAborted();
+        this.positionUnknown = true;
+        this.transfers.clear();
+        const result = await work(abort);
+        if (result.lastCalibration) {
+          this.lastCalibrationId = result.lastCalibration.id;
+          this.positionUnknown = false;
+        }
+        return result.value;
+      },
+      signal,
+    );
+  }
   /** @internal Serialize configuration with all device actions. */
   configureForDevice<T>(
     ownerId: string,

@@ -24,7 +24,13 @@ class Device {
 }
 function fixture({ DeviceClass = Device, behavior = {} } = {}) {
   const agents = [];
-  const devices = { arm: {}, cameras: {}, async open() {} };
+  const devices = {
+    arm: {},
+    cameras: {},
+    async open(id) {
+      return { cameraId: id };
+    },
+  };
   const tasks = new PlaygroundTasks(devices, {
     Device: DeviceClass,
     createAgent: (device, options) => {

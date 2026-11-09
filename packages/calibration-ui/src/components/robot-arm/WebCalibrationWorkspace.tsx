@@ -19,6 +19,7 @@ export function WebCalibrationWorkspace({
   showSessionCancel = true,
   footer,
   preview,
+  externalPreview = false,
   controls,
   onActivated,
   onBeforeLeaveChange,
@@ -35,6 +36,7 @@ export function WebCalibrationWorkspace({
   showSessionCancel?: boolean;
   footer: HTMLElement | null;
   preview?: ReactNode;
+  externalPreview?: boolean;
   controls?: ReactNode;
   onActivated(): Promise<void>;
   onBeforeLeaveChange(handler: (() => Promise<void>) | null): void;
@@ -54,7 +56,10 @@ export function WebCalibrationWorkspace({
   const completed =
     stage === 'completed' || (!s && calibrationAccepted(result));
   const activeMotion =
-    stage === 'collecting' || stage === 'safety' || stage === 'returning';
+    stage === 'collecting' ||
+    stage === 'safety' ||
+    stage === 'returning' ||
+    stage === 'avoiding-camera';
   const command = (
     action: Parameters<typeof controller.command>[0],
     confirm = false,
@@ -82,14 +87,23 @@ export function WebCalibrationWorkspace({
   const index =
     completed || stage === 'review'
       ? 4
-      : stage === 'return-ready' || stage === 'positioning-safe'
-        ? 3
-        : stage === 'safety' || stage === 'returning'
-          ? 2
-          : stage === 'collecting' ||
-              (stage === 'ready' && s?.referencePosition)
-            ? 1
-            : 0;
+      : stage === 'ready' &&
+          s?.referencePosition &&
+          !s.teachingId &&
+          s.cameraBoundaryPosition
+        ? 0
+        : stage === 'return-ready' ||
+            stage === 'positioning-safe' ||
+            stage === 'avoiding-camera'
+          ? 3
+          : stage === 'safety' || stage === 'returning'
+            ? 2
+            : stage === 'collecting' ||
+                (stage === 'ready' &&
+                  s?.referencePosition &&
+                  (s.teachingId || !s.cameraBoundaryPosition))
+              ? 1
+              : 0;
   const canReview = !busy && !activeMotion && stage !== 'positioning-safe';
   const viewed =
     canReview && reviewStep !== undefined ? Math.min(reviewStep, index) : index;
@@ -158,6 +172,22 @@ export function WebCalibrationWorkspace({
       onClick={() => command('position-reference', true)}
     >
       {t('Enter Drag Mode')}
+    </Button>
+  ) : stage === 'positioning-boundary' ? (
+    <Button
+      type="primary"
+      loading={busy}
+      onClick={() => command('record-boundary', true)}
+    >
+      {t('Record Camera Boundary')}
+    </Button>
+  ) : stage === 'ready' && !s.teachingId && s.cameraBoundaryPosition ? (
+    <Button
+      type="primary"
+      disabled={busy || !confirmed}
+      onClick={() => command('save-teaching', true)}
+    >
+      {t('Save Installation Teaching')}
     </Button>
   ) : stage === 'ready' ? (
     <Button
@@ -254,7 +284,9 @@ export function WebCalibrationWorkspace({
           </span>
         ))}
       </nav>
-      <div className="robot-setup-task-layout">
+      <div
+        className={`robot-setup-task-layout${externalPreview ? ' has-external-preview' : ''}`}
+      >
         <section className="robot-disclosure-body">
           <SetupNotice
             notice={
@@ -266,6 +298,55 @@ export function WebCalibrationWorkspace({
                 : undefined
             }
           />
+          {stage === 'ready' && s?.referencePosition && !reviewing && (
+            <div>
+              <Typography.Paragraph>
+                {t(
+                  s.teachingId
+                    ? 'Saved installation teaching is shared by screens on this camera.'
+                    : 'Record the camera-side boundary once to enable automatic camera avoidance.',
+                )}
+              </Typography.Paragraph>
+              {!s.teachingId && !s.cameraBoundaryPosition && (
+                <Button
+                  disabled={busy || !readyToCapture}
+                  onClick={() => command('position-boundary', true)}
+                >
+                  {t('Teach Camera Boundary')}
+                </Button>
+              )}
+              {s.teachingId && (
+                <Button
+                  disabled={busy || !readyToCapture}
+                  onClick={() => command('position-reference', true)}
+                >
+                  {t('Reteach Installation')}
+                </Button>
+              )}
+              {s.cameraBoundaryPosition && !s.teachingId && (
+                <Checkbox
+                  checked={confirmed}
+                  onChange={(e) => setConfirmed(e.target.checked)}
+                >
+                  {t(
+                    'The phone is horizontal, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.',
+                  )}
+                </Checkbox>
+              )}
+            </div>
+          )}
+          {stage === 'positioning-boundary' && (
+            <Typography.Paragraph>
+              {t(
+                'Move straight from the reference towards the camera and stop at a safe boundary. Leave clearance for the whole arm, then release it before recording.',
+              )}
+            </Typography.Paragraph>
+          )}
+          {stage === 'avoiding-camera' && (
+            <Typography.Paragraph>
+              {t('Moving to the camera-avoidance position')}
+            </Typography.Paragraph>
+          )}
           {reviewing ? (
             <>
               <Typography.Title level={4}>{t(steps[viewed])}</Typography.Title>
@@ -404,13 +485,15 @@ export function WebCalibrationWorkspace({
               )}
           </div>
         </section>
-        <section className="robot-setup-guide-card">
-          {preview ?? (
-            <Typography.Paragraph>
-              {t('Camera preview unavailable')}
-            </Typography.Paragraph>
-          )}
-        </section>
+        {!externalPreview && (
+          <section className="robot-setup-guide-card">
+            {preview ?? (
+              <Typography.Paragraph>
+                {t('Camera preview unavailable')}
+              </Typography.Paragraph>
+            )}
+          </section>
+        )}
       </div>
       {footer &&
         createPortal(

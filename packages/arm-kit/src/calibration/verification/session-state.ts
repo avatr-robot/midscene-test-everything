@@ -42,6 +42,8 @@ export function verificationContextKey(ctx: ApplicationContext) {
     s.contactMs,
     s.motionTimeoutMs,
     ctx.tool.payload,
+    ctx.installationTeaching?.id,
+    ctx.minimumTravelTipZMm,
   ]);
 }
 

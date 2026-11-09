@@ -1,3 +1,4 @@
+import { robotVoice } from '@midscene/arm-calibration-ui';
 import { create } from 'zustand';
 import type { EffectiveCapabilities, RuntimeState } from './robot-arm-api';
 
@@ -62,9 +63,11 @@ export const useConnection = create<ConnectionStore>((set, get) => ({
     });
     try {
       const result = await request('/stop', {});
+      robotVoice.notify('stopSent', 3);
       if (revision === controlRevision)
         set({ recoveryRequired: result.recoveryRequired });
     } catch (error) {
+      if (get().controlPending === 'stop') robotVoice.notify('stopFailed', 3);
       if (revision === controlRevision) set({ controlError: String(error) });
     } finally {
       if (revision === controlRevision) set({ controlPending: undefined });
@@ -79,6 +82,7 @@ export const useConnection = create<ConnectionStore>((set, get) => ({
       if (revision === controlRevision)
         set({ recoveryRequired: result.recoveryRequired });
     } catch (error) {
+      if (get().controlPending === 'stop') robotVoice.notify('stopFailed', 3);
       if (revision === controlRevision) set({ controlError: String(error) });
     } finally {
       if (revision === controlRevision) set({ controlPending: undefined });

@@ -27,6 +27,8 @@ export interface RobotArmDeviceOptions {
   arm: ArmController;
   camera: string;
   id?: string;
+  /** Independent correction for one of several screens observed by the camera. */
+  screenId?: string;
   /** @internal Injected camera ownership for hosts and tests. */
   cameraManager?: CameraSessionManager;
 }
@@ -133,6 +135,7 @@ export class RobotArmDevice extends AbstractInterface {
       const session = await this.cameras.acquire(
         this.options.camera,
         this.ownerId,
+        this.options.screenId,
       );
       if (this.destroyed) {
         await this.cameras.release(this.options.camera, this.ownerId);
@@ -253,6 +256,12 @@ export class RobotArmDevice extends AbstractInterface {
       height: context.screen.pixelHeight,
     });
     this.assertAlive();
+    if (snapshot.binding.validity?.state === 'invalid')
+      throw new RobotArmError(
+        'CALIBRATION_MISMATCH',
+        'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
+        409,
+      );
     if (!sameVisionMapping(snapshot.binding, context.vision))
       throw new RobotArmError(
         'VISION_BINDING_CHANGED',
@@ -290,6 +299,9 @@ export class RobotArmDevice extends AbstractInterface {
     options: CalibrationPageOptions & {
       /** Host paths and phone links for an embedded calibration UI. */
       basePath?: string;
+      markerCodes?: readonly number[];
+      /** @internal Reuse the phone/mapping host prepared by the Playground wizard. */
+      host?: import('./calibration-server/host.js').CalibrationHost;
       phoneLinks?: () => { name: string; url: string }[];
       input?: import('./assisted-contracts.js').AssistedCalibrationInput;
       interaction?: (
@@ -311,6 +323,7 @@ export class RobotArmDevice extends AbstractInterface {
             deviceId: this.id,
             input: options.input,
             basePath: options.basePath,
+            markerCodes: options.markerCodes,
             phoneLinks: options.phoneLinks,
           };
           let result: CalibrationProfile;
@@ -318,12 +331,22 @@ export class RobotArmDevice extends AbstractInterface {
             const { CalibrationHost } = await import(
               './calibration-server/host.js'
             );
-            const host = new CalibrationHost(hostOptions);
+            const host = options.host ?? new CalibrationHost(hostOptions);
+            if (
+              options.host &&
+              (host.deviceId !== this.id ||
+                host.cameraId !== this.options.camera)
+            )
+              throw new RobotArmError(
+                'PROFILE_MISMATCH',
+                'Calibration host belongs to another Device',
+                409,
+              );
             try {
               await host.prepare();
               result = await options.interaction(host, signal);
             } finally {
-              await host.close();
+              if (!options.host) await host.close();
             }
           } else {
             const { runCalibrationPage } = await import(

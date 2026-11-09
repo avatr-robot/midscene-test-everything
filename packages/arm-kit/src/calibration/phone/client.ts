@@ -895,6 +895,16 @@ export function mountCalibrationPhonePage(
         });
         if (response.ok) {
           const next = await response.json();
+          if (
+            typeof next.pageKey === 'string' &&
+            /^[a-f0-9-]{36}$/.test(next.pageKey)
+          ) {
+            try {
+              localStorage.setItem('midscene-screen-page-key', next.pageKey);
+            } catch {
+              /* Storage may be disabled; transport renewal still works. */
+            }
+          }
           const markers = document.querySelectorAll('.mapping-marker');
           if (
             typeof next.pageId !== 'string' ||

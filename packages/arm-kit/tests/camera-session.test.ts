@@ -112,3 +112,122 @@ it('persists correction by camera identity and invalidates the binding when geom
     first.fingerprint,
   );
 });
+
+it('isolates two screen corrections on one physical camera and restores each independently', async () => {
+  const { manager, backend, closes } = await fixture();
+  const a = await manager.acquire('camera', 'a', 'left');
+  const b = await manager.acquire('camera', 'b', 'right');
+  const aPreview = await manager.acquire('camera', 'preview', 'left');
+  expect(a).toBe(aPreview);
+  expect(a).not.toBe(b);
+  expect(a.stream).toBe(b.stream);
+  expect(backend.openStream).toHaveBeenCalledTimes(1);
+  const correction = {
+    sourceWidth: 1920,
+    sourceHeight: 1080,
+    rotation: 0 as const,
+    points: {
+      topLeft: { x: 100, y: 100 },
+      topRight: { x: 500, y: 100 },
+      bottomRight: { x: 500, y: 900 },
+      bottomLeft: { x: 100, y: 900 },
+    },
+  };
+  await a.setCorrection(correction);
+  await b.setCorrection({
+    ...correction,
+    points: Object.fromEntries(
+      Object.entries(correction.points).map(([key, value]) => [
+        key,
+        { ...value, x: value.x + 600 },
+      ]),
+    ) as typeof correction.points,
+  });
+  const first = await a.binding({
+    cameraId: 'camera',
+    width: 400,
+    height: 800,
+  });
+  await b.setCorrection({ ...b.getCorrection()!, rotation: 90 });
+  expect(
+    (await a.binding({ cameraId: 'camera', width: 400, height: 800 }))
+      .fingerprint,
+  ).toBe(first.fingerprint);
+  await manager.release('camera', 'a');
+  await manager.release('camera', 'preview');
+  expect(closes[0]).not.toHaveBeenCalled();
+  await manager.release('camera', 'b');
+  const restoredA = await manager.acquire('camera', 'new-a', 'left');
+  const restoredB = await manager.acquire('camera', 'new-b', 'right');
+  expect(restoredA.getCorrection()).toEqual(correction);
+  expect(restoredB.getCorrection()?.rotation).toBe(90);
+});
+it('rejects accepted vision evidence after the perspective changes or the camera identity differs', async () => {
+  const { manager } = await fixture();
+  const camera = await manager.acquire('camera', 'binding-test');
+  await camera.setCorrection({
+    sourceWidth: 1000,
+    sourceHeight: 900,
+    rotation: 0,
+    points: {
+      topLeft: { x: 10, y: 10 },
+      topRight: { x: 450, y: 10 },
+      bottomRight: { x: 450, y: 850 },
+      bottomLeft: { x: 10, y: 850 },
+    },
+  });
+  const binding = await camera.binding({
+    cameraId: 'camera',
+    width: 400,
+    height: 800,
+  });
+  expect(camera.isBindingCurrent(binding)).toBe(true);
+  expect(
+    camera.isBindingCurrent({ ...binding, cameraId: 'other-camera' }),
+  ).toBe(false);
+  await camera.setCorrection({ ...camera.getCorrection()!, rotation: 90 });
+  expect(camera.isBindingCurrent(binding)).toBe(false);
+});
+
+it('isolates drift evidence per screen on the shared stream without changing mapping fingerprints', async () => {
+  const { renderFrame } = await import('./fixtures/perspective-frame.js');
+  const { manager, backend } = await fixture();
+  const left = await manager.acquire('camera', 'left-owner', 'left');
+  const right = await manager.acquire('camera', 'right-owner', 'right');
+  const leftRect = { x: 100, y: 150, width: 330, height: 420 };
+  const frame = await renderFrame({
+    screen: { ...leftRect, x: leftRect.x + 22 },
+    quad: leftRect,
+    extra:
+      '<rect x="786" y="136" width="358" height="448" rx="26" fill="#141416"/><rect x="800" y="150" width="330" height="420" rx="16" fill="#3f3f4a"/>',
+  });
+  await left.setCorrection({
+    points: frame.points,
+    sourceWidth: frame.sourceWidth,
+    sourceHeight: frame.sourceHeight,
+    rotation: 0,
+  });
+  await right.setCorrection({
+    sourceWidth: 1280,
+    sourceHeight: 720,
+    rotation: 0,
+    points: {
+      topLeft: { x: 800, y: 150 },
+      topRight: { x: 1130, y: 150 },
+      bottomRight: { x: 1130, y: 570 },
+      bottomLeft: { x: 800, y: 570 },
+    },
+  });
+  const options = { cameraId: 'camera', width: 400, height: 800 };
+  const before = await left.binding(options);
+  const source = await (backend.openStream as ReturnType<typeof rstest.fn>).mock
+    .results[0].value;
+  source.emit('frame', frame.jpeg);
+  expect((await left.checkPerspective()).validity.state).toBe('invalid');
+  expect((await right.checkPerspective()).validity.state).toBe('valid');
+  const after = await left.binding(options);
+  expect(after.fingerprint).toBe(before.fingerprint);
+  expect(after.validity?.state).toBe('invalid');
+  expect(left.isBindingCurrent(before)).toBe(false);
+  expect(right.isBindingCurrent(await right.binding(options))).toBe(true);
+});

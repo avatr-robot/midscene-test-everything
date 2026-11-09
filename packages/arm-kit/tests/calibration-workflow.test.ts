@@ -12,6 +12,7 @@ import type {
 import { AutomaticCapture } from '../src/calibration/exploration/capture.js';
 import { explorationTargets } from '../src/calibration/exploration/targets.js';
 import { CalibrationWorkflow } from '../src/calibration/workflow.js';
+import { RobotArmError } from '../src/contracts.js';
 import { contactPoint } from '../src/domain.js';
 import { fixture, pose } from './fixtures.js';
 const layout: CalibrationPageLayout = {
@@ -58,9 +59,11 @@ async function setup() {
     width: options.width,
     height: options.height,
   });
+  const assertPerspectiveCurrent = rstest.fn(async () => {});
   const service = new CalibrationWorkflow(f.runtime, {
     deviceId: 'cam',
     vision: {
+      assertPerspectiveCurrent,
       binding,
       snapshot: async (options) => ({
         base64: jpg.toString('base64'),
@@ -121,6 +124,7 @@ async function setup() {
   const state = await service.create();
   return {
     ...f,
+    assertPerspectiveCurrent,
     service,
     state,
     beforeTask,
@@ -733,3 +737,219 @@ it.each([1.25, 2.5])(
   },
   20000,
 );
+
+it('records measured installation reference and camera boundary, requires corridor confirmation and reuses teaching', async () => {
+  const f = await setup();
+  try {
+    await f.recordReference();
+    const reference = f.service.status()!.referencePosition!;
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(
+      pose(
+        reference.positionMm.x,
+        reference.positionMm.y + 50,
+        reference.positionMm.z,
+      ),
+    );
+    await f.service.command(f.state.id, 'record-boundary', true);
+    await expect(
+      f.service.command(f.state.id, 'save-teaching', false),
+    ).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' });
+    expect(f.store.list().installationTeachings).toBeUndefined();
+    const saved = await f.service.command(f.state.id, 'save-teaching', true);
+    expect(saved.teachingId).toBeDefined();
+    expect(f.service.setup().teaching?.cameraBoundary.normal).toEqual({
+      x: 0,
+      y: 1,
+    });
+    const recreated = await f.service.create();
+    expect(recreated.referencePosition).toEqual(reference);
+    expect(recreated.teachingId).toBe(saved.teachingId);
+    expect(f.adapter.movements).toHaveLength(0);
+  } finally {
+    await f.dispose();
+  }
+});
+
+it('automatically parks after boundary verification with taught mounting and still requires acceptance', async () => {
+  const f = await setup();
+  const timer = setInterval(() => void f.send(), 50);
+  try {
+    rstest
+      .spyOn(AutomaticCapture.prototype, 'run')
+      .mockImplementation(async function (this: AutomaticCapture) {
+        this.reference = pose(100, -50, 30);
+        for (const point of [
+          { x: 200, y: 400 },
+          { x: 220, y: 400 },
+          { x: 200, y: 480 },
+        ])
+          this.localPoints.push({
+            point,
+            positionMm: { x: point.x * 0.5, y: -point.y * 0.125, z: 30 },
+            purpose: 'direction',
+            readings: 1,
+            tipSpreadMm: 0,
+            touchSpreadPx: 0,
+          });
+        for (const { point, purpose } of explorationTargets(layout, false))
+          this.points.push({
+            point,
+            purpose,
+            positionMm: { x: point.x * 0.5, y: -point.y * 0.125, z: 30 },
+            readings: 1,
+            tipSpreadMm: 0,
+            touchSpreadPx: 0,
+          });
+      });
+
+    f.adapter.setPoseForTesting(pose(100, -50, 80));
+    await f.recordReference();
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(pose(100, 50, 80));
+    await f.service.command(f.state.id, 'record-boundary', true);
+    await f.service.command(f.state.id, 'save-teaching', true);
+    await f.service.command(f.state.id, 'start-automatic', true);
+    await rstest.waitFor(
+      () => {
+        const state = f.service.status()!;
+        expect(state.error).toBeUndefined();
+        expect(state.stage).toBe('review');
+      },
+      { timeout: 30000 },
+    );
+    const state = f.service.status()!;
+    expect(state.calibration?.auto?.observationRecorded).toBe(true);
+    expect(state.safePosition!.positionMm.z).toBeGreaterThanOrEqual(80);
+    expect(state.result).toBeUndefined();
+    const saved = await f.service.command(state.id, 'accept', true);
+    expect(saved.stage).toBe('completed');
+    expect(saved.result?.verification?.protocol).toBe('auto-boundary-v1');
+  } finally {
+    clearInterval(timer);
+    await f.dispose();
+  }
+}, 45000);
+
+it('refuses a measured outline mismatch before collecting or moving', async () => {
+  const f = await setup();
+  try {
+    f.service.setBatchReference(pose(100, -50, 100));
+    f.assertPerspectiveCurrent.mockRejectedValueOnce(
+      new RobotArmError('CALIBRATION_MISMATCH', 'screen shifted', 409),
+    );
+    await expect(
+      f.service.command(f.state.id, 'start-automatic', true),
+    ).rejects.toMatchObject({ code: 'CALIBRATION_MISMATCH' });
+    expect(f.service.status()?.stage).toBe('ready');
+    expect(f.adapter.movements).toHaveLength(0);
+  } finally {
+    await f.dispose();
+  }
+});
+
+it('cancels a pending outline check immediately and never starts its suspended command', async () => {
+  const f = await setup();
+  let release!: () => void;
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  try {
+    f.service.setBatchReference(pose(100, -50, 100));
+    f.assertPerspectiveCurrent.mockImplementationOnce(async () => gate);
+    const pending = f.service.command(f.state.id, 'start-automatic', true);
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'ACTION_STOPPED',
+    });
+    await rstest.waitFor(() =>
+      expect(f.assertPerspectiveCurrent).toHaveBeenCalled(),
+    );
+    expect((await f.service.command(f.state.id, 'cancel')).stage).toBe(
+      'cancelled',
+    );
+    release();
+    await rejected;
+    expect(f.service.status()?.stage).toBe('cancelled');
+    expect(f.adapter.movements).toHaveLength(0);
+  } finally {
+    release();
+    await f.dispose();
+  }
+});
+
+it.each(['disconnect', 'layout', 'stop'] as const)(
+  'does not start motion if %s occurs during outline verification',
+  async (event) => {
+    const f = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>((done) => {
+      release = done;
+    });
+    try {
+      f.service.setBatchReference(pose(100, -50, 100));
+      f.assertPerspectiveCurrent.mockImplementationOnce(async () => gate);
+      const pending = f.service.command(f.state.id, 'start-automatic', true);
+      const rejected = expect(pending).rejects.toThrow();
+      await rstest.waitFor(() =>
+        expect(f.assertPerspectiveCurrent).toHaveBeenCalled(),
+      );
+      if (event === 'disconnect') f.service.disconnectPhone();
+      else if (event === 'layout') {
+        f.resize();
+        await f.send();
+      } else await f.runtime.stop();
+      release();
+      await rejected;
+      expect(f.adapter.movements).toHaveLength(0);
+      expect(f.service.status()?.stage).not.toBe('collecting');
+    } finally {
+      release();
+      await f.dispose();
+    }
+  },
+);
+
+it('interrupts active collection when a later outline check detects drift, before accepting any geometry', async () => {
+  const f = await setup();
+  const stop = rstest.spyOn(f.runtime, 'stop');
+  let entered!: () => void;
+  const collecting = new Promise<void>((done) => {
+    entered = done;
+  });
+  const run = rstest
+    .spyOn(AutomaticCapture.prototype, 'run')
+    .mockImplementation(async (host) => {
+      entered();
+      await delay(10_000, undefined, { signal: host.signal });
+    });
+  const heartbeat = setInterval(() => void f.send(), 50);
+  try {
+    f.service.setBatchReference(pose(100, -50, 100));
+    await f.service.command(f.state.id, 'start-automatic', true);
+    await collecting;
+    f.assertPerspectiveCurrent.mockRejectedValue(
+      new RobotArmError('CALIBRATION_MISMATCH', 'screen shifted', 409),
+    );
+    await rstest.waitFor(() =>
+      expect(f.service.status()).toMatchObject({
+        stage: 'interrupted',
+        errorDetails: { code: 'CALIBRATION_MISMATCH' },
+      }),
+    );
+    await rstest.waitFor(() => expect(stop).toHaveBeenCalled());
+    expect(f.service.status()?.result).toBeUndefined();
+    expect(f.store.deviceBinding('cam')?.calibrationProfileId).toBe(
+      f.calibration.id,
+    );
+  } finally {
+    clearInterval(heartbeat);
+    run.mockRestore();
+    await f.dispose();
+  }
+});

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { AssistedCalibrationInput } from '../assisted-contracts.js';
+import { screenPoseMm } from '../calibration/geometry.js';
 import {
   calibrationPhonePage,
   phoneMarkerElements,
@@ -10,6 +11,7 @@ import { sameLayout } from '../calibration/phone/session.js';
 import { CalibrationWorkflow } from '../calibration/workflow.js';
 import { recognizeScreenMarkers } from '../camera/calibration-markers.js';
 import type { CameraSession } from '../camera/session.js';
+import { calibrationAccepted } from '../contracts.js';
 import {
   type CameraCorrection,
   RobotArmError,
@@ -18,6 +20,7 @@ import {
 } from '../contracts.js';
 import { controllerRuntime } from '../controller-runtime.js';
 import type { ArmController } from '../controller.js';
+import { contactPoint, flangePose } from '../domain.js';
 import { createCalibrationHandler } from './handler.js';
 
 import { PhoneSocketServer } from './phone-socket.js';
@@ -27,6 +30,7 @@ export interface CalibrationHostOptions {
   camera: CameraSession;
   deviceId: string;
   input?: AssistedCalibrationInput;
+  markerCodes?: readonly number[];
   basePath?: string;
   phoneLinks?: () => { name: string; url: string }[];
 }
@@ -49,6 +53,44 @@ export class CalibrationHost {
       deviceId: options.deviceId,
       vision: options.camera,
       phoneLinks: options.phoneLinks,
+      markerCodes: options.markerCodes,
+      referencePosition: () => {
+        const store = controllerRuntime(options.arm).profileStore;
+        const binding = store.deviceBinding(options.deviceId);
+        if (!binding || !this.input) return undefined;
+        const teaching = store.installationTeaching(this.input);
+        const calibration = store.getCalibration(binding.calibrationProfileId);
+        if (
+          !teaching ||
+          !calibrationAccepted(calibration) ||
+          binding.robotProfileId !== this.input.robotProfileId ||
+          binding.toolProfileId !== this.input.toolProfileId ||
+          calibration.robotGeometryRevision !==
+            store.getRobot(binding.robotProfileId).geometryRevision ||
+          calibration.toolGeometryRevision !==
+            store.getTool(binding.toolProfileId).geometryRevision ||
+          calibration.screenGeometryRevision !==
+            store.getScreen(binding.screenProfileId).geometryRevision ||
+          binding.vision.fingerprint !==
+            this.service.setup().mapping?.vision.fingerprint
+        )
+          return undefined;
+        const tool = store.getTool(binding.toolProfileId);
+        const screen = store.getScreen(binding.screenProfileId);
+        const center = screenPoseMm(
+          calibration,
+          tool,
+          { x: screen.physicalWidthMm / 2, y: screen.physicalHeightMm / 2 },
+          -Math.max(20, screen.safeHeightMm),
+        );
+        const tip = contactPoint(center, tool.offsetMm);
+        const floor = contactPoint(teaching.referencePose, tool.offsetMm).z;
+        return flangePose(
+          { ...tip, z: Math.max(tip.z, floor) },
+          center.orientation,
+          tool.offsetMm,
+        );
+      },
     });
     this.phoneSocket = new PhoneSocketServer(this.service);
     this.control = createCalibrationHandler({
@@ -151,7 +193,10 @@ export class CalibrationHost {
         .list()
         .devices?.filter((binding) => binding.robotProfileId === robot.id)
         .map((binding) => arm.profileStore.getTool(binding.toolProfileId))
-        .find((tool) => geometryKey(tool) === geometryKey(input.tool));
+        .find((tool) => geometryKey(tool) === geometryKey(input.tool)) ??
+      arm.profileStore
+        .list()
+        .tools.find((tool) => geometryKey(tool) === geometryKey(input.tool));
     const tool =
       existing ??
       (await arm.putTool({
@@ -235,6 +280,7 @@ export class CalibrationHost {
         profileKey: correction ? camera.camera.id : undefined,
       },
       correction,
+      perspectiveValidity: camera.getPerspectiveValidity(),
       correctionKey:
         correction && selection
           ? (
@@ -284,6 +330,8 @@ export class CalibrationHost {
       );
   }
   private async saveCorrection(correction: CameraCorrection) {
+    await this.options.camera.checkCorrection(correction);
+    this.editable();
     await this.options.camera.setCorrection(correction);
     const size = this.autoOutputSize();
     if (size && this.input) {
@@ -300,6 +348,29 @@ export class CalibrationHost {
     }
   }
 
+  get deviceId() {
+    return this.options.deviceId;
+  }
+  get cameraId() {
+    return this.options.camera.camera.id;
+  }
+  async applyMarkerCorrection(correction: CameraCorrection) {
+    this.editable();
+    await this.saveCorrection(correction);
+    if (this.input) await this.service.mapSetup();
+  }
+  private alignmentTask?: Promise<void>;
+  alignForBatch(signal: AbortSignal) {
+    if (this.alignmentTask) return this.alignmentTask;
+    const abort = new AbortController();
+    this.alignment = abort;
+    const task = this.alignScreen(AbortSignal.any([signal, abort.signal]));
+    this.alignmentTask = task.finally(() => {
+      this.alignmentTask = undefined;
+      this.alignment = undefined;
+    });
+    return this.alignmentTask;
+  }
   private alignment?: AbortController;
   private async alignScreen(signal: AbortSignal) {
     this.editable();
@@ -334,6 +405,12 @@ export class CalibrationHost {
           observed = this.service.markerObservation(request);
         }
         const { pageId, layout } = observed;
+        this.service.setMarkerCapture({
+          request,
+          attempt,
+          captureAt: Date.now() + 3000,
+        });
+        await delay(3000, undefined, { signal });
         const check = () => {
           signal.throwIfAborted();
           this.editable();
@@ -392,6 +469,7 @@ export class CalibrationHost {
         return;
       }
     } finally {
+      this.service.setMarkerCapture();
       this.service.finishMarkerDisplay(request, accepted);
     }
   }
@@ -447,9 +525,87 @@ export class CalibrationHost {
       });
       res.end(JSON.stringify(value));
     };
+    const relative = path.slice(this.basePath.length);
     try {
-      const relative = path.slice(this.basePath.length);
-      if (relative === '/configuration' && req.method === 'GET')
+      if (relative === '/installation-teaching' && req.method === 'POST') {
+        if (!this.input)
+          throw new RobotArmError(
+            'SETUP_REQUIRED',
+            'Save tool configuration first',
+            409,
+          );
+        const runtime = controllerRuntime(this.options.arm);
+        const input = await readJson(req);
+        const binding = {
+          ...this.input,
+          screenProfileId: this.options.deviceId,
+        };
+        switch (input.action) {
+          case 'read':
+            send(
+              200,
+              runtime.profileStore.installationTeaching(binding) ?? null,
+            );
+            break;
+          case 'draft':
+            send(200, runtime.installationTeachingDraft(binding));
+            break;
+          case 'state':
+            send(200, await runtime.state(binding.toolProfileId));
+            break;
+          case 'capture':
+            send(
+              200,
+              await runtime.captureInstallationPoint(binding, input.point),
+            );
+            break;
+          case 'save':
+            send(
+              200,
+              await runtime.teachInstallation({
+                binding,
+                draftId: input.draftId,
+                corridorConfirmed: input.corridorConfirmed,
+              }),
+            );
+            break;
+          case 'enter-drag':
+            if (!(await runtime.state(binding.toolProfileId)).state.enabled)
+              await this.enable();
+            await runtime.enterDragMode(binding);
+            send(200, {});
+            break;
+          case 'exit-drag':
+            await runtime.exitDragMode();
+            send(200, {});
+            break;
+          case 'position':
+            runtime.assertStopRevision(input.stopRevision);
+            if (
+              runtime.profileStore.installationTeaching(binding)?.id !==
+              input.teachingId
+            )
+              throw new RobotArmError(
+                'STALE_CONTEXT',
+                'Installation teaching changed',
+                409,
+              );
+            if (input.confirmed !== true)
+              throw new RobotArmError(
+                'CONFIRMATION_REQUIRED',
+                'Confirm before returning to a taught position',
+                409,
+              );
+            await runtime.positionInstallationPoint(binding, input.point);
+            send(200, {});
+            break;
+          default:
+            throw new RobotArmError(
+              'INVALID_COMMAND',
+              'Unknown teaching command',
+            );
+        }
+      } else if (relative === '/configuration' && req.method === 'GET')
         send(200, await this.configuration());
       else if (relative === '/configuration' && req.method === 'POST')
         send(200, await this.configure(await readJson(req)));
@@ -467,6 +623,21 @@ export class CalibrationHost {
         send(200, await this.enable(relative === '/payload'));
       } else if (relative === '/recover' && req.method === 'POST') {
         send(200, await this.recover());
+      } else if (relative === '/camera/validity' && req.method === 'GET') {
+        const abort = new AbortController();
+        const cancel = () => abort.abort();
+        res.once('close', cancel);
+        try {
+          const check = await this.options.camera.checkPerspective({
+            signal: abort.signal,
+          });
+          send(200, {
+            ...check,
+            summary: this.options.camera.getPerspectiveValidity(),
+          });
+        } finally {
+          res.off('close', cancel);
+        }
       } else if (relative === '/camera/frame' && req.method === 'GET') {
         const jpeg = await this.options.camera.rawFrame();
         res.writeHead(200, {
@@ -545,22 +716,14 @@ export class CalibrationHost {
             : result.correction,
         );
       } else if (relative === '/camera/align' && req.method === 'POST') {
-        if (this.alignment)
-          throw new RobotArmError(
-            'BUSY',
-            'Screen detection is already running',
-            409,
-          );
         const abort = new AbortController();
         const cancel = () => abort.abort();
-        this.alignment = abort;
         res.once('close', cancel);
         try {
-          await this.alignScreen(abort.signal);
+          await this.alignForBatch(abort.signal);
           send(200, await this.configuration());
         } finally {
           res.off('close', cancel);
-          this.alignment = undefined;
         }
       } else if (relative === '/camera/check' && req.method === 'POST') {
         const correction = await readJson(req);
@@ -594,6 +757,9 @@ export class CalibrationHost {
       if (!res.headersSent)
         send(error instanceof RobotArmError ? error.status : 500, {
           error: error instanceof Error ? error.message : String(error),
+          ...(relative === '/camera/validity'
+            ? { summary: this.options.camera.getPerspectiveValidity() }
+            : {}),
         });
       else res.destroy();
     }
@@ -613,7 +779,12 @@ export class CalibrationHost {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
           });
-          res.end(JSON.stringify({ pageId, markers: phoneMarkerElements() }));
+          res.end(
+            JSON.stringify({
+              pageId,
+              markers: phoneMarkerElements(this.options.markerCodes),
+            }),
+          );
           return;
         }
         res.writeHead(200, {
@@ -621,7 +792,7 @@ export class CalibrationHost {
           'Cache-Control': 'no-store',
           'Referrer-Policy': 'no-referrer',
         });
-        res.end(calibrationPhonePage(pageId));
+        res.end(calibrationPhonePage(pageId, this.options.markerCodes));
       } else {
         res.writeHead(404);
         res.end();

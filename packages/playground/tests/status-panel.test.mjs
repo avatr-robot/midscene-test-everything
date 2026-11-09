@@ -169,3 +169,17 @@ test('the toolbar reads and confirms the saved calibration tool before device bi
   await f.panel.command({ ...input, cameraId: 'camera-b' });
   assert.equal(f.calls[0][0], 'enable');
 });
+
+test('resolves the selected screen Device on a shared camera before camera fallback', () => {
+  const f = fixture();
+  const profiles = f.runtime.profileStore.list();
+  profiles.tools.push({ ...f.tool, id: 'tool-b', name: 'Screen B tool' });
+  profiles.devices.push({
+    deviceId: 'screen-b',
+    cameraId: 'camera-a',
+    robotProfileId: 'robot-a',
+    toolProfileId: 'tool-b',
+  });
+  assert.equal(f.panel.selection('screen-b').toolProfileId, 'tool-b');
+  assert.equal(f.panel.selection('camera-a').toolProfileId, 'tool-a');
+});

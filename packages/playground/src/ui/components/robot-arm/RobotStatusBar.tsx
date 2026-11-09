@@ -1,3 +1,4 @@
+import { robotVoice } from '@midscene/arm-calibration-ui';
 import {
   Alert,
   Badge,
@@ -177,6 +178,8 @@ export function RobotStatusBar({
     setBusy(true);
     setCommandError(undefined);
     try {
+      if (action === 'enable') robotVoice.notify('enabling', 1);
+      if (action === 'payload') robotVoice.notify('payload', 1);
       const response = await fetch('/api/arm/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -194,8 +197,21 @@ export function RobotStatusBar({
         throw new Error(
           value.error?.message ?? value.error ?? `HTTP ${response.status}`,
         );
+      const event = {
+        enable: 'enabled',
+        disable: 'disabled',
+        clearFaults: 'clearFaults',
+        resume: 'resuming',
+        emergencyStop: 'emergencySent',
+        payload: 'payloadDone',
+      } as const;
+      robotVoice.notify(event[action], action === 'emergencyStop' ? 3 : 1);
       setConfirm(undefined);
     } catch (error) {
+      robotVoice.notify(
+        action === 'emergencyStop' ? 'emergencyFailed' : 'failed',
+        3,
+      );
       setCommandError(String(error));
     } finally {
       pending.current = false;

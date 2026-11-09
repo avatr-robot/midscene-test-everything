@@ -11,6 +11,7 @@ import type {
   CalibrationPhoneStatus,
   RobotArmApi,
 } from '../robot-arm-api';
+import { calibrationAnnouncements } from '../voice/calibration';
 
 export function useAssistedCalibration(
   api: RobotArmApi,
@@ -50,10 +51,13 @@ export function useAssistedCalibration(
       busy: false,
     });
     if (!active) return;
+    const announce = calibrationAnnouncements();
     const unsubscribe = api.subscribeCalibration(
       (snapshot) => {
-        if (current === generation.current)
+        if (current === generation.current) {
+          announce(snapshot);
           store.setState({ ...snapshot, connectionError: undefined });
+        }
       },
       () => {
         if (current === generation.current)

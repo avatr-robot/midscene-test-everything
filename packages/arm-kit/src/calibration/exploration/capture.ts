@@ -163,6 +163,7 @@ export class AutomaticCapture {
       screen: ScreenProfile;
       tool: ToolProfile;
       webToImage: number[];
+      minimumTravelTipZMm?: number;
     },
   ) {
     this.reference = structuredClone(home);
@@ -359,7 +360,11 @@ export class AutomaticCapture {
     this.upstreamResult = await runAutoExploration(
       bridge,
       session,
-      { screen: config.screen, tool: config.tool },
+      {
+        screen: config.screen,
+        tool: config.tool,
+        minimumTravelTipZMm: config.minimumTravelTipZMm,
+      },
       {
         startPose: home,
         mode: this.mode === 'standard' ? 'standard' : 'fast-horizontal',

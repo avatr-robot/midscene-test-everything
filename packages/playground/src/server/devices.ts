@@ -3,10 +3,14 @@ import type { ArmController, CalibrationProfile } from '@midscene/arm-kit';
 import {
   CameraSessionManager,
   RobotArmDevice,
+  RobotArmError,
   listCameras,
 } from '@midscene/arm-kit';
-import type { CalibrationHost } from '@midscene/arm-kit/internal/calibration-server/host';
+import { CalibrationHost } from '@midscene/arm-kit/internal/calibration-server/host';
+import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
+import { CalibrationBatch } from './calibration-batch.js';
 import type { PhonePairings } from './phone-pairings.js';
+import { ScreenCalibration } from './screen-calibration.js';
 
 interface CalibrationSession {
   abort: AbortController;
@@ -18,19 +22,25 @@ interface CalibrationSession {
   error?: string;
 }
 export interface DeviceEntry {
+  cameraId: string;
   camera: Awaited<ReturnType<CameraSessionManager['acquire']>>;
   device: RobotArmDevice;
   owner: string;
   calibration?: CalibrationSession;
+  host?: CalibrationHost;
+  hostOpening?: Promise<CalibrationHost>;
 }
 type PhoneLinks = (token: string) => { name: string; url: string }[];
 
 /** One camera session shared by preview, calibration and the Midscene Device. */
 export class PlaygroundDevices {
+  readonly batch = new CalibrationBatch(this);
+  readonly markerCalibration = new ScreenCalibration(this);
   entries = new Map<string, DeviceEntry>();
   readonly cameras: CameraSessionManager;
   private ownsCameras: boolean;
   private Device: typeof RobotArmDevice;
+  private Host: typeof CalibrationHost;
   private phoneLinks: PhoneLinks;
   private pairings?: PhonePairings;
   cameraErrors = new Map<string, string>();
@@ -43,11 +53,13 @@ export class PlaygroundDevices {
     {
       cameras,
       Device = RobotArmDevice,
+      Host = CalibrationHost,
       phoneLinks = () => [],
       pairings,
     }: {
       cameras?: CameraSessionManager;
       Device?: typeof RobotArmDevice;
+      Host?: typeof CalibrationHost;
       phoneLinks?: PhoneLinks;
       pairings?: PhonePairings;
     } = {},
@@ -55,14 +67,87 @@ export class PlaygroundDevices {
     this.cameras = cameras ?? new CameraSessionManager();
     this.ownsCameras = !cameras;
     this.Device = Device;
+    this.Host = Host;
     this.phoneLinks = phoneLinks;
     this.pairings = pairings;
+  }
+  screens() {
+    const saved =
+      controllerRuntime(this.arm).profileStore.list().screenTargets ?? [];
+    const defaults = [...this.entries]
+      .filter(([id, e]) => id === e.cameraId && !saved.some((s) => s.id === id))
+      .map(([id, e]) => ({ id, cameraId: id, name: e.camera.camera.name }));
+    return [...defaults, ...saved.filter((t) => !t.archived)].map((target) => ({
+      ...target,
+      hasCorrection: Boolean(
+        this.entries.get(target.id)?.camera.getCorrection(),
+      ),
+    }));
+  }
+  markerCodes(id: string) {
+    const targets =
+      controllerRuntime(this.arm).profileStore.list().screenTargets ?? [];
+    const target = targets.find((t) => t.id === id);
+    const slot =
+      target?.markerSlot ??
+      (target && target.id !== target.cameraId
+        ? targets
+            .filter((t) => t.cameraId === target.cameraId)
+            .findIndex((t) => t.id === id) + 1
+        : 0);
+    return [10, 11, 12, 13, 14, 15].map((code) => code + slot * 10);
+  }
+  async ensureHost(id: string) {
+    const entry = await this.open(id);
+    if (entry.host) return entry.host;
+    entry.hostOpening ??= (async () => {
+      const token = (await this.pairings?.token(id)) ?? randomUUID();
+      const host = new this.Host({
+        arm: this.arm,
+        camera: entry.camera,
+        deviceId: id,
+        markerCodes: this.markerCodes(id),
+        basePath: `/api/devices/${encodeURIComponent(id)}/calibration`,
+        phoneLinks: () => this.phoneLinks(token),
+      });
+      try {
+        await host.prepare();
+        entry.host = host;
+        return host;
+      } catch (error) {
+        await host.close();
+        throw error;
+      } finally {
+        entry.hostOpening = undefined;
+      }
+    })();
+    return entry.hostOpening;
+  }
+  pairingLinks(token: string) {
+    return this.phoneLinks(token);
+  }
+  async addScreen(cameraId: string, name: string) {
+    await this.open(cameraId);
+    const existing = this.screens().filter((t) => t.cameraId === cameraId);
+    if (existing.length >= 9) throw new Error('At most 9 screens per camera');
+    const id = randomUUID();
+    const store = controllerRuntime(this.arm).profileStore;
+    await store.saveScreenTarget({ id, cameraId, name });
+    await this.open(id);
+    return { id, cameraId, name };
   }
   async startAll(discover = listCameras) {
     this.discoveryError = undefined;
     try {
       const cameras = await discover({ refresh: true });
       await Promise.allSettled(cameras.map((camera) => this.open(camera.id)));
+      const targets =
+        controllerRuntime(this.arm).profileStore.list().screenTargets ?? [];
+      await Promise.allSettled(
+        targets
+          .filter((t) => cameras.some((c) => c.id === t.cameraId))
+          .map((t) => this.open(t.id)),
+      );
     } catch (error) {
       this.discoveryError =
         error instanceof Error ? error.message : String(error);
@@ -88,21 +173,28 @@ export class PlaygroundDevices {
         return existing;
       }
       const owner = `preview:${randomUUID()}`;
-      const camera = await this.cameras.acquire(id, owner);
+      const target = controllerRuntime(this.arm)
+        .profileStore.list()
+        .screenTargets?.find((t) => t.id === id);
+      const cameraId = target?.cameraId ?? id;
+      const screenId = target && target.id !== cameraId ? id : undefined;
+      const camera = await this.cameras.acquire(cameraId, owner, screenId);
       const device = new this.Device({
         arm: this.arm,
-        camera: id,
+        camera: cameraId,
+        id,
+        screenId,
         cameraManager: this.cameras,
       });
       try {
         await device.connect();
         if (this.closed) throw new Error('Device host is closed');
-        const entry = { camera, device, owner };
+        const entry: DeviceEntry = { cameraId, camera, device, owner };
         this.entries.set(id, entry);
         return entry;
       } catch (error) {
         await device.destroy();
-        await this.cameras.release(id, owner);
+        await this.cameras.release(cameraId, owner);
         throw error;
       }
     })();
@@ -127,9 +219,17 @@ export class PlaygroundDevices {
       await this.opening.get(id)?.catch(() => undefined);
       const entry = this.entries.get(id);
       if (!entry) return;
+      if (entry.cameraId === id) {
+        await Promise.all(
+          [...this.entries]
+            .filter(([key, e]) => key !== id && e.cameraId === id)
+            .map(([key]) => this.stop(key)),
+        );
+      }
       entry.calibration?.abort.abort();
+      await entry.host?.close();
       await entry.device.destroy();
-      await this.cameras.release(id, entry.owner);
+      await this.cameras.release(entry.cameraId, entry.owner);
       this.entries.delete(id);
     })();
     this.stopping.set(id, pending);
@@ -207,6 +307,7 @@ export class PlaygroundDevices {
   }
   private calibrationOpening = new Map<string, Promise<unknown>>();
   startCalibration(id: string): Promise<unknown> {
+    this.assertBatchIdle();
     const current = this.calibrationOpening.get(id);
     if (current) return current;
     const pending = this.prepareCalibration(id);
@@ -218,6 +319,7 @@ export class PlaygroundDevices {
   }
   private async prepareCalibration(id: string) {
     const entry = await this.open(id);
+    const host = await this.ensureHost(id);
     if (
       entry.calibration &&
       ['queued', 'running'].includes(entry.calibration.phase)
@@ -243,9 +345,11 @@ export class PlaygroundDevices {
     entry.calibration = session;
     session.pending = entry.device
       .calibrate({
+        host,
         signal: session.abort.signal,
         basePath: `/api/devices/${encodeURIComponent(id)}/calibration`,
         phoneLinks: () => this.phoneLinks(session.token),
+        markerCodes: this.markerCodes(id),
         interaction: async (host, signal) => {
           session.host = host;
           session.phase = 'running';
@@ -295,9 +399,32 @@ export class PlaygroundDevices {
   }
   async cancelCalibration(id: string) {
     await this.opening.get(id)?.catch(() => undefined);
-    const session = this.entries.get(id)?.calibration;
+    const entry = this.entries.get(id);
+    const session = entry?.calibration;
+    if (session && ['queued', 'running'].includes(session.phase))
+      await entry?.host?.service.stop();
     session?.abort.abort();
     await session?.pending;
+  }
+  assertBatchIdle() {
+    const batch = this.batch.read();
+    if (
+      this.batch.active ||
+      (batch && ['running', 'waiting', 'stopping'].includes(batch.status))
+    )
+      throw new RobotArmError(
+        'BUSY',
+        'Stop the calibration batch before changing its setup',
+        409,
+      );
+  }
+  assertCalibrationRunning(id: string) {
+    if (this.entries.get(id)?.calibration?.phase !== 'running')
+      throw new RobotArmError(
+        'BUSY',
+        'Wait for the Controller queue before starting calibration commands',
+        409,
+      );
   }
   async resolvePhoneHost(token: string | null) {
     if (!token || this.closed) return undefined;
@@ -306,9 +433,8 @@ export class PlaygroundDevices {
     const cameraId = this.pairings?.camera(token);
     if (!cameraId) return undefined;
     // Restoring the input page prepares a session, never starts collection.
-    await this.startCalibration(cameraId);
-    await this.entries.get(cameraId)?.calibration?.ready;
-    return this.phoneHost(token);
+    await this.ensureHost(cameraId);
+    return this.entries.get(cameraId)?.host;
   }
   phoneHost(token: string | null) {
     if (!token) return undefined;
@@ -319,6 +445,8 @@ export class PlaygroundDevices {
   }
   async close() {
     this.closed = true;
+    await this.batch.close();
+    await this.markerCalibration.close();
     await Promise.allSettled(this.opening.values());
     await Promise.all([...this.entries.keys()].map((id) => this.stop(id)));
     if (this.ownsCameras) await this.cameras.close();

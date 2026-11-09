@@ -1,3 +1,9 @@
+import {
+  VoiceSettings,
+  robotVoice,
+  useBrowserVoice,
+  useCalibrationLanguage,
+} from '@midscene/arm-calibration-ui';
 import { armUiTheme } from '@midscene/arm-kit-shared';
 import { App as AntApp, Badge, Button, ConfigProvider } from 'antd';
 import enUS from 'antd/locale/en_US';
@@ -16,6 +22,7 @@ import './components/robot-arm/Setup.less';
 
 import { type PlaygroundViews, Views } from './extensions';
 export function App(views: PlaygroundViews) {
+  useBrowserVoice();
   const t = useT();
   const { language, setLanguage } = usePreferences();
   const { phase, check } = useConnection();
@@ -71,9 +78,30 @@ export function App(views: PlaygroundViews) {
     };
   }, [check]);
   useEffect(() => {
+    useCalibrationLanguage.getState().setLanguage(language);
     document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
     document.title = t('playground');
   }, [language]);
+  useEffect(
+    () =>
+      useConnection.subscribe((next, previous) => {
+        if (
+          !next.runtime ||
+          !previous.runtime ||
+          next.setupSession !== previous.setupSession
+        )
+          return;
+        const current = next.runtime.state;
+        const old = previous.runtime.state;
+        if (current.faults.length && !old.faults.length)
+          robotVoice.notify('fault', 3);
+        else if (current.enabled !== old.enabled)
+          robotVoice.notify(current.enabled ? 'enabled' : 'disabled', 1);
+        if (next.runtime.softwarePaused && !previous.runtime.softwarePaused)
+          robotVoice.notify('paused', 2);
+      }),
+    [],
+  );
   return (
     <ConfigProvider theme={armUiTheme} locale={language === 'zh' ? zhCN : enUS}>
       <Views.Provider value={views}>
@@ -86,6 +114,7 @@ export function App(views: PlaygroundViews) {
                 <span>{t('playground')}</span>
               </div>
               <div className="header-actions">
+                <VoiceSettings compact />
                 <Badge
                   status={
                     connected

@@ -94,6 +94,10 @@ export class PhoneSocketServer {
       });
     });
   }
+  /** Renew transport without closing the server or leaving phone fullscreen. */
+  renew() {
+    this.active?.close(1012, 'Phone assignment updated');
+  }
   close(reason?: string) {
     for (const socket of this.server.clients) {
       if (reason) socket.close(1000, reason);

@@ -1,7 +1,7 @@
 import type { ApplicationContext } from '../../application/context.js';
 import type { CartesianPose } from '../../contracts.js';
 import { contactPoint, flangePose } from '../../domain.js';
-// Same upstream projection; Arm Kit normally has no batch-transfer travel floor.
+// Lift free-travel endpoints to the taught reference or measured transfer floor.
 export function atTravelHeight(
   pose: CartesianPose,
   ctx: ApplicationContext & {

@@ -76,3 +76,6 @@ export function CalibrationLanguageProvider({
     </ConfigProvider>
   );
 }
+
+export const useLanguage = () =>
+  useCalibrationLanguage((state) => state.language);

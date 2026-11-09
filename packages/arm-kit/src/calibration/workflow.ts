@@ -20,13 +20,22 @@ import {
   RobotArmError,
   semanticJson,
 } from '../contracts.js';
-import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
+import {
+  add,
+  assertPose,
+  contactPoint,
+  distance,
+  rotate,
+  scale,
+  unit,
+} from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
 import type { CalibrationVision } from './camera/vision.js';
 import { AutomaticCapture } from './exploration/capture.js';
 import { fitExploration } from './exploration/fit.js';
 import { invertMapping, pointDistance, project } from './phone/geometry.js';
 import { CalibrationPhoneSession, sameLayout } from './phone/session.js';
+import { knownScreenTravelHeight } from './screen-position.js';
 import { CalibrationSetup, calibrationGeometryKey } from './setup.js';
 import { assertSafeObservation } from './verification/safe-position.js';
 
@@ -58,6 +67,8 @@ export interface AssistedCalibrationOptions {
   deviceId?: string;
   vision: CalibrationVision;
   phoneLinks?: () => { name: string; url: string }[];
+  referencePosition?: () => CartesianPose | undefined;
+  markerCodes?: readonly number[];
 }
 
 /** Coordinates an explicit calibration task; setup and phone requests have independent lifetimes. */
@@ -105,7 +116,7 @@ export class CalibrationWorkflow {
   private readonly phoneLinks: () => { name: string; url: string }[];
   private state?: SessionState;
   private input?: AssistedCalibrationInput;
-  private readonly phone = new CalibrationPhoneSession();
+  private readonly phone: CalibrationPhoneSession;
   private capture?: Promise<void>;
   private captureOperationId?: string;
   private verification?: Promise<void>;
@@ -306,6 +317,7 @@ export class CalibrationWorkflow {
       this.changed();
     }
   }
+  private acceptingAutomatically = false;
   private retryVerification = false;
   private receipt?: WebVerificationResult;
   private receivingTarget?: string;
@@ -315,6 +327,7 @@ export class CalibrationWorkflow {
     private readonly runtime: RobotArmRuntime,
     private readonly options: AssistedCalibrationOptions,
   ) {
+    this.phone = new CalibrationPhoneSession(options.markerCodes);
     this.phoneLinks = options.phoneLinks ?? (() => []);
     this.configuration = new CalibrationSetup(
       runtime,
@@ -345,6 +358,7 @@ export class CalibrationWorkflow {
         anchors: [],
         points: [],
       }),
+      stage: s.calibration?.auto?.avoidingCamera ? 'avoiding-camera' : s.stage,
       phoneConnected: this.phone?.connected() ?? false,
       layout: s.mapping?.layout ?? this.phone?.update?.layout,
     });
@@ -465,6 +479,7 @@ export class CalibrationWorkflow {
 
   requestMarkerDisplay(reposition = false) {
     if (reposition) this.insetMarkers = !this.insetMarkers;
+    this.phoneHome = false;
     this.markerRequest = randomUUID();
     this.aligned = false;
     this.changed();
@@ -487,7 +502,17 @@ export class CalibrationWorkflow {
     this.aligned = aligned;
     this.changed();
   }
+  private phoneHome = false;
+  restorePhoneHome() {
+    this.phoneHome = true;
+    this.changed();
+  }
+  resumePhonePage() {
+    this.phoneHome = false;
+    this.changed();
+  }
   phoneView(): CalibrationPageReply {
+    if (this.phoneHome) return { view: 'touch-preview', anchors: [] };
     const s = this.state;
     if (
       !s ||
@@ -520,15 +545,19 @@ export class CalibrationWorkflow {
             }
           : undefined,
       view:
-        s.stage === 'positioning-safe'
-          ? 'return-ready'
-          : s.stage === 'verification-failed'
-            ? 'review'
-            : s.stage === 'collecting' || s.stage === 'reprobing'
-              ? 'collect'
-              : s.stage === 'verifying'
-                ? 'verify'
-                : s.stage,
+        s.stage === 'positioning-boundary'
+          ? 'positioning'
+          : s.stage === 'avoiding-camera'
+            ? 'safety'
+            : s.stage === 'positioning-safe'
+              ? 'return-ready'
+              : s.stage === 'verification-failed'
+                ? 'review'
+                : s.stage === 'collecting' || s.stage === 'reprobing'
+                  ? 'collect'
+                  : s.stage === 'verifying'
+                    ? 'verify'
+                    : s.stage,
       imageTrial: Boolean(s.imageTrial && s.stage === 'verifying'),
       capture: ['collecting', 'reprobing', 'interrupted'].includes(s.stage)
         ? this.measurements?.snapshot().capture
@@ -586,8 +615,16 @@ export class CalibrationWorkflow {
         .stop()
         .catch((e) => log('Failed to stop interrupted calibration:', e));
   }
+  private markerCapture?: AssistedCalibrationSetup['markerCapture'];
+  setMarkerCapture(value?: AssistedCalibrationSetup['markerCapture']) {
+    this.markerCapture = value;
+    this.changed();
+  }
   setup(): AssistedCalibrationSetup {
-    return this.configuration.status();
+    return {
+      ...this.configuration.status(),
+      markerCapture: this.markerCapture,
+    };
   }
   async prepare(input: AssistedCalibrationInput) {
     return this.configureSetup(() => this.configuration.prepare(input));
@@ -660,6 +697,20 @@ export class CalibrationWorkflow {
     try {
       const mapping = await this.configuration.assertCurrent();
       this.beginTask(mapping);
+      const teaching = this.runtime.profileStore.installationTeaching(
+        this.input!,
+      );
+      if (teaching) {
+        this.state!.referencePosition =
+          !teaching.referenceDeviceId ||
+          teaching.referenceDeviceId === this.options.deviceId
+            ? teaching.referencePose
+            : undefined;
+        this.state!.cameraBoundaryPosition = teaching.poses.cameraBoundary;
+        this.state!.teachingId = teaching.id;
+        this.state!.referencePosition =
+          this.options.referencePosition?.() ?? this.state!.referencePosition;
+      }
       return this.status()!;
     } finally {
       this.actionBusy = false;
@@ -671,6 +722,7 @@ export class CalibrationWorkflow {
     referencePosition?: CartesianPose,
     safePosition?: CartesianPose,
   ) {
+    this.phoneHome = false;
     this.retryVerification = false;
     this.deviceRevision = this.options.deviceId
       ? (this.runtime.profileStore.deviceBinding(this.options.deviceId)
@@ -698,6 +750,19 @@ export class CalibrationWorkflow {
   }
   private async assertMechanicalFrame(requirePhone = false) {
     const s = this.require();
+    const stage = s.stage;
+    const stopRevision = this.runtime.stopRevision;
+    await this.options.vision.assertPerspectiveCurrent?.();
+    if (
+      this.state !== s ||
+      s.stage !== stage ||
+      stopRevision !== this.runtime.stopRevision
+    )
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'Calibration changed or stopped during outline verification',
+        409,
+      );
     if (requirePhone) this.phone.assertConnected();
     if (
       !s.mapping ||
@@ -721,6 +786,12 @@ export class CalibrationWorkflow {
       action === 'restart' && this.state?.id === id
         ? this.state
         : this.require(id);
+    // Cancellation must preempt a pending read/verification instead of waiting
+    // behind the normal command gate and allowing that command to start motion.
+    if (action === 'cancel') {
+      await this.cancel();
+      return this.status()!;
+    }
     if (this.actionBusy)
       throw new RobotArmError(
         'BUSY',
@@ -729,10 +800,6 @@ export class CalibrationWorkflow {
       );
     this.actionBusy = true;
     try {
-      if (action === 'cancel') {
-        await this.cancel();
-        return this.status()!;
-      }
       if (
         ['auto-repair', 'reprobe', 'apply-reprobe', 'verify'].includes(action)
       )
@@ -768,7 +835,117 @@ export class CalibrationWorkflow {
           : undefined;
         const safePosition = sameGeometry ? s.safePosition : undefined;
         await this.cancel();
+        const teachingId = sameGeometry ? s.teachingId : undefined;
+        const cameraBoundaryPosition = sameGeometry
+          ? s.cameraBoundaryPosition
+          : undefined;
         this.beginTask(mapping, referencePosition, safePosition);
+        this.state!.teachingId = teachingId;
+        this.state!.cameraBoundaryPosition = cameraBoundaryPosition;
+      } else if (action === 'position-boundary') {
+        if (
+          !confirmed ||
+          s.stage !== 'ready' ||
+          !s.referencePosition ||
+          this.capture
+        )
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'Record the reference position first',
+            409,
+          );
+        await this.assertMechanicalFrame();
+        this.recordPositionRequested = false;
+        s.cameraBoundaryPosition = undefined;
+        s.teachingId = undefined;
+        s.stage = 'positioning-boundary';
+        this.capture = this.recordPosition(false, true)
+          .catch((e) => {
+            if (s.stage === 'positioning-boundary') s.stage = 'ready';
+            s.error = errorText(e);
+          })
+          .finally(() => {
+            this.capture = undefined;
+            this.changed();
+          });
+      } else if (action === 'record-boundary') {
+        if (!confirmed || s.stage !== 'positioning-boundary' || !this.capture)
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'Position the arm at the camera-side boundary first',
+            409,
+          );
+        this.recordPositionRequested = true;
+        await this.capture;
+        if (!s.cameraBoundaryPosition)
+          throw new RobotArmError(
+            'NOT_READY',
+            s.error ?? 'Boundary was not recorded',
+            409,
+          );
+      } else if (action === 'save-teaching') {
+        if (
+          !confirmed ||
+          s.stage !== 'ready' ||
+          !s.referencePosition ||
+          !s.cameraBoundaryPosition ||
+          this.capture
+        )
+          throw new RobotArmError(
+            'CONFIRMATION_REQUIRED',
+            'Record both positions and confirm the clear arm corridor',
+            409,
+          );
+        await this.assertMechanicalFrame();
+        const tool = this.runtime.profileStore.getTool(
+          this.input!.toolProfileId,
+        );
+        const reference = s.referencePosition;
+        const boundary = s.cameraBoundaryPosition;
+        const a = contactPoint(reference, tool.offsetMm);
+        const b = contactPoint(boundary, tool.offsetMm);
+        const separation = Math.hypot(b.x - a.x, b.y - a.y);
+        if (separation < 20)
+          throw new RobotArmError(
+            'INVALID_ARGUMENT',
+            'Record the camera-side boundary at least 20 mm from the reference',
+          );
+        if (
+          distance(
+            unit(rotate(reference.orientation, tool.contactDirection)),
+            unit(rotate(boundary.orientation, tool.contactDirection)),
+          ) > 0.005
+        )
+          throw new RobotArmError(
+            'INVALID_ARGUMENT',
+            'Keep the stylus contact direction unchanged',
+          );
+        const teaching = {
+          id: randomUUID(),
+          recordedAt: new Date().toISOString(),
+          referenceDeviceId: this.options.deviceId,
+          robotProfileId: this.input!.robotProfileId,
+          toolProfileId: tool.id,
+          cameraId: this.input!.cameraId,
+          robotGeometryRevision: this.runtime.profileStore.getRobot(
+            this.input!.robotProfileId,
+          ).geometryRevision,
+          toolGeometryRevision: tool.geometryRevision,
+          referencePose: reference,
+          poses: { reference, cameraBoundary: boundary },
+          cameraBoundary: {
+            point: { x: b.x, y: b.y },
+            normal: {
+              x: (b.x - a.x) / separation,
+              y: (b.y - a.y) / separation,
+            },
+          },
+          corridorConfirmed: true as const,
+        };
+        await this.runtime.configure(() =>
+          this.runtime.profileStore.saveInstallationTeaching(teaching),
+        );
+        s.teachingId = teaching.id;
       } else if (action === 'position-reference') {
         if (!['ready', 'reference-required'].includes(s.stage) || this.capture)
           throw new RobotArmError(
@@ -786,6 +963,8 @@ export class CalibrationWorkflow {
         this.recordPositionRequested = false;
         s.error = undefined;
         s.referencePosition = undefined;
+        s.cameraBoundaryPosition = undefined;
+        s.teachingId = undefined;
         s.stage = 'positioning';
         this.capture = this.recordPosition()
           .catch((e) => {
@@ -987,6 +1166,7 @@ export class CalibrationWorkflow {
         if (
           ![
             'positioning',
+            'positioning-boundary',
             'positioning-safe',
             'collecting',
             'capture-failed',
@@ -1019,7 +1199,10 @@ export class CalibrationWorkflow {
         s.result ??= await this.runtime.acceptWebCalibration(
           s.calibration.id,
           s.calibration.auto
-            ? { protocol: 'auto-boundary-v1' }
+            ? {
+                protocol: 'auto-boundary-v1',
+                automatic: this.acceptingAutomatically,
+              }
             : {
                 protocol: 'web-v1',
                 coordinateSpace: 'phone',
@@ -1053,9 +1236,16 @@ export class CalibrationWorkflow {
       this.changed();
     }
   }
-  private async recordPosition(recordTaskPosition = false) {
+  private async recordPosition(
+    recordTaskPosition = false,
+    recordBoundary = false,
+  ) {
     const s = this.state!;
-    const stage = recordTaskPosition ? 'positioning-safe' : 'positioning';
+    const stage = recordBoundary
+      ? 'positioning-boundary'
+      : recordTaskPosition
+        ? 'positioning-safe'
+        : 'positioning';
     const task = this.runtime.collectWebPoints(this.input!, async (host) => {
       while (s.stage === stage && !this.recordPositionRequested) {
         host.check();
@@ -1080,6 +1270,9 @@ export class CalibrationWorkflow {
         s.safePosition = pose;
         if (!this.fittedGeometry) s.referencePosition = undefined;
         s.stage = this.fittedGeometry ? 'return-ready' : 'ready';
+      } else if (recordBoundary) {
+        s.cameraBoundaryPosition = pose;
+        s.stage = 'ready';
       } else {
         s.referencePosition = pose;
         s.stage = 'ready';
@@ -1103,6 +1296,46 @@ export class CalibrationWorkflow {
       );
     this.measurements = measurements;
     const task = this.runtime.collectAutomaticPoints(input, async (host) => {
+      const teaching = this.runtime.profileStore.installationTeaching(input);
+      if (s.teachingId && teaching?.id !== s.teachingId)
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'Installation teaching changed',
+          409,
+        );
+      if (teaching) {
+        const current = await host.read();
+        const floor = Math.max(
+          knownScreenTravelHeight(this.runtime.profileStore.list(), input),
+          this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+          contactPoint(current, tool.offsetMm).z,
+          contactPoint(s.referencePosition!, tool.offsetMm).z,
+        );
+        const lift = {
+          ...current,
+          positionMm: {
+            ...current.positionMm,
+            z:
+              current.positionMm.z +
+              floor -
+              contactPoint(current, tool.offsetMm).z,
+          },
+        };
+        const above = {
+          ...s.referencePosition!,
+          positionMm: {
+            ...s.referencePosition!.positionMm,
+            z:
+              s.referencePosition!.positionMm.z +
+              floor -
+              contactPoint(s.referencePosition!, tool.offsetMm).z,
+          },
+        };
+        await host.preflight?.([lift, above, s.referencePosition!]);
+        await host.move(lift);
+        await host.move(above);
+        await host.move(s.referencePosition!);
+      }
       await measurements.run(
         {
           ...host,
@@ -1120,6 +1353,12 @@ export class CalibrationWorkflow {
         {
           tool,
           webToImage: s.mapping!.webToImage,
+          minimumTravelTipZMm: Math.max(
+            teaching
+              ? contactPoint(teaching.referencePose, tool.offsetMm).z
+              : Number.NEGATIVE_INFINITY,
+            this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+          ),
           screen: {
             ...input.motion!,
             id: s.id,
@@ -1137,14 +1376,32 @@ export class CalibrationWorkflow {
       );
     });
     this.captureOperationId = this.runtime.current()?.requestId;
+    let outlineCheck: Promise<void> | undefined;
+    let nextOutlineCheck = 0;
     const watchdog = setInterval(() => {
       if (s.stage === 'collecting' && !this.phone.connected())
         this.interrupt('Phone feedback was lost during automatic collection');
+      if (
+        s.stage === 'collecting' &&
+        !outlineCheck &&
+        Date.now() >= nextOutlineCheck
+      ) {
+        nextOutlineCheck = Date.now() + 1_000;
+        outlineCheck = this.assertMechanicalFrame(true)
+          .catch((error) => {
+            if (s.stage === 'collecting')
+              this.interrupt(errorText(error), error);
+          })
+          .finally(() => {
+            outlineCheck = undefined;
+          });
+      }
     }, 100);
     try {
       await task;
     } finally {
       clearInterval(watchdog);
+      await outlineCheck;
     }
     await this.assertMechanicalFrame(true);
     if (s.stage !== 'collecting') return;
@@ -1164,8 +1421,13 @@ export class CalibrationWorkflow {
       () => this.assertMechanicalFrame(true),
     );
     if (s.stage !== 'safety') return;
-    s.safePosition = undefined;
-    s.stage = 'return-ready';
+    if (s.calibration.auto?.observationRecorded) {
+      s.safePosition = s.calibration.candidate!.observationPose;
+      s.stage = 'review';
+    } else {
+      s.safePosition = undefined;
+      s.stage = 'return-ready';
+    }
     this.changed();
   }
 
@@ -1401,6 +1663,7 @@ export class CalibrationWorkflow {
       auto: this.automaticEvidence
         ? {
             evidence: this.automaticEvidence,
+            minimumTravelTipZMm: this.batchTravelTipZMm,
             startPose: s.referencePosition!,
             fast: s.explorationMode !== 'standard',
           }
@@ -1471,6 +1734,94 @@ export class CalibrationWorkflow {
     await this.capture;
     await this.verification;
     s.stage = 'cancelled';
+  }
+  setBatchReference(pose: CartesianPose) {
+    const state = this.require();
+    if (state.stage !== 'ready' || this.capture)
+      throw new RobotArmError(
+        'INVALID_STAGE',
+        'Finish the current operation before confirming placement',
+        409,
+      );
+    assertPose(pose);
+    state.referencePosition = structuredClone(pose);
+    this.changed();
+  }
+  private batchTravelTipZMm?: number;
+  setBatchTravelHeight(value?: number) {
+    if (value !== undefined && !Number.isFinite(value))
+      throw new RobotArmError('INVALID_ARGUMENT', 'Invalid travel height');
+    this.batchTravelTipZMm = value;
+  }
+  phoneObservation() {
+    return this.phone.update ? structuredClone(this.phone.update) : undefined;
+  }
+  async acceptAutomatically() {
+    const state = this.status();
+    const c = state?.calibration;
+    const evidence = c?.auto?.evidence;
+    const reasons: string[] = [];
+    if (
+      state?.stage !== 'review' ||
+      !c?.auto?.cameraAvoidanceRecorded ||
+      !c.auto.observationRecorded
+    )
+      reasons.push('The camera-avoidance Safe Position is missing');
+    if (
+      !c?.candidate ||
+      c.candidate.geometryStatus !== 'valid' ||
+      c.candidate.acceptanceStatus !== 'pending'
+    )
+      reasons.push('The automatic result has no valid pending candidate');
+    const quality = c?.candidate?.quality;
+    if (
+      !quality ||
+      !Number.isFinite(quality.rmseMm) ||
+      quality.rmseMm > 0.5 ||
+      quality.inliers < 5 ||
+      quality.inliers > quality.total ||
+      quality.minorSpanMm < 10 ||
+      quality.majorSpanMm < 10
+    )
+      reasons.push('The measured contacts do not meet the plane quality gates');
+    if (
+      !evidence ||
+      ![
+        evidence.planeRmseMm,
+        evidence.gridRmsMm,
+        evidence.validationMaxMm,
+        evidence.coverage,
+      ].every(Number.isFinite) ||
+      evidence.planeRmseMm > 0.5 ||
+      evidence.gridRmsMm > 1 ||
+      evidence.validationMaxMm > 1 ||
+      evidence.coverage < 0.6 ||
+      evidence.samples.length < 7 ||
+      evidence.planeSource !== 'measured' ||
+      !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
+      (evidence.surfaceMaxMm ?? 0) > 2
+    )
+      reasons.push('The deterministic geometry gates did not pass');
+    if (
+      !c?.boundary ||
+      ![
+        c.boundary.hoverCorners,
+        c.boundary.hoverEdges,
+        c.boundary.contactCorners,
+        c.boundary.contactEdges,
+      ].every(Boolean)
+    )
+      reasons.push('Complete both boundary verification groups');
+    if (!this.setup().teaching) reasons.push('Installation teaching changed');
+    if (reasons.length) return { accepted: false, reasons };
+    await this.configuration.assertCurrent();
+    this.acceptingAutomatically = true;
+    try {
+      await this.command(state!.id, 'accept', true);
+      return { accepted: true, reasons: [] };
+    } finally {
+      this.acceptingAutomatically = false;
+    }
   }
   async stop() {
     if (this.state && this.state.stage !== 'completed') await this.cancel();

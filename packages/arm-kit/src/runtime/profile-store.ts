@@ -36,6 +36,7 @@ import {
   assertPose,
   assertVector,
   assertWorkspace,
+  contactPoint,
   cross,
   dot,
   length,
@@ -209,6 +210,51 @@ export class ProfileStore {
     parsed.robots.forEach(validateRobot);
     parsed.tools.forEach(validateTool);
     parsed.screens.forEach(validateScreen);
+    if (
+      parsed.screenTargets !== undefined &&
+      (!Array.isArray(parsed.screenTargets) ||
+        new Set(parsed.screenTargets.map((t: { id: string }) => t.id)).size !==
+          parsed.screenTargets.length ||
+        parsed.screenTargets.some(
+          (t: { id: string; cameraId: string; name: string }) =>
+            !t ||
+            typeof t.id !== 'string' ||
+            !t.id ||
+            typeof t.cameraId !== 'string' ||
+            !t.cameraId ||
+            typeof t.name !== 'string' ||
+            !t.name.trim(),
+        ))
+    )
+      throw new RobotArmError('INVALID_PROFILE_FILE', 'Invalid screen targets');
+    if (
+      parsed.installationTeachings !== undefined &&
+      !Array.isArray(parsed.installationTeachings)
+    )
+      throw new RobotArmError(
+        'INVALID_PROFILE_FILE',
+        'Invalid installation teaching list',
+      );
+    for (const t of parsed.installationTeachings ?? []) {
+      assertPose(t.referencePose);
+      assertPose(t.poses?.reference);
+      assertPose(t.poses?.cameraBoundary);
+      const n = t.cameraBoundary?.normal;
+      const p = t.cameraBoundary?.point;
+      if (
+        !t.id ||
+        !t.cameraId ||
+        t.corridorConfirmed !== true ||
+        !n ||
+        !p ||
+        ![n.x, n.y, p.x, p.y].every(Number.isFinite) ||
+        Math.abs(Math.hypot(n.x, n.y) - 1) > 1e-6
+      )
+        throw new RobotArmError(
+          'INVALID_PROFILE_FILE',
+          'Invalid installation teaching',
+        );
+    }
     for (const p of [...parsed.robots, ...parsed.tools, ...parsed.screens])
       if (!Number.isInteger(p.geometryRevision) || p.geometryRevision < 1)
         throw new RobotArmError(
@@ -500,6 +546,187 @@ export class ProfileStore {
         ]),
       )
       .digest('hex');
+  }
+  saveScreenPage(page: NonNullable<ProfileData['screenPages']>[number]) {
+    return this.transaction((draft) => {
+      if (
+        draft.screenPages?.some(
+          (p) =>
+            p.id !== page.id &&
+            (p.pageKey === page.pageKey ||
+              p.token === page.token ||
+              (page.targetId && p.targetId === page.targetId)),
+        )
+      )
+        throw new RobotArmError(
+          'PAGE_ALREADY_BOUND',
+          'One page can only belong to one screen',
+          409,
+        );
+      draft.screenPages = [
+        ...(draft.screenPages ?? []).filter((p) => p.id !== page.id),
+        structuredClone(page),
+      ];
+    });
+  }
+  saveInstallationTeachingDraft(
+    input: import('../contracts.js').InstallationTeachingDraft,
+    guard?: () => void,
+  ) {
+    return this.transaction((draft) => {
+      draft.installationTeachingDrafts = [
+        ...(draft.installationTeachingDrafts ?? []).filter(
+          (t) =>
+            t.cameraId !== input.cameraId ||
+            t.robotProfileId !== input.robotProfileId ||
+            t.toolProfileId !== input.toolProfileId,
+        ),
+        structuredClone(input),
+      ];
+    }, guard);
+  }
+  updateScreenTarget(
+    id: string,
+    input: {
+      name?: string;
+      pageKey?: string;
+      markerSlot?: number;
+      archived?: boolean;
+    },
+  ) {
+    return this.transaction((draft) => {
+      const target = draft.screenTargets?.find((t) => t.id === id);
+      if (!target)
+        throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
+      if (
+        input.name !== undefined &&
+        (!input.name.trim() ||
+          input.name.length > 40 ||
+          draft.screenTargets?.some(
+            (t) =>
+              !t.archived &&
+              t.id !== id &&
+              t.cameraId === target.cameraId &&
+              t.name.toLocaleLowerCase() ===
+                input.name!.trim().toLocaleLowerCase(),
+          ))
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Screen names must be unique.',
+        );
+      Object.assign(
+        target,
+        input,
+        input.name ? { name: input.name.trim() } : {},
+      );
+      if (input.pageKey)
+        for (const other of draft.screenTargets ?? []) {
+          if (other.id !== id && other.pageKey === input.pageKey)
+            other.pageKey = undefined;
+        }
+    });
+  }
+  clearCalibrationBatch() {
+    return this.transaction((draft) => {
+      draft.calibrationBatch = undefined;
+    });
+  }
+  retireCalibration(id: string) {
+    return this.transaction((draft) => {
+      const c = draft.calibrations.find((c) => c.id === id);
+      if (!c)
+        throw new RobotArmError('INVALID_ARGUMENT', 'Calibration not found');
+      c.acceptanceStatus = 'pending';
+      draft.devices = draft.devices?.filter(
+        (d) => d.calibrationProfileId !== id,
+      );
+    });
+  }
+  saveCalibrationBatch(
+    state: import('../assisted-contracts.js').CalibrationBatchState,
+  ) {
+    return this.transaction((draft) => {
+      draft.calibrationBatch = structuredClone(state);
+    });
+  }
+  saveScreenTarget(input: { id: string; cameraId: string; name: string }) {
+    if (
+      !input.id ||
+      !input.cameraId ||
+      !input.name.trim() ||
+      input.name.trim().length > 40
+    )
+      throw new RobotArmError(
+        'INVALID_ARGUMENT',
+        'Screen name and camera are required',
+      );
+    return this.transaction((draft) => {
+      if (draft.screenTargets?.some((t) => t.id === input.id))
+        throw new RobotArmError('INVALID_ARGUMENT', 'Screen already exists');
+      if (
+        draft.screenTargets?.some(
+          (t) =>
+            !t.archived &&
+            t.cameraId === input.cameraId &&
+            t.name.toLocaleLowerCase() ===
+              input.name.trim().toLocaleLowerCase(),
+        )
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Screen names must be unique.',
+        );
+      draft.screenTargets = [
+        ...(draft.screenTargets ?? []),
+        { ...input, name: input.name.trim() },
+      ];
+    });
+  }
+  installationTeaching(input: {
+    robotProfileId: string;
+    toolProfileId: string;
+    cameraId: string;
+  }) {
+    const robot = this.getRobot(input.robotProfileId);
+    const tool = this.getTool(input.toolProfileId);
+    return this.list().installationTeachings?.find(
+      (t) =>
+        t.robotProfileId === robot.id &&
+        t.toolProfileId === tool.id &&
+        t.cameraId === input.cameraId &&
+        t.robotGeometryRevision === robot.geometryRevision &&
+        t.toolGeometryRevision === tool.geometryRevision &&
+        t.corridorConfirmed === true,
+    );
+  }
+  saveInstallationTeaching(
+    teaching: import('../contracts.js').InstallationTeaching,
+  ) {
+    assertPose(teaching.referencePose);
+    assertPose(teaching.poses.cameraBoundary);
+    return this.transaction((draft) => {
+      if (
+        this.getRobot(teaching.robotProfileId).geometryRevision !==
+          teaching.robotGeometryRevision ||
+        this.getTool(teaching.toolProfileId).geometryRevision !==
+          teaching.toolGeometryRevision
+      )
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'Teaching geometry changed',
+          409,
+        );
+      draft.installationTeachings = [
+        ...(draft.installationTeachings ?? []).filter(
+          (t) =>
+            t.robotProfileId !== teaching.robotProfileId ||
+            t.toolProfileId !== teaching.toolProfileId ||
+            t.cameraId !== teaching.cameraId,
+        ),
+        structuredClone(teaching),
+      ];
+    });
   }
   calibrationSetup(deviceId: string) {
     const setup = this.data.calibrationSetups?.find(
@@ -964,8 +1191,25 @@ export class ProfileStore {
             409,
           );
       }
+      const teaching =
+        current?.cameraId &&
+        d.installationTeachings?.find(
+          (t) =>
+            t.cameraId === current.cameraId &&
+            t.robotProfileId === s.robotProfileId &&
+            t.toolProfileId === s.toolProfileId &&
+            t.robotGeometryRevision === c.robotGeometryRevision &&
+            t.toolGeometryRevision === c.toolGeometryRevision,
+        );
       if (
         verificationContextKey({
+          installationTeaching: teaching || undefined,
+          minimumTravelTipZMm: teaching
+            ? contactPoint(
+                teaching.referencePose,
+                d.tools.find((p) => p.id === s.toolProfileId)!.offsetMm,
+              ).z
+            : undefined,
           robot: d.robots.find((p) => p.id === s.robotProfileId)!,
           tool: d.tools.find((p) => p.id === s.toolProfileId)!,
           screen: d.screens.find((p) => p.id === s.screenProfileId)!,

@@ -1,5 +1,31 @@
 import { assistedCalibrationZh } from './assisted-calibration-zh';
+import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
+  'Saved and connected screen pages are listed below. Keep one active page per screen.':
+    '以下为已保存和已连接的页面；每块屏幕保持一个页面在线。',
+  'Connect the computer to Wi-Fi before pairing a phone':
+    '请先将电脑连接 Wi‑Fi，再配对手机',
+  'Waiting for the Controller queue': '正在等待机械臂执行队列',
+  'Wait for the Controller queue before starting calibration commands':
+    '请等待机械臂执行队列就绪后再开始标定',
+  'Open this address on the phone. The QR code binds it automatically.':
+    '在手机上打开此地址；扫描二维码会自动完成绑定。',
+  'Assign the screen page in Camera Mapping first':
+    '请先在相机映射中分配屏幕页面',
+  'Record Camera Boundary': '记录相机边界',
+  'Save Installation Teaching': '保存安装示教',
+  'Teach Camera Boundary': '示教相机边界',
+  'Reteach Installation': '重新示教',
+  'Saved installation teaching is shared by screens on this camera.':
+    '已保存的安装示教由当前相机的各块屏幕共用。',
+  'Record the camera-side boundary once to enable automatic camera avoidance.':
+    '记录一次相机侧边界，即可在边界验证后自动移动到相机安全位。',
+  'The phone is horizontal, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.':
+    '确认手机水平、触控笔竖直，参考位一侧整条机械臂的路径不会碰到相机，且没有其他障碍物。',
+  'Move straight from the reference towards the camera and stop at a safe boundary. Leave clearance for the whole arm, then release it before recording.':
+    '从参考位朝相机方向直线移动，在仍安全的位置停下。为整条机械臂留足间隙，松手后记录。',
+  'Moving to the camera-avoidance position': '正在移动到相机避让安全位',
+
   'Repeating validation heights': '正在重复测量验证点高度',
   'Repeated contact heights are inconsistent; check screen stability':
     '同一点多次测得的接触高度波动过大，请检查手机固定和触控笔接触。',
@@ -2268,5 +2294,6 @@ export const zh: Record<string, string> = {
   'Speed, contact and release values for {0}. Saving does not enable or move the robot and keeps the existing calibration geometry.':
     '{0} 的速度、接触与释放参数。保存不会使能或移动机械臂，并保留已有的标定几何。',
   ...setupZh,
+  ...migratedZh,
   ...assistedCalibrationZh,
 };

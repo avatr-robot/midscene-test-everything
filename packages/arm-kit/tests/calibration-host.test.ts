@@ -16,6 +16,7 @@ it('prepares first-time measured setup without inventing tool geometry or replac
     camera: { id: 'fresh-camera', name: 'Camera' },
     stream: { getInfo: () => ({ state: 'running' }) },
     getCorrection: () => undefined,
+    getPerspectiveValidity: () => undefined,
   } as unknown as CameraSession;
   const host = new CalibrationHost({ arm, camera, deviceId: 'new-device' });
   try {
@@ -200,6 +201,7 @@ it('restores measured length and weight before calibration acceptance, isolated 
     camera: { id: 'remembered-camera', name: 'Camera' },
     stream: { getInfo: () => ({ state: 'running' }) },
     getCorrection: () => undefined,
+    getPerspectiveValidity: () => undefined,
   } as unknown as CameraSession;
   const options = { arm, camera, deviceId: 'remembered-device' };
   const first = new CalibrationHost(options);

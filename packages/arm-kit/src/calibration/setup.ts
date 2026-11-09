@@ -46,6 +46,9 @@ export class CalibrationSetup {
   ) {}
   status(): AssistedCalibrationSetup {
     return structuredClone({
+      teaching:
+        this.input &&
+        this.runtime.profileStore.installationTeaching(this.input),
       prepared: Boolean(this.input),
       selection: this.input
         ? {
@@ -178,6 +181,7 @@ export class CalibrationSetup {
     };
   }
   async assertCurrent() {
+    await this.vision.assertPerspectiveCurrent?.();
     this.phone.assertAvailable();
     if (
       !this.mapping ||
