@@ -15,6 +15,8 @@ import { fixture, pose } from './fixtures.js';
 describe('first-time automatic exploration', () => {
   it.each([
     'standard',
+    'standard-tilt',
+    'fast-tilt',
     'fast-tap',
     'fast-slide',
     'fast-adaptive-tap',
@@ -84,7 +86,8 @@ describe('first-time automatic exploration', () => {
       const finishedSampling = false;
       let reacquisitionLift = false;
       let lowestZ = Number.POSITIVE_INFINITY;
-      const isFast = mode !== 'standard' && mode !== 'safety-floor';
+      const isFast = !mode.startsWith('standard') && mode !== 'safety-floor';
+      const tilted = mode.endsWith('-tilt');
       const pagePixel = () =>
         contact && touching
           ? {
@@ -251,8 +254,14 @@ describe('first-time automatic exploration', () => {
           previousHeld = touching;
           const inside =
             point.x >= 0 && point.x <= 200 && point.y <= 0 && point.y >= -100;
+          const tiltOffset = tilted
+            ? 0.015 * (point.x - 100) - 0.005 * (point.y + 50)
+            : 0;
           touching =
-            inside && (touching ? point.z < releaseZ : point.z <= activationZ);
+            inside &&
+            (touching
+              ? point.z < releaseZ + tiltOffset
+              : point.z <= activationZ + tiltOffset);
           if (mode === 'release-missing' && releaseProbeStarted)
             touching = true;
           if (mode === 'repress-missing' && repressing) touching = false;
@@ -340,8 +349,10 @@ describe('first-time automatic exploration', () => {
           if (mode.startsWith('snapshot-')) expect(motions).toHaveLength(0);
           if (mode === 'safety-floor')
             expect(lowestZ).toBeGreaterThanOrEqual(27.625);
-          if (mode === 'fast-no-touch')
+          if (mode === 'fast-no-touch') {
             expect(session.auto?.fastAdaptation?.searchSteps).toBe(6);
+            expect(session.auto?.collectedSamples).toHaveLength(3);
+          }
           return;
         }
         const collection = await job;
@@ -365,19 +376,27 @@ describe('first-time automatic exploration', () => {
           expect(fit).toThrow('Validation residual');
           return;
         }
-        if (mode === 'fast-adaptive-tap') {
+        if (mode === 'fast-adaptive-tap' || mode === 'fast-tilt') {
           expect(fit).toThrow('Insufficient plane inliers');
           return;
         }
         const result = fit();
+        if (tilted) {
+          const { normal } = result.candidate.plane;
+          expect(-normal.x / normal.z).toBeCloseTo(0.015, 3);
+          expect(-normal.y / normal.z).toBeCloseTo(-0.005, 3);
+        }
         expect(result.candidate.acceptanceStatus).toBe('pending');
+        // The simulated screen maps pixels in XY; the measured axes follow its surface.
+        const sizePrecision =
+          tilted || mode.startsWith('fast-adaptive') ? 1 : 4;
         expect(result.measuredSize.physicalWidthMm).toBeCloseTo(
-          200,
-          mode.startsWith('fast-adaptive') ? 1 : 4,
+          tilted ? Math.hypot(200, 3) : 200,
+          sizePrecision,
         );
         expect(result.measuredSize.physicalHeightMm).toBeCloseTo(
-          100,
-          mode.startsWith('fast-adaptive') ? 1 : 4,
+          tilted ? Math.hypot(100, 0.5) : 100,
+          sizePrecision,
         );
         expect(result.coverage).toBeGreaterThan(0.6);
         expect(result.gridRmsMm).toBeLessThan(0.75);
