@@ -46,8 +46,13 @@
 .camera-stage-actions {
   display: flex;
   align-items: center;
-  .ant-btn-icon-only { width: 32px; padding-inline: 0; }
-  .ant-btn-icon { display: inline-flex; }
+  .ant-btn-icon-only {
+    width: 32px;
+    padding-inline: 0;
+  }
+  .ant-btn-icon {
+    display: inline-flex;
+  }
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -225,4 +230,23 @@
   .rv-segmented.ant-segmented .ant-segmented-thumb {
     transition: none;
   }
+}
+
+.camera-fullscreen {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+}
+.camera-stage-preview:fullscreen,
+.camera-stage-preview.is-expanded {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  border-radius: 0;
+  background: #131517;
+}
+.camera-stage-preview.is-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
 }

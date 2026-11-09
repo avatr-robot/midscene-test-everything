@@ -1,5 +1,5 @@
 import type { CameraMappingAccuracy } from '@midscene/arm-kit-shared/assisted-contracts';
-import { Alert, Steps } from 'antd';
+import { Alert, Button, Spin, Steps } from 'antd';
 import {
   type ReactNode,
   useCallback,
@@ -13,11 +13,7 @@ import { PhonePairStep } from './components/robot-arm/PhonePairStep';
 import { WebCalibrationWorkspace } from './components/robot-arm/WebCalibrationWorkspace';
 import { WebCameraMappingStep } from './components/robot-arm/WebCameraMappingStep';
 import { useAssistedCalibration } from './hooks/useAssistedCalibration';
-import { t, useCalibrationLanguage } from './i18n';
-import type {
-  CalibrationModelConfig,
-  CalibrationServerModel,
-} from './model-settings';
+import { calibrationErrorText, t, useCalibrationLanguage } from './i18n';
 import type {
   AssistedCalibrationInput,
   AssistedMappingInput,
@@ -46,18 +42,19 @@ function CalibrationPanelContent(props: {
   ready?: boolean;
   editing?: boolean;
   onDetect?(): Promise<void>;
-  onDetectAI?(modelConfig?: CalibrationModelConfig): Promise<void>;
-  detectionModel?: CalibrationServerModel;
+  onAlign?(signal: AbortSignal): Promise<void>;
   onComplete?(): void;
   completionLabel?: string;
   footerContainer?: HTMLElement | null;
   navigationContainer?: HTMLElement | null;
   onStepChange?(step: number): void;
   onEditSetup?(): void;
+  onReviewCamera?(): void;
 }) {
   useCalibrationLanguage((state) => state.language);
   const controller = useAssistedCalibration(props.client, props.deviceId, true);
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(props.onAlign ? 1 : 0);
+  const advance = useCallback(() => setStep(2), []);
   const [localFooter, setFooter] = useState<HTMLDivElement | null>(null);
   const footer = props.footerContainer ?? localFooter;
   useEffect(() => props.onStepChange?.(step), [step, props.onStepChange]);
@@ -67,6 +64,17 @@ function CalibrationPanelContent(props: {
     beforeLeave.current = handler;
   }, []);
   const changeStep = async (next: number) => {
+    if (next === 1 && props.onAlign && props.onReviewCamera) {
+      props.onReviewCamera();
+      return;
+    }
+    if (props.onAlign && next === 0) next = 1;
+    if (props.onAlign && next === 2) return;
+    if (
+      next === 2 &&
+      (!controller.setup.mapping || !controller.setup.phoneConnected)
+    )
+      return;
     if (next === step) return;
     setError(undefined);
     try {
@@ -84,7 +92,30 @@ function CalibrationPanelContent(props: {
   };
   return (
     <section className="arm-calibration-panel">
-      {props.navigationContainer ? (
+      {props.onAlign && props.navigationContainer ? (
+        createPortal(
+          <Steps
+            size="small"
+            current={step === 1 ? 0 : 2}
+            items={['Camera correction', 'Touch Tool', 'Arm calibration'].map(
+              (title) => ({ title: t(title) }),
+            )}
+            onChange={(next) => {
+              if (
+                next === 1 &&
+                step === 2 &&
+                controller.setup.phoneConnected &&
+                !controller.busy
+              )
+                void (beforeLeave.current?.() ?? Promise.resolve())
+                  .then(() => props.onEditSetup?.())
+                  .catch((error) => setError(String(error)));
+              if (next === 0) void changeStep(1);
+            }}
+          />,
+          props.navigationContainer,
+        )
+      ) : props.navigationContainer ? (
         createPortal(
           <Steps
             size="small"
@@ -134,7 +165,14 @@ function CalibrationPanelContent(props: {
           onContinue={() => void changeStep(1)}
         />
       )}
-      {step === 1 && (
+      {step === 1 && props.onAlign && (
+        <AutomaticScreenStep
+          controller={controller}
+          align={props.onAlign}
+          advance={advance}
+        />
+      )}
+      {step === 1 && !props.onAlign && (
         <WebCameraMappingStep
           controller={controller}
           camera={props.camera}
@@ -151,13 +189,11 @@ function CalibrationPanelContent(props: {
           onConfirm={props.onConfirmMapping}
           saving={props.savingMapping}
           onDetect={props.onDetect}
-          onDetectAI={props.onDetectAI}
-          detectionModel={props.detectionModel}
           onPair={() => void changeStep(0)}
           onContinue={() => void changeStep(2)}
         />
       )}
-      {step === 2 && (
+      {step === 2 && (props.input || !props.onAlign) && (
         <WebCalibrationWorkspace
           controller={controller}
           result={props.result}
@@ -165,9 +201,13 @@ function CalibrationPanelContent(props: {
           preview={props.preview}
           controls={props.controls}
           showSessionCancel={props.showSessionCancel}
-          readyToStart={props.ready ?? false}
-          readyToCapture={props.ready ?? false}
-          readyToVerify={props.ready ?? false}
+          readyToStart={Boolean(props.ready && controller.setup.phoneConnected)}
+          readyToCapture={Boolean(
+            props.ready && controller.setup.phoneConnected,
+          )}
+          readyToVerify={Boolean(
+            props.ready && controller.setup.phoneConnected,
+          )}
           onActivated={async () => {}}
           onBeforeLeaveChange={registerLeave}
           onCheckCamera={() => void changeStep(1)}
@@ -180,6 +220,94 @@ function CalibrationPanelContent(props: {
         <div className="arm-calibration-footer" ref={setFooter} />
       )}
     </section>
+  );
+}
+
+function AutomaticScreenStep({
+  controller,
+  align,
+  advance,
+}: {
+  controller: ReturnType<typeof useAssistedCalibration>;
+  align(signal: AbortSignal): Promise<void>;
+  advance(): void;
+}) {
+  const { setup, session, phone } = controller;
+  const [started, setStarted] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [error, setError] = useState<string>();
+  // Reopening a running collection resumes its own screen without changing the camera.
+  const resume =
+    session &&
+    (!['ready', 'completed', 'interrupted', 'cancelled'].includes(
+      session.stage,
+    ) ||
+      (session.stage === 'interrupted' && session.samples > 0) ||
+      (session.stage === 'ready' &&
+        Boolean(session.referencePosition || session.safePosition)));
+  useEffect(() => {
+    if (resume && setup.phoneConnected) advance();
+    else if (phone.state === 'connected') setStarted(true);
+  }, [resume, setup.phoneConnected, phone.state, advance]);
+  useEffect(() => {
+    if (!started || resume) return;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      void align(abort.signal)
+        .then(() => {
+          if (!abort.signal.aborted) advance();
+        })
+        .catch((cause) => {
+          if (!abort.signal.aborted)
+            setError(cause instanceof Error ? cause.message : String(cause));
+        });
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [started, attempt, align, advance, resume]);
+  if (phone.state === 'connected' && phone.displayRequirement)
+    return (
+      <output>
+        {t(
+          phone.displayRequirement === 'home-screen'
+            ? 'Open the calibration page from the iOS Home Screen to continue.'
+            : 'Waiting for the phone to enter full screen…',
+        )}
+      </output>
+    );
+  if (error)
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message={calibrationErrorText(error)}
+        action={
+          <Button
+            onClick={() => {
+              setError(undefined);
+              setStarted(setup.phoneConnected);
+              setAttempt((n) => n + 1);
+            }}
+          >
+            {t('Retry')}
+          </Button>
+        }
+      />
+    );
+  if (!started || phone.state !== 'connected')
+    return (
+      <PhonePairStep
+        controller={controller}
+        footer={null}
+        onContinue={() => {}}
+      />
+    );
+  return (
+    <output>
+      <Spin size="small" /> {t('Checking page markers…')}
+    </output>
   );
 }
 

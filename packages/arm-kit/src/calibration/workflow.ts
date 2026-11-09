@@ -366,8 +366,11 @@ export class CalibrationWorkflow {
     const model = this.phone.update?.model;
     return {
       state: this.phone.presence(),
+      displayRequirement: this.phone.update && this.phone.displayRequirement(),
       diagnostics: this.phone.update && {
         version: this.phone.update.touchDiagnosticsVersion,
+        wakeState: this.phone.update.wakeState,
+        fullscreen: this.phone.update.fullscreen,
         pageId: this.phone.update.pageId,
         receivedAt: this.phone.lastSeen,
         updateSequence: this.phone.update.sequence,
@@ -390,7 +393,7 @@ export class CalibrationWorkflow {
     this.changed();
     const input = this.phone.update!;
     const s = this.state;
-    if (!s || s.stage === 'cancelled') return { view: 'markers', anchors: [] };
+    if (!s || s.stage === 'cancelled') return this.phoneView();
     if (reloaded) {
       this.measurements?.resetStability();
     }
@@ -421,7 +424,7 @@ export class CalibrationWorkflow {
         'The phone layout changed. Check camera mapping before restarting here.',
       );
     if (
-      !input.visible &&
+      (!input.visible || this.phone.displayRequirement()) &&
       ['collecting', 'reprobing', 'verifying', 'safety', 'returning'].includes(
         s.stage,
       )
@@ -456,9 +459,48 @@ export class CalibrationWorkflow {
     }
     return this.phoneView();
   }
+  private markerRequest?: string;
+  private aligned = false;
+  private insetMarkers = false;
+
+  requestMarkerDisplay(reposition = false) {
+    if (reposition) this.insetMarkers = !this.insetMarkers;
+    this.markerRequest = randomUUID();
+    this.aligned = false;
+    this.changed();
+    return this.markerRequest;
+  }
+  markerObservation(request: string) {
+    const update = this.phone.update;
+    if (
+      this.phone.connected() &&
+      update?.markersPainted &&
+      update.markerRequest === request &&
+      this.markerRequest === request &&
+      this.phoneView().view === 'markers'
+    )
+      return update;
+  }
+  finishMarkerDisplay(request: string, aligned: boolean) {
+    if (this.markerRequest !== request) return;
+    this.markerRequest = undefined;
+    this.aligned = aligned;
+    this.changed();
+  }
   phoneView(): CalibrationPageReply {
     const s = this.state;
-    if (!s || s.stage === 'cancelled') return { view: 'markers', anchors: [] };
+    if (
+      !s ||
+      s.stage === 'cancelled' ||
+      s.stage === 'ready' ||
+      (this.markerRequest && ['completed', 'interrupted'].includes(s.stage))
+    )
+      return {
+        view: this.aligned ? 'touch-preview' : 'markers',
+        markerRequest: this.markerRequest,
+        insetMarkers: this.insetMarkers,
+        anchors: [],
+      };
     const progress =
       s.stage === 'safety' && s.calibration
         ? this.runtime.getSession(s.calibration.id).progress
@@ -480,15 +522,13 @@ export class CalibrationWorkflow {
       view:
         s.stage === 'positioning-safe'
           ? 'return-ready'
-          : s.stage === 'ready'
-            ? 'markers'
-            : s.stage === 'verification-failed'
-              ? 'review'
-              : s.stage === 'collecting' || s.stage === 'reprobing'
-                ? 'collect'
-                : s.stage === 'verifying'
-                  ? 'verify'
-                  : s.stage,
+          : s.stage === 'verification-failed'
+            ? 'review'
+            : s.stage === 'collecting' || s.stage === 'reprobing'
+              ? 'collect'
+              : s.stage === 'verifying'
+                ? 'verify'
+                : s.stage,
       imageTrial: Boolean(s.imageTrial && s.stage === 'verifying'),
       capture: ['collecting', 'reprobing', 'interrupted'].includes(s.stage)
         ? this.measurements?.snapshot().capture
@@ -699,6 +739,16 @@ export class CalibrationWorkflow {
         throw new RobotArmError(
           'INVALID_COMMAND',
           'Use automatic boundary verification and confirm the calibration result',
+          409,
+        );
+      if (
+        action !== 'stop-capture' &&
+        this.phone.presence() === 'connected' &&
+        this.phone.displayRequirement()
+      )
+        throw new RobotArmError(
+          'PHONE_UNAVAILABLE',
+          'Enter the required phone display mode first',
           409,
         );
       if (action === 'restart') {

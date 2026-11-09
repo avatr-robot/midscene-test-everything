@@ -5,21 +5,11 @@ import { createPortal } from 'react-dom';
 import type { AssistedCalibrationController } from '../../hooks/useAssistedCalibration';
 import { useCameraMarkerMapping } from '../../hooks/useCameraMarkerMapping';
 import { calibrationErrorText, t, useCalibrationLanguage } from '../../i18n';
-import {
-  type CalibrationModelConfig,
-  type CalibrationServerModel,
-  clearDetectionModel,
-  emptyModel,
-  loadDetectionModel,
-  saveDetectionModel,
-} from '../../model-settings';
 import type {
   AssistedCalibrationInput,
   AssistedMappingInput,
 } from '../../robot-arm-api';
 import type { CameraProfile } from '../../types';
-import { CalibrationModelModal } from '../CalibrationModelModal';
-
 export function WebCameraMappingStep({
   controller,
   camera,
@@ -28,8 +18,6 @@ export function WebCameraMappingStep({
   size,
   footer,
   onDetect,
-  onDetectAI,
-  detectionModel,
 
   onPair,
   onContinue,
@@ -38,6 +26,7 @@ export function WebCameraMappingStep({
   correctionKey,
   editing = false,
   hasCorners = false,
+  savedResult,
   checkDraft,
   onConfirm,
   saving = false,
@@ -48,6 +37,7 @@ export function WebCameraMappingStep({
   correctionKey?: string;
   editing?: boolean;
   hasCorners?: boolean;
+  savedResult?: { verified: boolean };
   checkDraft?(): Promise<CameraMappingAccuracy | undefined>;
   onConfirm?(): Promise<void>;
   saving?: boolean;
@@ -58,9 +48,7 @@ export function WebCameraMappingStep({
   size?: { width: number; height: number };
   footer: HTMLElement | null;
   onDetect?(): Promise<void>;
-  onDetectAI?(modelConfig?: CalibrationModelConfig): Promise<void>;
-  detectionModel?: CalibrationServerModel;
-  onPair(): void;
+  onPair?(): void;
   onContinue(): void;
 }) {
   useCalibrationLanguage((state) => state.language);
@@ -69,19 +57,9 @@ export function WebCameraMappingStep({
   const [error, setError] = useState<string>();
   const { setup, busy } = controller;
   const [attemptedCamera, setAttemptedCamera] = useState<string>();
-  const [detectionKind, setDetectionKind] = useState<'markers' | 'ai'>(
-    'markers',
-  );
-  const [rememberedModel] = useState(loadDetectionModel);
-  const [model, setModel] = useState(rememberedModel?.config ?? emptyModel());
-  const [customModel, setCustomModel] = useState(
-    rememberedModel?.custom ?? !detectionModel?.modelName,
-  );
-  const [modelOpen, setModelOpen] = useState(false);
-  const [modelStorageError, setModelStorageError] = useState<string>();
-  const [detectAfterSettings, setDetectAfterSettings] = useState(false);
   const autoDetectPending = Boolean(
-    onDetect &&
+    !savedResult &&
+      onDetect &&
       camera?.online &&
       setup.phoneConnected &&
       setup.layout?.screen &&
@@ -97,7 +75,12 @@ export function WebCameraMappingStep({
       input,
       correctionKey,
       blocked:
-        editing || detecting || saving || autoDetectPending || Boolean(error),
+        Boolean(savedResult) ||
+        editing ||
+        detecting ||
+        saving ||
+        autoDetectPending ||
+        Boolean(error),
     });
   useEffect(() => {
     if (
@@ -163,14 +146,16 @@ export function WebCameraMappingStep({
     error ??
     (editing ? current?.error : mappingError) ??
     controller.connectionError;
-  const verified = editing ? Boolean(current && !current.error) : mapped;
+  const verified = editing
+    ? Boolean(current && !current.error)
+    : (savedResult?.verified ?? mapped);
   const accuracy = editing ? current?.accuracy : setup.mapping?.accuracy;
   const confirm = async () => {
     setError(undefined);
     try {
       if (!setup.phoneConnected) {
         if (editing) await onConfirm?.();
-        onPair();
+        onPair?.();
         return;
       }
       if (editing) {
@@ -188,33 +173,18 @@ export function WebCameraMappingStep({
       setError(error instanceof Error ? error.message : String(error));
     }
   };
-  const detect = async (
-    kind: 'markers' | 'ai' = 'markers',
-    override?: CalibrationModelConfig,
-  ) => {
+  const detect = async () => {
     setAttemptedCamera(camera?.id);
-    setDetectionKind(kind);
     setContinueRequested(false);
     setDetecting(true);
     setError(undefined);
     try {
-      if (kind === 'ai') await onDetectAI?.(override);
-      else await onDetect?.();
+      await onDetect?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setDetecting(false);
     }
-  };
-  const detectAI = () => {
-    if (
-      customModel
-        ? !model.modelName.trim() || !model.modelFamily.trim()
-        : !detectionModel?.modelName
-    ) {
-      setDetectAfterSettings(true);
-      setModelOpen(true);
-    } else void detect('ai', customModel ? model : undefined);
   };
   useEffect(() => {
     if (!autoDetectPending || !canMap || busy || mappingBusy || detecting)
@@ -238,13 +208,13 @@ export function WebCameraMappingStep({
               <div className="range-actions">
                 <Button
                   size="small"
-                  loading={detecting && detectionKind === 'markers'}
+                  loading={detecting}
                   disabled={
                     detecting ||
                     !onDetect ||
                     !camera?.online ||
                     !setup.phoneConnected ||
-                    !canMap ||
+                    (!savedResult && !canMap) ||
                     busy ||
                     saving ||
                     mappingBusy
@@ -253,36 +223,6 @@ export function WebCameraMappingStep({
                 >
                   {t('Detect screen markers')}
                 </Button>
-                {onDetectAI && (
-                  <Button
-                    size="small"
-                    loading={detecting && detectionKind === 'ai'}
-                    disabled={
-                      !camera?.online ||
-                      detecting ||
-                      busy ||
-                      saving ||
-                      mappingBusy ||
-                      !canMap
-                    }
-                    onClick={detectAI}
-                  >
-                    {t('Use AI detection')}
-                  </Button>
-                )}
-                {onDetectAI && (
-                  <Button
-                    size="small"
-                    type="text"
-                    disabled={detecting || saving || busy}
-                    onClick={() => {
-                      setDetectAfterSettings(false);
-                      setModelOpen(true);
-                    }}
-                  >
-                    {t('AI model settings')}
-                  </Button>
-                )}
               </div>
             </header>
             <div className="screen-range-stage">{live}</div>
@@ -299,7 +239,7 @@ export function WebCameraMappingStep({
             <div className="screen-range-stage">{corrected}</div>
           </section>
         </div>
-        {hasCorners && (
+        {hasCorners && !savedResult && (
           <span className="range-check-status">
             {t(
               'Drag the four corners to include the full display and system bars.',
@@ -312,11 +252,20 @@ export function WebCameraMappingStep({
           ) : !setup.phoneConnected ? (
             <>
               {t(
-                'No phone page is connected. Use AI detection to locate the screen, then connect the phone before arm calibration.',
+                'Open the marker page on the target screen to detect its edges.',
               )}{' '}
-              <Button type="link" size="small" onClick={onPair}>
-                {t('Connect Phone')}
-              </Button>
+              {onPair && (
+                <Button type="link" size="small" onClick={onPair}>
+                  {t('Connect Phone')}
+                </Button>
+              )}
+              {savedResult &&
+                controller.phone.displayRequirement &&
+                t(
+                  controller.phone.displayRequirement === 'home-screen'
+                    ? 'Open the calibration page from the iOS Home Screen to continue.'
+                    : 'Waiting for the phone to enter full screen…',
+                )}
             </>
           ) : problem ? (
             <span className="is-warning">{calibrationErrorText(problem)}</span>
@@ -339,17 +288,6 @@ export function WebCameraMappingStep({
             </>
           ) : null}
         </output>
-        {onDetectAI &&
-          problem &&
-          setup.phoneConnected &&
-          detectionKind === 'markers' &&
-          !detecting && (
-            <span className="range-check-status">
-              {t(
-                'Page detection is unavailable or inaccurate? Use AI detection, then check the screen edges.',
-              )}
-            </span>
-          )}
         {verified && (
           <span className="range-check-status">
             {t(
@@ -358,50 +296,6 @@ export function WebCameraMappingStep({
           </span>
         )}
       </section>
-      <CalibrationModelModal
-        open={modelOpen}
-        title={t('AI model settings')}
-        description={t(
-          'AI detection uses a camera image to locate the full screen. Check the corners before saving.',
-        )}
-        serverModel={detectionModel}
-        value={model}
-        custom={customModel}
-        onClose={() => setModelOpen(false)}
-        error={modelStorageError}
-        persistenceNotice={t(
-          'Model settings, including the API key, are saved in this browser. Clear them here when no longer needed.',
-        )}
-        onClear={() => {
-          try {
-            clearDetectionModel();
-            setModelStorageError(undefined);
-          } catch {
-            setModelStorageError(
-              t('Unable to clear saved model settings in this browser.'),
-            );
-            return;
-          }
-          setModel(emptyModel());
-          setCustomModel(false);
-        }}
-        onApply={(config, custom) => {
-          try {
-            saveDetectionModel(config, custom);
-            setModelStorageError(undefined);
-          } catch {
-            setModelStorageError(
-              t('Unable to save model settings in this browser.'),
-            );
-            return;
-          }
-          setModel(config);
-          setCustomModel(custom);
-          setModelOpen(false);
-          if (detectAfterSettings)
-            void detect('ai', custom ? config : undefined);
-        }}
-      />
       {footer &&
         createPortal(
           <Button
@@ -412,6 +306,7 @@ export function WebCameraMappingStep({
                 ((!verified && !(mappingError && canMap)) ||
                   !setup.phoneConnected)) ||
               !hasCorners ||
+              Boolean(controller.connectionError) ||
               busy ||
               mappingBusy ||
               detecting ||
@@ -419,7 +314,13 @@ export function WebCameraMappingStep({
             }
             onClick={() => void confirm()}
           >
-            {t(mappingError && !editing ? 'Retry and continue' : 'Continue')}
+            {t(
+              savedResult
+                ? 'Next'
+                : mappingError && !editing
+                  ? 'Retry and continue'
+                  : 'Continue',
+            )}
           </Button>,
           footer,
         )}

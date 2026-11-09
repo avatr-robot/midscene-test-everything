@@ -1,3 +1,4 @@
+export { CameraCornerEditor } from './CameraCornerEditor';
 export { WebCalibrationWorkspace } from './components/robot-arm/WebCalibrationWorkspace';
 export { PhonePairStep } from './components/robot-arm/PhonePairStep';
 export { WebCalibrationResults } from './components/robot-arm/WebCalibrationResults';

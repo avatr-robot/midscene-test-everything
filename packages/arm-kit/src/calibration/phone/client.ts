@@ -15,6 +15,17 @@ export function mountCalibrationPhonePage(
   > &
     typeof CALIBRATION_PHONE_POLICY & { verificationRadiusPx: number },
   pageId: string,
+  awake: {
+    start(): Promise<void>;
+    status(): {
+      locked: boolean;
+      videoPlaying: boolean;
+      playbackError: string | null;
+    };
+    stop(): Promise<void>;
+    detach(): void;
+    resume(): void;
+  },
 ): void {
   const zh = (
     new URLSearchParams(location.search).get('lang') || navigator.language
@@ -24,6 +35,11 @@ export function mountCalibrationPhonePage(
       '已连接，请在电脑端继续。',
       'Connected. Continue on your computer.',
     ],
+    preview: [
+      '轻触或滑动可查看实际触点。',
+      'Touch or slide to see the contact trace.',
+    ],
+    closed: ['标记预览已结束。', 'Marker preview closed.'],
     connecting: ['正在连接电脑…', 'Connecting to your computer…'],
     position: [
       '请先在电脑端记录屏幕上方的标定参考位。',
@@ -124,10 +140,8 @@ export function mountCalibrationPhonePage(
   const connection = element('connection');
   const target = element('target');
   const number = element('target-number');
-  const feedback = element('hit-feedback');
   const hideGuidance = () => {
     target.style.display = 'none';
-    target.classList.remove('touched');
   };
   hideGuidance();
   message.textContent = label('connecting');
@@ -168,6 +182,13 @@ export function mountCalibrationPhonePage(
     if (touchEvents.length > 40) touchEvents.shift();
     return entry;
   };
+  let reportedWake: CalibrationPageUpdate['wakeState'];
+  const wakeState = (): CalibrationPageUpdate['wakeState'] => {
+    const state = awake.status();
+    if (state.locked) return 'system';
+    if (state.videoPlaying) return 'video';
+    return state.playbackError ? 'blocked' : 'pending';
+  };
   let lastFeedbackKey = '';
   let activePointer: number | undefined;
   const pointers = new Map<number, { id: string; point: WebPoint }>();
@@ -179,7 +200,6 @@ export function mountCalibrationPhonePage(
   let contactId: string | undefined;
   let contactStart: CalibrationPageUpdate['contactStart'];
   let phoneStep: NonNullable<CalibrationPageReply['capture']>['step'];
-  const contactFeedback = document.getElementById('contact-feedback')!;
   let motionRevision = 0;
   let stabilityOrigin: WebPoint;
   let downPoint: WebPoint;
@@ -386,8 +406,118 @@ export function mountCalibrationPhonePage(
       },
     };
   }
+  let lastTrailAt = 0;
+
+  function clearMappingTouch() {
+    const hit = element('mapping-hit');
+    hit.style.display = 'none';
+    hit.classList.remove('pulse');
+    element('mapping-trail').replaceChildren();
+    element('touch-status').textContent = '';
+    lastTrailAt = 0;
+  }
+
+  function showMappingTouch(
+    css: WebPoint,
+    phase: 'down' | 'move' | 'up' | 'cancel',
+  ) {
+    if (!state || state.view === 'markers') return;
+    element('touch-status').textContent =
+      `${css.x.toFixed(1)}, ${css.y.toFixed(1)}`;
+    const hit = element('mapping-hit');
+    hit.style.display = 'block';
+    hit.style.left = `${css.x}px`;
+    hit.style.top = `${css.y}px`;
+    if (phase === 'down') {
+      hit.classList.remove('pulse');
+      // Restart the pulse for a new contact; the reflow makes the animation run
+      // again even when the same element is reused.
+      void hit.offsetWidth;
+      hit.classList.add('pulse');
+    }
+    const now = performance.now();
+    if (phase === 'down' || now - lastTrailAt > 45) {
+      lastTrailAt = now;
+      const trail = element('mapping-trail');
+      const dot = document.createElement('span');
+      dot.className = 'mapping-touch-dot';
+      dot.style.left = `${css.x}px`;
+      dot.style.top = `${css.y}px`;
+      trail.append(dot);
+      const persistent = Boolean(guideKey);
+      if (trail.childElementCount > (persistent ? 1500 : 40))
+        trail.firstElementChild?.remove();
+      // The CSS fade removes the dot in a browser; the cap above is the
+      // fallback for reduced-motion or an animation that never ends.
+      if (!persistent)
+        dot.addEventListener('animationend', () => dot.remove(), {
+          once: true,
+        });
+    }
+  }
+
+  let guideKey: string | undefined;
+  function renderGuide(guide?: CalibrationPageReply['boundaryGuide']) {
+    const key = JSON.stringify(guide);
+    if (key === guideKey) return;
+    guideKey = key;
+    clearMappingTouch();
+    const view = element('verification-guide');
+    view.replaceChildren();
+    view.hidden = !guide;
+    document.body.dataset.verification = String(Boolean(guide));
+    if (!guide) return;
+    guide.corners.forEach((point, index) => {
+      const next = guide.corners[(index + 1) % guide.corners.length];
+      const edge = document.createElement('div');
+      edge.className = 'verification-edge';
+      edge.style.left = `${point.x}px`;
+      edge.style.top = `${point.y}px`;
+      edge.style.width = `${Math.hypot(next.x - point.x, next.y - point.y)}px`;
+      edge.style.transform = `rotate(${Math.atan2(next.y - point.y, next.x - point.x)}rad)`;
+      const target = document.createElement('div');
+      target.className = 'verification-target';
+      target.style.left = `${point.x}px`;
+      target.style.top = `${point.y}px`;
+      const label = document.createElement('span');
+      label.textContent = String(index + 1);
+      // Keep the label on-screen without moving the actual target centre.
+      label.style.left = point.x > innerWidth / 2 ? '-28px' : '12px';
+      label.style.top = point.y > innerHeight / 2 ? '-28px' : '12px';
+      target.append(label);
+      view.append(edge, target);
+    });
+    const legend = document.createElement('div');
+    legend.className = 'verification-legend';
+    legend.textContent =
+      guide.group === 'hover'
+        ? zh
+          ? '悬停边界'
+          : 'Hover boundary'
+        : zh
+          ? '轻触示意'
+          : 'Light contact';
+    legend.textContent += zh
+      ? '\n橙色：计划路径 · 蓝色：实际触摸\n请对照笔尖、触摸轨迹与编号十字中心，保持屏幕不动。'
+      : '\nOrange: planned path · Blue: actual touch\nCompare the tip and trace with the numbered crosshairs. Keep still.';
+    view.append(legend);
+  }
+  let paintedKey: string | undefined;
+  let paintingKey: string | undefined;
   let lastGridKey: string | undefined;
   function paint(next: CalibrationPageReply) {
+    if (next.pairingToken && /^[a-f0-9-]{36}$/.test(next.pairingToken)) {
+      history.replaceState(
+        null,
+        '',
+        `/phone-calibration?token=${encodeURIComponent(next.pairingToken)}`,
+      );
+      delete document.body.dataset.preview;
+      socket.close();
+      return;
+    }
+    if (next.insetMarkers !== undefined)
+      document.body.dataset.insetMarkers = String(next.insetMarkers);
     document.body.dataset.stage = next.view;
     document.body.dataset.imageTrial = String(Boolean(next.imageTrial));
     document.body.dataset.connectionError = String(Boolean(next.error));
@@ -404,12 +534,24 @@ export function mountCalibrationPhonePage(
       contactStart = undefined;
       phoneStep = undefined;
       probeUnknown = ambiguousPointers ? 'multiple_contacts' : undefined;
-      contactFeedback.classList.remove('active');
     }
     const previous = state;
     state = next;
+    if (
+      previous?.view !== next.view ||
+      previous?.markerRequest !== next.markerRequest
+    ) {
+      paintedKey = undefined;
+      paintingKey = undefined;
+      if (next.view === 'markers') {
+        displayFinished = false;
+        void enterFullscreen();
+      }
+      send();
+    }
     const stages = {
       markers: 'waiting',
+      'touch-preview': 'preview',
       positioning: 'position',
       collect: 'collect',
       'capture-failed': 'retry',
@@ -422,15 +564,13 @@ export function mountCalibrationPhonePage(
       completed: 'done',
       interrupted: 'interrupted',
     } as const;
-    const guide = element('boundary-guide');
-    guide.style.display = next.boundaryGuide ? 'block' : 'none';
-    if (next.boundaryGuide) {
-      guide.dataset.group = next.boundaryGuide.group;
-      element('boundary-contour').setAttribute(
-        'points',
-        next.boundaryGuide.corners.map((p) => `${p.x},${p.y}`).join(' '),
-      );
-    }
+    if (
+      previous?.view !== next.view ||
+      (next.imageTrial && next.target?.id !== previous?.target?.id) ||
+      next.imageTrial !== previous?.imageTrial
+    )
+      clearMappingTouch();
+    renderGuide(next.boundaryGuide);
     const capture = ['collect', 'interrupted'].includes(next.view)
       ? next.capture
       : undefined;
@@ -497,8 +637,6 @@ export function mountCalibrationPhonePage(
       captureAck = undefined;
       return;
     }
-    if (previous?.target?.id !== next.target?.id)
-      target.classList.remove('touched');
     target.style.display = next.view === 'collect' ? 'none' : 'grid';
     target.style.left = `${visibleTarget.point.x}px`;
     target.style.top = `${visibleTarget.point.y}px`;
@@ -542,7 +680,146 @@ export function mountCalibrationPhonePage(
       );
     }
   }
+  // The touch surface captures pointer events for calibration. Keep the fullscreen
+  // control outside it so the browser receives the original user gesture.
+  const fullscreenButton = document.querySelector<HTMLButtonElement>(
+    'button#marker-fullscreen',
+  );
+  const fullscreenHelp = document.querySelector<HTMLElement>(
+    'small#fullscreen-help',
+  );
+  const root = document.documentElement as Partial<HTMLElement> & {
+    webkitRequestFullscreen?: () => void;
+    webkitRequestFullScreen?: () => void;
+  };
+  const doc = document as Document & {
+    webkitFullscreenElement?: Element;
+  };
+  const enter:
+    | ((options?: FullscreenOptions) => void | Promise<void>)
+    | undefined =
+    root?.requestFullscreen ??
+    root?.webkitRequestFullscreen ??
+    root?.webkitRequestFullScreen;
+  const nativeFullscreen = () =>
+    doc.fullscreenElement ?? doc.webkitFullscreenElement;
+  const platform = /HarmonyOS|OpenHarmony|ArkWeb/i.test(ua)
+    ? 'harmonyos'
+    : /iPhone|iPad|iPod/i.test(ua) ||
+        (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+      ? 'ios'
+      : /Android/i.test(ua)
+        ? 'android'
+        : 'other';
+  const matchesMode = (mode: string) =>
+    window.matchMedia?.(`(display-mode: ${mode})`).matches;
+  const displayMode = (): NonNullable<CalibrationPageUpdate['displayMode']> => {
+    if (
+      platform === 'ios' &&
+      ((navigator as Navigator & { standalone?: boolean }).standalone ||
+        matchesMode('standalone'))
+    )
+      return 'standalone';
+    if (
+      (nativeFullscreen() && nativeFullscreen() === root) ||
+      matchesMode('fullscreen')
+    )
+      return 'fullscreen';
+    return 'browser';
+  };
+  const fullscreenReady = () =>
+    displayMode() === (platform === 'ios' ? 'standalone' : 'fullscreen');
+  let switching = false;
+  let displayFinished = false;
+  function displayControls() {
+    const ready = fullscreenReady();
+    document.body.dataset.displayReady = String(ready);
+    if (!fullscreenButton || !fullscreenHelp) return;
+    const finished = displayFinished || state?.view === 'completed';
+    fullscreenButton.hidden =
+      finished || switching || ready || platform === 'ios' || !enter;
+    fullscreenHelp.hidden = finished || ready || switching;
+    fullscreenHelp.textContent =
+      platform === 'ios'
+        ? zh
+          ? '请用 Safari 打开，选择「分享 → 添加到主屏幕」，再从主屏幕图标打开标定页。'
+          : 'In Safari, choose Share → Add to Home Screen, then open the calibration page from its icon.'
+        : zh
+          ? enter
+            ? '进入全屏后，标定会自动继续。'
+            : '请通过浏览器菜单进入全屏以继续标定。'
+          : enter
+            ? 'Enter full screen to continue calibration automatically.'
+            : 'Use the browser menu to enter full screen and continue calibration.';
+  }
+  async function enterFullscreen(fromGesture = false) {
+    if (
+      !fullscreenButton ||
+      switching ||
+      displayFinished ||
+      document.hidden ||
+      platform === 'ios' ||
+      (platform === 'harmonyos' && !fromGesture) ||
+      (!fromGesture && state?.view !== 'markers') ||
+      fullscreenReady() ||
+      !enter
+    )
+      return;
+    switching = true;
+    awake.detach();
+    try {
+      await enter.call(root, { navigationUI: 'hide' });
+    } catch {
+      // Browsers requiring transient activation can retry from the phone button.
+    } finally {
+      switching = false;
+      if (!displayFinished) void awake.resume();
+      send();
+    }
+  }
+  if (fullscreenButton) {
+    fullscreenButton.textContent = zh ? '进入全屏' : 'Enter full screen';
+    fullscreenButton.onclick = () => enterFullscreen(true);
+    for (const event of ['fullscreenchange', 'webkitfullscreenchange'])
+      document.addEventListener(event, send);
+    for (const mode of ['fullscreen', 'standalone'])
+      window
+        .matchMedia?.(`(display-mode: ${mode})`)
+        .addEventListener?.('change', send);
+  }
+  element('wake-gesture').textContent = zh
+    ? '浏览器已阻止保持常亮'
+    : 'Screen wake lock blocked by the browser';
+  function startDisplay() {
+    if (displayFinished) return;
+    void awake.start();
+    if (state?.view === 'markers') void enterFullscreen();
+  }
   function send() {
+    const current = layout();
+    displayControls();
+    const key =
+      state?.view === 'markers' &&
+      !switching &&
+      !document.hidden &&
+      fullscreenReady()
+        ? JSON.stringify([state.markerRequest, current.revision])
+        : undefined;
+    if (!key) {
+      paintedKey = undefined;
+      paintingKey = undefined;
+    } else if (paintingKey !== key) {
+      paintingKey = key;
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (paintingKey === key) {
+            paintedKey = key;
+            send();
+          }
+        }),
+      );
+    }
+    const markersPainted = Boolean(key && paintedKey === key);
     if (socket?.readyState !== WebSocket.OPEN) return;
     const batch = touches;
     touches = [];
@@ -556,10 +833,16 @@ export function mountCalibrationPhonePage(
       pageId,
       touchEvents,
       touchDiagnosticsVersion: 2,
+      wakeState: wakeState(),
       sequence: ++sequence,
       model,
+      platform,
+      displayMode: displayMode(),
+      fullscreen: fullscreenReady(),
+      markersPainted,
+      markerRequest: markersPainted ? state?.markerRequest : undefined,
       visible: !document.hidden && (visualViewport?.scale || 1) === 1,
-      layout: layout(),
+      layout: current,
       targetReady: readyTarget,
       captureAck,
       contactStart,
@@ -593,6 +876,7 @@ export function mountCalibrationPhonePage(
           `${body.stepFeedback.phase}:${body.stepFeedback.outcome}`,
         );
     }
+    reportedWake = body.wakeState;
     socket.send(JSON.stringify(body));
   }
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -603,17 +887,27 @@ export function mountCalibrationPhonePage(
     reconnectTimer = setTimeout(async () => {
       reconnectTimer = undefined;
       try {
-        // Reload only when the authenticated helper page is ready. A restart
-        // creates a new page identity; do not replay old touch evidence.
+        // Renew only the transport. Navigating would release browser fullscreen.
         const response = await fetch(location.href, {
           cache: 'no-store',
+          headers: { Accept: 'application/json' },
           signal: AbortSignal.timeout(3000),
         });
-        if (
-          response.ok &&
-          response.headers.get('content-type')?.includes('text/html')
-        ) {
-          location.reload();
+        if (response.ok) {
+          const next = await response.json();
+          const markers = document.querySelectorAll('.mapping-marker');
+          if (
+            typeof next.pageId !== 'string' ||
+            !Array.isArray(next.markers) ||
+            next.markers.length !== markers.length
+          )
+            throw new Error('Invalid phone session');
+          markers.forEach((marker, i) => {
+            marker.outerHTML = next.markers[i];
+          });
+          pageId = next.pageId;
+          reconnectDelay = 1000;
+          connect();
           return;
         }
       } catch {
@@ -639,7 +933,12 @@ export function mountCalibrationPhonePage(
           return;
         }
         socket.send('ping');
-        if (state?.view === 'collect' || state?.view === 'verify') send();
+        if (
+          reportedWake !== wakeState() ||
+          state?.view === 'collect' ||
+          state?.view === 'verify'
+        )
+          send();
       }, policy.heartbeatMs);
     };
     socket.onmessage = (event) => {
@@ -649,17 +948,34 @@ export function mountCalibrationPhonePage(
     socket.onclose = (event) => {
       clearInterval(heartbeat);
       touches = [];
+      touchEvents.length = 0;
+      contact = undefined;
+      contactId = undefined;
+      activePointer = undefined;
+      pointers.clear();
+      ambiguousPointers = false;
+      probeUnknown = undefined;
+      downTarget = undefined;
       contactStart = undefined;
       captureAck = undefined;
       readyTarget = undefined;
       phoneStep = undefined;
+      renderGuide();
+      clearMappingTouch();
       state = undefined;
       hideGuidance();
       document.body.dataset.connectionError = 'true';
       const replaced = event.code === 4410;
-      message.textContent = label(replaced ? 'replaced' : 'offline');
+      const ended = event.code === 1000 && event.reason === 'Preview ended';
+      message.textContent = label(
+        ended ? 'closed' : replaced ? 'replaced' : 'offline',
+      );
       connection.textContent = '';
-      if (replaced) {
+      if (replaced || ended) {
+        document.body.dataset.stage = 'completed';
+        displayFinished = true;
+        void awake.stop();
+        displayControls();
         reconnectStopped = true;
         if (reconnectTimer) clearTimeout(reconnectTimer);
       } else reconnectPage();
@@ -750,7 +1066,6 @@ export function mountCalibrationPhonePage(
       ambiguousPointers = true;
       if (state?.view === 'collect') probeUnknown = 'multiple_contacts';
       downTarget = undefined;
-      target.classList.remove('touched');
       void send();
       return;
     }
@@ -764,38 +1079,13 @@ export function mountCalibrationPhonePage(
         point: { ...contact },
       };
     }
-    // Local feedback is available even after collection stops. It confirms a
-    // browser event, not server acknowledgement or a calibration measurement.
-    contactFeedback.style.left = `${contact.x}px`;
-    contactFeedback.style.top = `${contact.y}px`;
-    contactFeedback.classList.remove('active');
-    void contactFeedback.offsetWidth;
-    contactFeedback.classList.add('active');
-    element('touch-status').textContent = zh
-      ? `网页已检测到触摸：${Math.round(contact.x)}, ${Math.round(contact.y)}（最近一次）`
-      : `Page detected touch: ${Math.round(contact.x)}, ${Math.round(contact.y)} (last touch)`;
+    showMappingTouch(contact, 'down');
     motionRevision = 0;
     stabilityOrigin = { ...contact };
     downPoint = { ...contact };
     travelPx = 0;
     downAt = performance.now();
     downTarget = state?.view === 'verify' ? state.target?.id : undefined;
-    if (
-      downTarget &&
-      state?.target &&
-      Math.hypot(
-        contact.x - state.target.point.x,
-        contact.y - state.target.point.y,
-      ) <= policy.verificationRadiusPx
-    )
-      target.classList.add('touched');
-    const currentTarget = state?.capture?.target.point;
-    if (
-      currentTarget &&
-      Math.hypot(contact.x - currentTarget.x, contact.y - currentTarget.y) <=
-        policy.targetRadiusPx
-    )
-      target.classList.add('touched');
     void send();
   });
   surface.addEventListener('pointermove', (e) => {
@@ -804,6 +1094,7 @@ export function mountCalibrationPhonePage(
     if (!contact || activePointer !== e.pointerId) return;
     e.preventDefault();
     contact = { x: e.clientX, y: e.clientY };
+    showMappingTouch(contact, 'move');
     if (
       downTarget &&
       (!state?.target ||
@@ -820,7 +1111,6 @@ export function mountCalibrationPhonePage(
         ) <= policy.verificationRadiusPx
       )
         downTarget = undefined;
-      target.classList.remove('touched');
     }
     travelPx = Math.max(
       travelPx,
@@ -855,6 +1145,7 @@ export function mountCalibrationPhonePage(
       return;
     }
     e.preventDefault();
+    showMappingTouch({ x: e.clientX, y: e.clientY }, 'up');
     if (
       contact &&
       downTarget &&
@@ -869,18 +1160,6 @@ export function mountCalibrationPhonePage(
           e.clientY - state.target.point.y,
         ) <= policy.verificationRadiusPx)
     ) {
-      if (
-        Math.hypot(
-          e.clientX - state.target.point.x,
-          e.clientY - state.target.point.y,
-        ) <= policy.verificationRadiusPx
-      ) {
-        feedback.style.left = `${state.target.point.x}px`;
-        feedback.style.top = `${state.target.point.y}px`;
-        feedback.classList.remove('active');
-        void feedback.offsetWidth;
-        feedback.classList.add('active');
-      }
       touches.push({
         targetId: downTarget,
         point: downPoint,
@@ -893,7 +1172,6 @@ export function mountCalibrationPhonePage(
     }
     retainRemainingPointer();
     downTarget = undefined;
-    target.classList.remove('touched');
     void send();
   });
   const cancelContact = (event?: { pointerId?: number }) => {
@@ -908,21 +1186,29 @@ export function mountCalibrationPhonePage(
     } else pointers.clear();
     retainRemainingPointer();
     downTarget = undefined;
-    target.classList.remove('touched');
     void send();
   };
   surface.addEventListener('pointercancel', (e) => {
     trace('pointercancel', e.pointerType, undefined, { source: 'surface' });
+    if (activePointer === e.pointerId)
+      showMappingTouch({ x: e.clientX, y: e.clientY }, 'cancel');
     cancelContact(e);
   });
   surface.addEventListener('lostpointercapture', (e) => {
     trace('lostpointercapture', undefined, undefined, { source: 'surface' });
     cancelContact(e);
   });
-  document.addEventListener('visibilitychange', () => cancelContact());
+  document.addEventListener('visibilitychange', () => {
+    cancelContact();
+    if (!document.hidden) void enterFullscreen();
+  });
   visualViewport?.addEventListener('resize', () => send());
   visualViewport?.addEventListener('scroll', () => send());
   window.addEventListener('resize', () => void send());
-  window.addEventListener('pageshow', () => void send());
+  window.addEventListener('pageshow', (event) => {
+    if (event?.persisted) startDisplay();
+    send();
+  });
+  startDisplay();
   connect();
 }

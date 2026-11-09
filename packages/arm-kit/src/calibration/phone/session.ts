@@ -9,7 +9,10 @@ import {
 } from '../../assisted-contracts.js';
 import { RobotArmError } from '../../contracts.js';
 
-export function validateLayout(layout: CalibrationPageLayout): void {
+export function validateLayout(
+  layout: CalibrationPageLayout,
+  codes: readonly number[] = CALIBRATION_MARKER_CODES,
+): void {
   if (
     !layout ||
     !Number.isInteger(layout.revision) ||
@@ -36,7 +39,7 @@ export function validateLayout(layout: CalibrationPageLayout): void {
     );
   layout.markers.forEach((m, i) => {
     if (
-      m.code !== CALIBRATION_MARKER_CODES[i] ||
+      m.code !== codes[i] ||
       m.purpose !== CALIBRATION_MARKERS[i].purpose ||
       ![m.x, m.y, m.size].every(Number.isFinite) ||
       m.size < 20 ||
@@ -85,6 +88,9 @@ export function sameLayoutGeometry(
 }
 /** The phone can report touches; it cannot initiate motion or provide fit results. */
 export class CalibrationPhoneSession {
+  constructor(
+    private readonly markerCodes: readonly number[] = CALIBRATION_MARKER_CODES,
+  ) {}
   private newestPageId?: string;
   private pageId?: string;
   openPage(): string {
@@ -174,7 +180,7 @@ export class CalibrationPhoneSession {
         'INVALID_PHONE_TOUCH',
         'Invalid touch diagnostics version',
       );
-    validateLayout(input.layout);
+    validateLayout(input.layout, this.markerCodes);
     const validPoint = (p: WebPoint) =>
       p &&
       [p.x, p.y].every(Number.isFinite) &&
@@ -256,7 +262,9 @@ export class CalibrationPhoneSession {
     const previousLayout = this.update?.layout;
     const changed =
       previousLayout &&
-      (!sameLayoutGeometry(previousLayout, input.layout) ||
+      (this.update?.displayMode !== input.displayMode ||
+        this.update?.platform !== input.platform ||
+        !sameLayoutGeometry(previousLayout, input.layout) ||
         (!reloaded && this.pageLayoutRevision !== input.layout.revision));
     this.pageLayoutRevision = input.layout.revision;
     this.pageId = input.pageId;
@@ -267,8 +275,17 @@ export class CalibrationPhoneSession {
       this.update.layout.revision = previousLayout.revision + (changed ? 1 : 0);
     return reloaded;
   }
+  displayRequirement() {
+    const update = this.update;
+    if (update?.platform === 'ios')
+      return update.displayMode === 'standalone' ? undefined : 'home-screen';
+    return update?.platform && update.displayMode === 'fullscreen'
+      ? undefined
+      : 'fullscreen';
+  }
   connected(now = Date.now()): boolean {
     return (
+      !this.displayRequirement() &&
       now - this.lastSeen < policy.measurementFreshMs &&
       this.update?.visible === true
     );
@@ -282,6 +299,7 @@ export class CalibrationPhoneSession {
   }
   available(now = Date.now()): boolean {
     return (
+      !this.displayRequirement() &&
       this.update?.visible === true &&
       now - this.lastSeen < policy.displayFreshMs
     );

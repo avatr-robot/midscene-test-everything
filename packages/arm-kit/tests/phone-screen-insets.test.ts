@@ -12,6 +12,8 @@ function openPhone(height: number, top: number, bottom: number, ios = true) {
   const listeners = new Map<string, (event?: unknown) => void>();
   let socket!: Socket;
   let reloaded = false;
+  let fullscreenExits = 0;
+  const root = {};
   const timers = new Map<number, () => unknown>();
   let nextTimer = 0;
   class Socket {
@@ -37,6 +39,13 @@ function openPhone(height: number, top: number, bottom: number, ios = true) {
     textContent: '',
     className: '',
     children: [] as unknown[],
+    hidden: false,
+    append(...children: unknown[]) {
+      this.children.push(...children);
+    },
+    get childElementCount() {
+      return this.children.length;
+    },
     replaceChildren(...children: unknown[]) {
       this.children = children;
     },
@@ -50,6 +59,8 @@ function openPhone(height: number, top: number, bottom: number, ios = true) {
     addEventListener(name: string, callback: (event: unknown) => void) {
       surfaceListeners.set(name, callback);
     },
+    play: async () => {},
+    pause() {},
     setPointerCapture() {},
     remove() {},
   });
@@ -61,7 +72,8 @@ function openPhone(height: number, top: number, bottom: number, ios = true) {
     AbortSignal,
     fetch: async (_url: string, _options: unknown) => ({
       ok: true,
-      headers: new Headers({ 'content-type': 'text/html' }),
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ pageId: 'next-page', markers: Array(6).fill('') }),
     }),
     setTimeout(callback: () => unknown) {
       timers.set(++nextTimer, callback);
@@ -97,11 +109,19 @@ function openPhone(height: number, top: number, bottom: number, ios = true) {
     }),
     document: {
       hidden: false,
+      documentElement: root,
+      fullscreenElement: ios ? null : root,
+      exitFullscreen: () => {
+        fullscreenExits++;
+      },
       body: { dataset: {}, appendChild() {} },
       createElement: element,
-      querySelector: () => ({
-        getAttribute: () => 'width=device-width,viewport-fit=cover',
-      }),
+      querySelector: (selector: string) =>
+        selector.startsWith('meta')
+          ? {
+              getAttribute: () => 'width=device-width,viewport-fit=cover',
+            }
+          : null,
       getElementById: (id: string) => {
         if (!elements.has(id)) elements.set(id, element());
         return elements.get(id);
@@ -145,6 +165,8 @@ function openPhone(height: number, top: number, bottom: number, ios = true) {
     disconnect: (code: number) => socket.onclose({ code }),
     timers,
     reloaded: () => reloaded,
+    openSocket: () => socket.onopen(),
+    fullscreenExits: () => fullscreenExits,
     surfaceListeners,
     documentListeners,
     flushEvents: () => {
@@ -277,9 +299,9 @@ test('shows local touch feedback after calibration stops without requiring a cap
     preventDefault() {},
   });
   expect(phone.elements.get('touch-status')!.textContent).toContain(
-    'Page detected touch: 123, 234',
+    '123.0, 234.0',
   );
-  expect(phone.elements.get('contact-feedback')!.style).toMatchObject({
+  expect(phone.elements.get('mapping-hit')!.style).toMatchObject({
     left: '123px',
     top: '234px',
   });
@@ -374,13 +396,19 @@ test('retains document and surface Pointer events separately across target reset
   expect(phone.last().contact).toBeUndefined();
 });
 
-test('disconnected phone waits for the same authenticated URL then reloads without scanning', async () => {
-  const phone = openPhone(700, 47, 34);
+test('completion and transport renewal preserve the fullscreen phone document for the next run', async () => {
+  const phone = openPhone(844, 0, 0, false);
+  phone.receive({ view: 'completed', anchors: [] });
+  expect(phone.fullscreenExits()).toBe(0);
   const urls: string[] = [];
   let ready = false;
   phone.scope.fetch = async (url: string) => {
     urls.push(url);
-    return { ok: ready, headers: new Headers({ 'content-type': 'text/html' }) };
+    return {
+      ok: ready,
+      headers: new Headers(),
+      json: async () => ({ pageId: 'next-page', markers: Array(6).fill('') }),
+    };
   };
   phone.disconnect(1006);
   expect(phone.timers.size).toBe(1);
@@ -393,7 +421,15 @@ test('disconnected phone waits for the same authenticated URL then reloads witho
   expect(phone.reloaded()).toBe(false);
   ready = true;
   await retry();
-  expect(phone.reloaded()).toBe(true);
+  expect(phone.reloaded()).toBe(false);
+  phone.openSocket();
+  phone.receive({ view: 'markers', anchors: [] });
+  expect(phone.last()).toMatchObject({
+    pageId: 'next-page',
+    displayMode: 'fullscreen',
+  });
+  phone.disconnect(4410);
+  expect(phone.fullscreenExits()).toBe(0);
   expect(urls).toEqual([
     'http://localhost/phone?token=saved',
     'http://localhost/phone?token=saved',
@@ -459,14 +495,38 @@ test('shows mapped boundary guides and hides collection target markers', () => {
       ],
     },
   });
-  expect(phone.elements.get('boundary-guide')!.style).toMatchObject({
-    display: 'block',
+  const guide = phone.elements.get('verification-guide')!;
+  expect(guide.hidden).toBe(false);
+  expect(guide.children).toHaveLength(9);
+  expect(guide.children[0]).toMatchObject({
+    className: 'verification-edge',
+    style: { left: '10px', top: '20px', width: '290px' },
   });
-  expect(phone.elements.get('boundary-contour')!.attributes.points).toBe(
-    '10,20 300,20 300,600 10,600',
+  expect(guide.children[1]).toMatchObject({
+    className: 'verification-target',
+    children: [{ textContent: '1' }],
+  });
+  const pointer = {
+    pointerId: 1,
+    clientX: 24,
+    clientY: 36,
+    preventDefault() {},
+  };
+  phone.surfaceListeners.get('pointerdown')!(pointer);
+  phone.surfaceListeners.get('pointermove')!({ ...pointer, clientX: 27 });
+  expect(phone.elements.get('mapping-hit')!.style).toMatchObject({
+    left: '27px',
+    top: '36px',
+  });
+  phone.surfaceListeners.get('pointerup')!({ ...pointer, clientX: 28 });
+  expect(phone.elements.get('mapping-hit')!.style).toMatchObject({
+    left: '28px',
+  });
+  expect(phone.elements.get('mapping-trail')!.children.length).toBeGreaterThan(
+    0,
   );
+  expect(phone.last().touches).toEqual([]);
   phone.receive({ view: 'return-ready', anchors: [] });
-  expect(phone.elements.get('boundary-guide')!.style).toMatchObject({
-    display: 'none',
-  });
+  expect(guide.hidden).toBe(true);
+  expect(phone.elements.get('mapping-trail')!.children).toHaveLength(0);
 });

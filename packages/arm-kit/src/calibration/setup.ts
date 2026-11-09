@@ -178,6 +178,7 @@ export class CalibrationSetup {
     };
   }
   async assertCurrent() {
+    this.phone.assertAvailable();
     if (
       !this.mapping ||
       !this.phone.update ||

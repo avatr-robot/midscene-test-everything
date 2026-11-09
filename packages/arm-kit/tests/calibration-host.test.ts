@@ -1,9 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { expect, it, rstest } from '@rstest/core';
-import sharp from 'sharp';
 import { CalibrationHost } from '../src/calibration-server/host.js';
-import * as detector from '../src/calibration/camera/screen-detector.js';
 import type { CameraSession } from '../src/camera/session.js';
 import { controllerRuntime } from '../src/controller-runtime.js';
 import { ArmController } from '../src/controller.js';
@@ -167,62 +165,24 @@ it('prepares first-time measured setup without inventing tool geometry or replac
   }
 });
 
-it('detects correction with the provided model without exposing credentials or moving the arm', async () => {
+it('requires the marker page for both screen detection routes', async () => {
   const f = await fixture();
   await f.runtime.shutdown();
   const arm = new ArmController({ adapter: f.adapter, profileStore: f.store });
-  const jpeg = await sharp({
-    create: { width: 640, height: 480, channels: 3, background: '#ffffff' },
-  })
-    .jpeg()
-    .toBuffer();
-  const camera = {
-    camera: { id: 'detect-camera', name: 'Camera' },
-    rawFrame: async () => jpeg,
-    getCorrection: () => undefined,
-  } as unknown as CameraSession;
+  const camera = { camera: { id: 'detect-camera' } } as CameraSession;
   const host = new CalibrationHost({ arm, camera, deviceId: 'detect-device' });
   try {
-    const points = {
-      topLeft: { x: 100, y: 100 },
-      topRight: { x: 500, y: 100 },
-      bottomRight: { x: 500, y: 400 },
-      bottomLeft: { x: 100, y: 400 },
-    };
-    const detect = rstest
-      .spyOn(detector, 'detectScreenWithModel')
-      .mockResolvedValue({ points } as Awaited<
-        ReturnType<typeof detector.detectScreenWithModel>
-      >);
-    const modelConfig = {
-      modelName: 'test-model',
-      modelFamily: 'qwen',
-      baseUrl: '',
-      apiKey: 'test-only',
-    };
-    try {
-      const req = Readable.from([
-        JSON.stringify({ modelConfig }),
-      ]) as IncomingMessage;
+    for (const action of ['markers', 'detect']) {
+      const req = Readable.from([]) as IncomingMessage;
       req.method = 'POST';
-      req.url = '/api/calibration/camera/detect';
-      let response: any;
+      req.url = `/api/calibration/camera/${action}`;
       const res = {
-        writeHead: (status: number) => expect(status).toBe(200),
-        end: (body: string) => {
-          response = JSON.parse(body);
-        },
+        writeHead: (status: number) => expect(status).toBe(409),
+        end: (body: string) =>
+          expect(JSON.parse(body).error).toBe('Connect Phone'),
       } as unknown as ServerResponse;
       await host.handle(req, res);
-      expect(detect).toHaveBeenCalledWith(jpeg, modelConfig);
-      expect(response.frameDataUrl).toBe(
-        `data:image/jpeg;base64,${jpeg.toString('base64')}`,
-      );
-      expect(JSON.stringify(response)).not.toContain('test-only');
-    } finally {
-      detect.mockRestore();
     }
-
     expect(f.adapter.movements).toHaveLength(0);
   } finally {
     await host.close();

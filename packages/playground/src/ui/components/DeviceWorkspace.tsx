@@ -20,6 +20,7 @@ import { useDeviceReadiness } from '../hooks/useDeviceReadiness';
 import { useRobotArm } from '../hooks/useRobotArm';
 import { usePreferences, useT } from '../i18n';
 import { CameraRail } from './CameraRail';
+import { CameraStagePreview } from './CameraStagePreview';
 import { DeviceCalibration } from './DeviceCalibration';
 import { DeviceTransfer } from './DeviceTransfer';
 import { RobotReadinessCard } from './RobotReadinessCard';
@@ -131,6 +132,15 @@ export function DeviceWorkspace() {
                   </div>
                 </div>
                 <div className="camera-stage-actions">
+                  <Button
+                    icon={<ScanLine size={16} />}
+                    disabled={!running}
+                    onClick={() => setCalibrationId(selected.id)}
+                  >
+                    {language === 'zh'
+                      ? '识别屏幕标记'
+                      : 'Detect screen markers'}
+                  </Button>
                   {ready && (
                     <Segmented
                       className="rv-segmented"
@@ -179,7 +189,7 @@ export function DeviceWorkspace() {
                   </Tooltip>
                 </div>
               </header>
-              <div className="camera-stage-preview">
+              <CameraStagePreview available={running}>
                 {selected.stream?.state === 'running' &&
                 previewError === previewKey ? (
                   <Empty
@@ -205,7 +215,7 @@ export function DeviceWorkspace() {
                     <span>{t('noStream')}</span>
                   </>
                 )}
-              </div>
+              </CameraStagePreview>
               {(error || selected.error || selected.stream?.error) && (
                 <Typography.Text type="danger" role="alert">
                   {error || selected.error || selected.stream?.error}

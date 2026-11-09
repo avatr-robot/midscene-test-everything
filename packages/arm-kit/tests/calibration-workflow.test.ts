@@ -93,6 +93,8 @@ async function setup() {
     const reply = service.receivePhone({
       pageId,
       sequence: ++sequence,
+      platform: 'android',
+      displayMode: 'fullscreen',
       visible,
       layout: { ...layout, revision },
       contact: point ? { point, id: contactId, motionRevision: 0 } : undefined,

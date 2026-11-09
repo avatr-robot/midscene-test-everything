@@ -26,6 +26,7 @@ import {
 } from './camera-preview.js';
 import { CodeSetup } from './code-setup.js';
 import { PlaygroundDevices } from './devices.js';
+import { MarkerPreview } from './marker-preview.js';
 import { PhonePairings } from './phone-pairings.js';
 import type {
   PlaygroundSession,
@@ -116,6 +117,18 @@ export async function startPlaygroundHost({
   handleRequest,
   developmentOrigins = [],
 }: HostOptions) {
+  const markerPreviews = new Map<string, MarkerPreview>();
+  const phoneLinks = (token: string) =>
+    Object.values(networkInterfaces())
+      .flat()
+      .filter(
+        (entry): entry is NonNullable<typeof entry> =>
+          !!entry && entry.family === 'IPv4' && !entry.internal,
+      )
+      .map((entry) => ({
+        name: entry.address,
+        url: `http://${entry.address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
+      }));
   const cameraManager = new CameraSessionManager();
   let adapterName: string | undefined;
   let devices: PlaygroundDevices | undefined;
@@ -197,17 +210,7 @@ export async function startPlaygroundHost({
         devices = new PlaygroundDevices(arm, {
           cameras: cameraManager,
           pairings,
-          phoneLinks: (token) =>
-            Object.values(networkInterfaces())
-              .flat()
-              .filter(
-                (entry): entry is NonNullable<typeof entry> =>
-                  !!entry && entry.family === 'IPv4' && !entry.internal,
-              )
-              .map((entry) => ({
-                name: entry.address,
-                url: `http://${entry.address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
-              })),
+          phoneLinks,
         });
         tasks = new PlaygroundTasks(devices);
         armControls = new PlaygroundArmControls(arm, tasks);
@@ -279,6 +282,21 @@ export async function startPlaygroundHost({
     if (!url) return send(400, { error: 'Invalid URL' });
     if (url.pathname.startsWith('/phone-calibration')) {
       try {
+        const preview = markerPreviews.get(url.searchParams.get('token') ?? '');
+        if (
+          preview &&
+          req.method === 'GET' &&
+          url.pathname === '/phone-calibration'
+        ) {
+          if (req.headers.accept === 'application/json')
+            return send(200, preview.renewPage());
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+          });
+          return res.end(preview.page());
+        }
         const calibration = await devices?.resolvePhoneHost(
           url.searchParams.get('token'),
         );
@@ -520,8 +538,23 @@ export async function startPlaygroundHost({
         if (!devices) return send(409, { error: 'Connect the arm first' });
         const id = decodeURIComponent(calibrationRoute[1]);
         const action = calibrationRoute[2];
-        if (action === 'start' && req.method === 'POST')
-          return send(200, await devices.startCalibration(id));
+        if (action === 'start' && req.method === 'POST') {
+          const status = await devices.startCalibration(id);
+          // A camera-only page can join the calibrated Device without a second scan.
+          const preview = [...markerPreviews.values()].find(
+            (p) => p.cameraId === id,
+          );
+          if (preview) {
+            const session = devices.entries.get(id)?.calibration;
+            await session?.ready;
+            if (
+              session?.phase === 'running' &&
+              session.host?.service.phoneStatus().state === 'waiting'
+            )
+              preview.handoffToken = session.token;
+          }
+          return send(200, status);
+        }
         if (action === 'status' && req.method === 'GET')
           return send(200, devices.status(id));
         if (action === 'cancel' && req.method === 'POST') {
@@ -537,6 +570,76 @@ export async function startPlaygroundHost({
         if (req.method !== 'GET' && session.phase !== 'running')
           return send(409, { error: 'Calibration has ended' });
         if (await session.host.handle(req, res)) return;
+      }
+      if (url.pathname === '/api/cameras/markers') {
+        const id = url.searchParams.get('id');
+        const token = url.searchParams.get('token');
+        // Reclaim abandoned browser sessions on the next request.
+        for (const [key, item] of markerPreviews) {
+          if (Date.now() - item.lastViewed > 5 * 60_000) {
+            item.close();
+            markerPreviews.delete(key);
+          }
+        }
+        if (!token && id && req.method === 'POST') {
+          if (
+            !(await listCameras({ includeBuiltIn: !devices })).some(
+              (camera) => camera.id === id,
+            )
+          )
+            return send(404, { error: 'Camera not found' });
+          const paired = [...markerPreviews.values()].find(
+            (page) => page.cameraId === id,
+          );
+          if (paired) {
+            paired.showMarkers();
+            return send(200, {
+              token: paired.token,
+              links: phoneLinks(paired.token),
+            });
+          }
+          const slot = Array.from({ length: 8 }, (_, i) => i + 1).find(
+            (slot) =>
+              ![...markerPreviews.values()].some((p) => p.slot === slot),
+          );
+          if (!slot)
+            return send(409, { error: 'Close another marker preview first' });
+          const preview = new MarkerPreview(id, slot);
+          markerPreviews.set(preview.token, preview);
+          return send(200, {
+            token: preview.token,
+            links: phoneLinks(preview.token),
+          });
+        }
+        const preview = markerPreviews.get(token ?? '');
+        if (!preview)
+          return send(404, {
+            error: 'Marker preview expired. Reopen it from the camera.',
+          });
+        preview.lastViewed = Date.now();
+        if (req.method === 'GET') return send(200, preview.status());
+        if (req.method === 'POST' && url.searchParams.has('showMarkers')) {
+          preview.showMarkers();
+          return send(200, preview.status());
+        }
+        if (req.method === 'POST') {
+          const abort = new AbortController();
+          const cancel = () => abort.abort();
+          res.once('close', cancel);
+          try {
+            return send(
+              200,
+              await preview.capture(
+                cameraManager,
+                url.searchParams.get('pageKey'),
+                abort.signal,
+              ),
+            );
+          } finally {
+            res.off('close', cancel);
+          }
+        }
+        return send(405, { error: 'Method not allowed' });
       }
       if (url.pathname === '/api/cameras' && req.method === 'GET') {
         const cameras = await listCameras({
@@ -658,7 +761,9 @@ export async function startPlaygroundHost({
   server.on('upgrade', (req, socket, head) => {
     const url = URL.parse(req.url ?? '/', 'http://localhost');
     if (!url) return socket.destroy();
-    const calibration = devices?.phoneHost(url.searchParams.get('token'));
+    const token = url.searchParams.get('token');
+    const calibration =
+      markerPreviews.get(token ?? '') ?? devices?.phoneHost(token);
     if (!calibration) return socket.destroy();
     calibration.phoneSocket.upgrade(req, socket, head);
   });
@@ -682,6 +787,8 @@ export async function startPlaygroundHost({
         server.closeAllConnections();
         await setup.pending?.catch(() => {});
         await disconnectArm();
+        for (const preview of markerPreviews.values()) preview.close();
+        markerPreviews.clear();
         await cameraManager.close();
         await drained;
       })();

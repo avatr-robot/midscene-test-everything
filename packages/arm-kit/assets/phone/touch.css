@@ -1,0 +1,209 @@
+/* Fixed screen references for approach observation, never optical mapping. */
+#approach-guides {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  pointer-events: none;
+}
+
+.approach-reference {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 32px;
+  border: 3px solid #0f172a;
+  outline: 5px solid #fff;
+  background: #fff;
+  color: #0f172a;
+  font: bold 22px / 32px sans-serif;
+  text-align: center;
+}
+
+/* Static classes also work under the page's style-src 'self' policy. */
+.approach-reference[data-corner="1"],
+.approach-reference[data-corner="4"] {
+  left: 12%;
+}
+.approach-reference[data-corner="2"],
+.approach-reference[data-corner="3"] {
+  left: 88%;
+}
+.approach-reference[data-corner="1"],
+.approach-reference[data-corner="2"] {
+  top: 12%;
+}
+.approach-reference[data-corner="3"],
+.approach-reference[data-corner="4"] {
+  top: 88%;
+}
+
+.approach-target {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 24vmin;
+  height: 24vmin;
+  border-radius: 50%;
+  background: #111827;
+  outline: 3px solid #f97316;
+  outline-offset: 6px;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font: 28px / 1 sans-serif;
+}
+
+#verification-guide {
+  position: fixed;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.verification-edge {
+  position: absolute;
+  border-top: 2px dashed #ea580c;
+  transform-origin: 0 0;
+}
+
+.verification-target {
+  position: absolute;
+  width: 0;
+  height: 0;
+  color: #c2410c;
+}
+
+.verification-target::before,
+.verification-target::after {
+  content: "";
+  position: absolute;
+  background: #ea580c;
+  transform: translate(-50%, -50%);
+}
+
+.verification-target::before {
+  width: 24px;
+  height: 2px;
+}
+
+.verification-target::after {
+  width: 2px;
+  height: 24px;
+}
+
+.verification-target span {
+  position: absolute;
+  font: bold 16px / 1 sans-serif;
+}
+
+.verification-legend {
+  position: absolute;
+  left: 25%;
+  top: 40%;
+  width: 50%;
+  white-space: pre-line;
+  text-align: center;
+  font: 13px / 1.7 sans-serif;
+  color: #7c2d12;
+}
+
+body[data-verification="true"] .mapping-touch-dot {
+  width: 5px;
+  height: 5px;
+  border: 0;
+  box-shadow: none;
+  animation: none;
+}
+
+#mapping-trail {
+  position: fixed;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.mapping-touch-dot {
+  position: absolute;
+  pointer-events: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: rgb(37 99 235 / 92%);
+  box-shadow: 0 0 0 2px rgb(37 99 235 / 22%);
+  transform: translate(-50%, -50%);
+  animation: mapping-touch-trail 900ms ease-out forwards;
+}
+
+@keyframes mapping-touch-trail {
+  from {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.9);
+  }
+}
+
+#mapping-hit {
+  position: absolute;
+  z-index: 3;
+  width: 46px;
+  height: 46px;
+  border: 3px solid #1d4ed8;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgb(29 78 216 / 24%));
+  box-shadow: 0 0 0 3px #fff, 0 0 0 7px rgb(29 78 216 / 20%), 0 10px 26px
+    rgb(15 23 42 / 20%);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  display: none;
+}
+
+#mapping-hit::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1d4ed8;
+  transform: translate(-50%, -50%);
+}
+
+#mapping-hit.pulse {
+  animation: mapping-hit-pulse 360ms ease-out;
+}
+
+@keyframes mapping-hit-pulse {
+  from {
+    box-shadow: 0 0 0 3px #fff, 0 0 0 7px rgb(29 78 216 / 38%), 0 10px 26px
+      rgb(15 23 42 / 20%);
+  }
+  to {
+    box-shadow: 0 0 0 3px #fff, 0 0 0 7px rgb(29 78 216 / 20%), 0 10px 26px
+      rgb(15 23 42 / 20%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mapping-touch-dot {
+    display: none;
+  }
+  #mapping-hit.pulse {
+    animation: none;
+  }
+}

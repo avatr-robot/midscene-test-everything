@@ -45,6 +45,7 @@ export interface PhoneTouchEvent {
   point?: WebPoint;
 }
 export interface CalibrationPhoneStatus {
+  displayRequirement?: 'home-screen' | 'fullscreen';
   model?: string;
   diagnostics?: {
     version?: 2;
@@ -52,6 +53,8 @@ export interface CalibrationPhoneStatus {
     receivedAt: number;
     updateSequence: number;
     contact: boolean;
+    wakeState?: CalibrationPageUpdate['wakeState'];
+    fullscreen?: boolean;
     feedback?: CalibrationPageUpdate['stepFeedback'];
     events: PhoneTouchEvent[];
   };
@@ -211,6 +214,13 @@ export interface CalibrationPageLayout {
   >;
 }
 export interface CalibrationPageUpdate {
+  /** Reported by the optical marker page before capture. */
+  platform?: 'android' | 'harmonyos' | 'ios' | 'other';
+  displayMode?: 'browser' | 'fullscreen' | 'standalone';
+  fullscreen?: boolean;
+  wakeState?: 'system' | 'video' | 'pending' | 'blocked';
+  markersPainted?: boolean;
+  markerRequest?: string;
   touchDiagnosticsVersion?: 2;
   /** Bounded diagnostic history; never used as contact evidence. */
   touchEvents?: PhoneTouchEvent[];
@@ -244,10 +254,15 @@ export interface CalibrationPageUpdate {
   }>;
 }
 export interface CalibrationPageReply {
+  /** Same-camera transition from camera-only preview to a paired Device. */
+  pairingToken?: string;
+  insetMarkers?: boolean;
+  markerRequest?: string;
   boundaryGuide?: { group: 'hover' | 'contact'; corners: WebPoint[] };
   imageTrial?: boolean;
   view:
     | 'markers'
+    | 'touch-preview'
     | 'collect'
     | 'reference-required'
     | 'capture-failed'

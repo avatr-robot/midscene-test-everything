@@ -49,6 +49,7 @@ export function WebCalibrationWorkspace({
   const [confirmed, setConfirmed] = useState(false);
   const [horizontal, setHorizontal] = useState(false);
   const [saveConfirmed, setSaveConfirmed] = useState(false);
+  const [reviewStep, setReviewStep] = useState<number>();
   const stage = s?.stage;
   const completed =
     stage === 'completed' || (!s && calibrationAccepted(result));
@@ -61,6 +62,7 @@ export function WebCalibrationWorkspace({
   useEffect(() => {
     setConfirmed(false);
     setSaveConfirmed(false);
+    setReviewStep(undefined);
   }, [stage, s?.id]);
   useEffect(() => {
     onBeforeLeaveChange(async () => {
@@ -84,10 +86,44 @@ export function WebCalibrationWorkspace({
         ? 3
         : stage === 'safety' || stage === 'returning'
           ? 2
-          : stage === 'collecting'
+          : stage === 'collecting' ||
+              (stage === 'ready' && s?.referencePosition)
             ? 1
             : 0;
-  const actions = completed ? (
+  const canReview = !busy && !activeMotion && stage !== 'positioning-safe';
+  const viewed =
+    canReview && reviewStep !== undefined ? Math.min(reviewStep, index) : index;
+  const reviewing = viewed < index;
+  const saved = !s || completed ? result : undefined;
+  const pose =
+    viewed === 0
+      ? s?.referencePosition
+      : (s?.safePosition ?? saved?.observationPose);
+  const boundary = s?.calibration?.boundary ?? saved?.verification?.boundary;
+  const samples = s?.samples ?? saved?.verification?.auto?.samples.length;
+  const reviewDetail =
+    viewed === 1
+      ? samples === undefined
+        ? undefined
+        : `${t('Samples')} · ${samples}`
+      : viewed === 2
+        ? boundary
+          ? [
+              [t('Hover'), boundary.hoverCorners && boundary.hoverEdges],
+              [t('Contact'), boundary.contactCorners && boundary.contactEdges],
+            ]
+              .map(([label, passed]) => `${label} ${passed ? '✓' : '—'}`)
+              .join(' · ')
+          : undefined
+        : pose
+          ? ['x', 'y', 'z']
+              .map(
+                (axis) =>
+                  `${axis.toUpperCase()} ${pose.positionMm[axis as 'x' | 'y' | 'z'].toFixed(2)} mm`,
+              )
+              .join(' · ')
+          : undefined;
+  const liveActions = completed ? (
     <>
       <Button
         disabled={busy || !readyToStart}
@@ -185,11 +221,35 @@ export function WebCalibrationWorkspace({
       {t('Restart Calibration')}
     </Button>
   ) : null;
+  const actions = (
+    <>
+      {viewed > 0 && (
+        <Button
+          className="robot-previous-step"
+          disabled={!canReview}
+          onClick={() => setReviewStep(viewed - 1)}
+        >
+          {t('Previous Step')}
+        </Button>
+      )}
+      {reviewing ? (
+        <Button
+          onClick={() =>
+            setReviewStep(viewed + 1 < index ? viewed + 1 : undefined)
+          }
+        >
+          {t('Next')}
+        </Button>
+      ) : (
+        liveActions
+      )}
+    </>
+  );
   return (
     <div className="robot-web-calibration">
       <nav className="robot-web-phases" aria-label={t('Calibration progress')}>
         {steps.map((label, i) => (
-          <span key={label} className={i === index ? 'current' : ''}>
+          <span key={label} className={i === viewed ? 'current' : ''}>
             {i < index ? '✓' : i + 1} {t(label)}
           </span>
         ))}
@@ -206,107 +266,127 @@ export function WebCalibrationWorkspace({
                 : undefined
             }
           />
-          {!s && controls}
-          {s && !s.phoneConnected && !completed && (
-            <Typography.Paragraph>
-              {t('Phone disconnected')}
-              {onConnectPhone && (
-                <Button onClick={onConnectPhone}>{t('Connect Phone')}</Button>
-              )}
-            </Typography.Paragraph>
-          )}
-          {!setup.mapping && !s?.mapping && onCheckCamera && (
-            <Button onClick={onCheckCamera}>{t('Check Camera Mapping')}</Button>
-          )}
-          {(stage === 'positioning' ||
-            (stage === 'ready' && !s?.referencePosition)) && (
-            <Typography.Paragraph>
-              {t(
-                'Place the stylus 20–50 mm above the center of the screen. Release the robot and record the starting position. Recording does not move the robot.',
-              )}
-            </Typography.Paragraph>
-          )}
-          {stage === 'ready' && s?.referencePosition && (
+          {reviewing ? (
             <>
-              <Radio.Group
-                value={mode}
-                onChange={(e) => {
-                  setMode(e.target.value);
-                  setConfirmed(false);
-                  setHorizontal(false);
-                }}
-              >
-                <Radio.Button value="standard">
-                  {t('Standard probing')}
-                </Radio.Button>
-                <Radio.Button value="fast">{t('Fast probing')}</Radio.Button>
-                <Radio.Button value="slide">
-                  {t('Sliding collection')}
-                </Radio.Button>
-              </Radio.Group>
+              <Typography.Title level={4}>{t(steps[viewed])}</Typography.Title>
               <Typography.Paragraph>
-                {t(
-                  'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.',
-                )}
+                {reviewDetail ?? t('No measurement recorded for this step.')}
               </Typography.Paragraph>
-              {mode !== 'standard' && (
+            </>
+          ) : (
+            <>
+              {!s && controls}
+              {s && !s.phoneConnected && !completed && (
+                <Typography.Paragraph>
+                  {t('Phone disconnected')}
+                  {onConnectPhone && (
+                    <Button onClick={onConnectPhone}>
+                      {t('Connect Phone')}
+                    </Button>
+                  )}
+                </Typography.Paragraph>
+              )}
+              {!setup.mapping && !s?.mapping && onCheckCamera && (
+                <Button onClick={onCheckCamera}>
+                  {t('Check Camera Mapping')}
+                </Button>
+              )}
+              {(stage === 'positioning' ||
+                (stage === 'ready' && !s?.referencePosition)) && (
+                <Typography.Paragraph>
+                  {t(
+                    'Place the stylus 20–50 mm above the center of the screen. Release the robot and record the starting position. Recording does not move the robot.',
+                  )}
+                </Typography.Paragraph>
+              )}
+              {stage === 'ready' && s?.referencePosition && (
+                <>
+                  <Radio.Group
+                    value={mode}
+                    onChange={(e) => {
+                      setMode(e.target.value);
+                      setConfirmed(false);
+                      setHorizontal(false);
+                    }}
+                  >
+                    <Radio.Button value="standard">
+                      {t('Standard probing')}
+                    </Radio.Button>
+                    <Radio.Button value="fast">
+                      {t('Fast probing')}
+                    </Radio.Button>
+                    <Radio.Button value="slide">
+                      {t('Sliding collection')}
+                    </Radio.Button>
+                  </Radio.Group>
+                  <Typography.Paragraph>
+                    {t(
+                      'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.',
+                    )}
+                  </Typography.Paragraph>
+                  {mode !== 'standard' && (
+                    <Checkbox
+                      checked={horizontal}
+                      onChange={(e) => setHorizontal(e.target.checked)}
+                    >
+                      {t('The screen is horizontal and securely fixed.')}
+                    </Checkbox>
+                  )}
+                  <Checkbox
+                    checked={confirmed}
+                    onChange={(e) => setConfirmed(e.target.checked)}
+                  >
+                    {t(
+                      'I confirm the setup and clear workspace for sampling and automatic boundary verification.',
+                    )}
+                  </Checkbox>
+                </>
+              )}
+              {s?.capture && <ExplorationProgress session={s} />}
+              {activeMotion && (
+                <Typography.Paragraph>
+                  {t(
+                    stage === 'collecting'
+                      ? 'Collect calibration points'
+                      : 'Boundary verification',
+                  )}
+                </Typography.Paragraph>
+              )}
+              {(stage === 'return-ready' || stage === 'positioning-safe') && (
+                <Typography.Paragraph>
+                  {t(
+                    'Boundary verification is complete. Record a Safe Position clear of the screen and camera; release the robot before recording.',
+                  )}
+                </Typography.Paragraph>
+              )}
+              {quality && (
+                <Typography.Paragraph>
+                  {t(
+                    'Grid RMS {0} mm · Holdout maximum {1} mm · Coverage {2}%',
+                    [
+                      quality.gridRmsMm.toFixed(2),
+                      quality.holdoutMaxMm.toFixed(2),
+                      Math.round(quality.coverage * 100),
+                    ],
+                  )}
+                </Typography.Paragraph>
+              )}
+              {stage === 'review' && (
                 <Checkbox
-                  checked={horizontal}
-                  onChange={(e) => setHorizontal(e.target.checked)}
+                  checked={saveConfirmed}
+                  onChange={(e) => setSaveConfirmed(e.target.checked)}
                 >
-                  {t('The screen is horizontal and securely fixed.')}
+                  {t(
+                    'I have reviewed the measurements and confirm the phone, camera and tool have not moved.',
+                  )}
                 </Checkbox>
               )}
-              <Checkbox
-                checked={confirmed}
-                onChange={(e) => setConfirmed(e.target.checked)}
-              >
-                {t(
-                  'I confirm the setup and clear workspace for sampling and automatic boundary verification.',
-                )}
-              </Checkbox>
+              {completed && (
+                <Typography.Paragraph>
+                  {t('Calibration complete')}
+                </Typography.Paragraph>
+              )}
             </>
-          )}
-          {s?.capture && <ExplorationProgress session={s} />}
-          {activeMotion && (
-            <Typography.Paragraph>
-              {t(
-                stage === 'collecting'
-                  ? 'Collect calibration points'
-                  : 'Boundary verification',
-              )}
-            </Typography.Paragraph>
-          )}
-          {(stage === 'return-ready' || stage === 'positioning-safe') && (
-            <Typography.Paragraph>
-              {t(
-                'Boundary verification is complete. Record a Safe Position clear of the screen and camera; release the robot before recording.',
-              )}
-            </Typography.Paragraph>
-          )}
-          {quality && (
-            <Typography.Paragraph>
-              {t('Grid RMS {0} mm · Holdout maximum {1} mm · Coverage {2}%', [
-                quality.gridRmsMm.toFixed(2),
-                quality.holdoutMaxMm.toFixed(2),
-                Math.round(quality.coverage * 100),
-              ])}
-            </Typography.Paragraph>
-          )}
-          {stage === 'review' && (
-            <Checkbox
-              checked={saveConfirmed}
-              onChange={(e) => setSaveConfirmed(e.target.checked)}
-            >
-              {t(
-                'I have reviewed the measurements and confirm the phone, camera and tool have not moved.',
-              )}
-            </Checkbox>
-          )}
-          {completed && (
-            <Typography.Paragraph>
-              {t('Calibration complete')}
-            </Typography.Paragraph>
           )}
           <div className="robot-web-actions">
             {!footer && actions}

@@ -1,18 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { AssistedCalibrationInput } from '../assisted-contracts.js';
-import { detectScreenWithModel } from '../calibration/camera/screen-detector.js';
-import { calibrationPhonePage } from '../calibration/phone/page.js';
+import {
+  calibrationPhonePage,
+  phoneMarkerElements,
+} from '../calibration/phone/page.js';
 import { sameLayout } from '../calibration/phone/session.js';
 import { CalibrationWorkflow } from '../calibration/workflow.js';
-import { detectScreenFromMarkers } from '../camera/calibration-markers.js';
-import { jpegSize } from '../camera/jpeg-size.js';
+import { recognizeScreenMarkers } from '../camera/calibration-markers.js';
 import type { CameraSession } from '../camera/session.js';
-import { RobotArmError, type ToolProfile, semanticJson } from '../contracts.js';
+import {
+  type CameraCorrection,
+  RobotArmError,
+  type ToolProfile,
+  semanticJson,
+} from '../contracts.js';
 import { controllerRuntime } from '../controller-runtime.js';
 import type { ArmController } from '../controller.js';
 import { createCalibrationHandler } from './handler.js';
-import { parseDetectionModel } from './model-config.js';
 
 import { PhoneSocketServer } from './phone-socket.js';
 
@@ -250,13 +256,6 @@ export class CalibrationHost {
             tool: arm.profileStore.getTool(this.input.toolProfileId),
           }
         : undefined,
-      detectionModel: {
-        modelName: process.env.MIDSCENE_ROBOT_CALIBRATION_MODEL_NAME ?? '',
-        modelFamily: process.env.MIDSCENE_ROBOT_CALIBRATION_MODEL_FAMILY ?? '',
-        hasApiKey: Boolean(
-          process.env.MIDSCENE_ROBOT_CALIBRATION_MODEL_API_KEY,
-        ),
-      },
       ready: Boolean(
         this.input &&
           state.state.connected &&
@@ -283,6 +282,118 @@ export class CalibrationHost {
         'Finish or cancel calibration before changing the camera correction',
         409,
       );
+  }
+  private async saveCorrection(correction: CameraCorrection) {
+    await this.options.camera.setCorrection(correction);
+    const size = this.autoOutputSize();
+    if (size && this.input) {
+      const selection = { ...this.input, ...size };
+      await this.service.prepare(selection);
+      await controllerRuntime(
+        this.options.arm,
+      ).profileStore.saveCalibrationSetup({
+        ...selection,
+        deviceId: this.options.deviceId,
+        autoOutput: this.autoOutput,
+      });
+      this.input = selection;
+    }
+  }
+
+  private alignment?: AbortController;
+  private async alignScreen(signal: AbortSignal) {
+    this.editable();
+    const session = this.service.status();
+    if (
+      (session?.stage === 'interrupted' && session.samples > 0) ||
+      (session?.stage === 'ready' &&
+        (session.referencePosition || session.safePosition))
+    )
+      throw new RobotArmError(
+        'BUSY',
+        'Resume or cancel the current calibration first',
+        409,
+      );
+    let request = this.service.requestMarkerDisplay();
+    let accepted = false;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        let deadline = Date.now() + 12000;
+        let observed = this.service.markerObservation(request);
+        while (!observed) {
+          // The operator may need time to enter fullscreen or reopen the iOS home screen app.
+          if (!this.service.setup().phoneConnected)
+            deadline = Date.now() + 12000;
+          if (Date.now() >= deadline)
+            throw new RobotArmError(
+              'PAGE_CHANGED',
+              'The phone did not report visible screen markers. Keep the paired page in the foreground.',
+              409,
+            );
+          await delay(80, undefined, { signal });
+          observed = this.service.markerObservation(request);
+        }
+        const { pageId, layout } = observed;
+        const check = () => {
+          signal.throwIfAborted();
+          this.editable();
+          const current = this.service.markerObservation(request);
+          if (current?.pageId !== pageId || !sameLayout(layout, current.layout))
+            throw new RobotArmError(
+              'PAGE_CHANGED',
+              'The phone display changed during marker detection',
+              409,
+            );
+        };
+        const camera = this.options.camera;
+        const output = this.autoOutputSize() ?? this.input ?? layout.screen;
+        let correction: CameraCorrection;
+        try {
+          ({ correction } = await recognizeScreenMarkers(() => {
+            check();
+            return camera.rawFrame();
+          }, layout));
+          check();
+          // Check the candidate in the corrected image before replacing the saved corners.
+          const frame = await camera.correctedFrame(correction, output);
+          await camera.detectMarkers(frame, layout.markers);
+          check();
+        } catch (error) {
+          signal.throwIfAborted();
+          const current = this.service.markerObservation(request);
+          if (
+            !current ||
+            current.pageId !== pageId ||
+            !sameLayout(layout, current.layout)
+          ) {
+            // Discard the whole batch when the phone leaves fullscreen or is reopened.
+            request = this.service.requestMarkerDisplay();
+            attempt = 0;
+            continue;
+          }
+          if (
+            attempt >= 3 ||
+            !error ||
+            typeof error !== 'object' ||
+            !('code' in error) ||
+            !['CALIBRATION_MISMATCH', 'NO_SCREEN_DETECTED'].includes(
+              String(error.code),
+            )
+          )
+            throw error;
+          check();
+          request = this.service.requestMarkerDisplay(true);
+          continue;
+        }
+        await this.saveCorrection(correction);
+        if (this.input) await this.service.mapSetup();
+        check();
+        accepted = true;
+        return;
+      }
+    } finally {
+      this.service.finishMarkerDisplay(request, accepted);
+    }
   }
   async handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     if (
@@ -399,13 +510,16 @@ export class CalibrationHost {
           stream.off('stopped', end);
           stream.off('failed', end);
         });
-      } else if (relative === '/camera/markers' && req.method === 'POST') {
+      } else if (
+        (relative === '/camera/markers' || relative === '/camera/detect') &&
+        req.method === 'POST'
+      ) {
         this.editable();
         const setup = this.service.setup();
         const layout = setup.layout;
         if (!layout || !setup.phoneConnected)
           throw new RobotArmError('INVALID_MAPPING', 'Connect Phone', 409);
-        const result = await detectScreenFromMarkers(
+        const result = await recognizeScreenMarkers(
           () => this.options.camera.rawFrame(),
           layout,
         );
@@ -421,21 +535,33 @@ export class CalibrationHost {
             'The phone page changed during marker detection',
             409,
           );
-        send(200, result);
-      } else if (relative === '/camera/detect' && req.method === 'POST') {
-        this.editable();
-        const input = await readJson(req);
-        const modelConfig = parseDetectionModel(input.modelConfig);
-        const image = await this.options.camera.rawFrame();
-        const size = jpegSize(image);
-        const detection = await detectScreenWithModel(image, modelConfig);
-        send(200, {
-          frameDataUrl: `data:image/jpeg;base64,${image.toString('base64')}`,
-          points: detection.points,
-          sourceWidth: size.width,
-          sourceHeight: size.height,
-          rotation: 0,
-        });
+        send(
+          200,
+          relative === '/camera/detect'
+            ? {
+                ...result.correction,
+                frameDataUrl: `data:image/jpeg;base64,${result.jpeg}`,
+              }
+            : result.correction,
+        );
+      } else if (relative === '/camera/align' && req.method === 'POST') {
+        if (this.alignment)
+          throw new RobotArmError(
+            'BUSY',
+            'Screen detection is already running',
+            409,
+          );
+        const abort = new AbortController();
+        const cancel = () => abort.abort();
+        this.alignment = abort;
+        res.once('close', cancel);
+        try {
+          await this.alignScreen(abort.signal);
+          send(200, await this.configuration());
+        } finally {
+          res.off('close', cancel);
+          this.alignment = undefined;
+        }
       } else if (relative === '/camera/check' && req.method === 'POST') {
         const correction = await readJson(req);
         const setup = this.service.setup();
@@ -455,20 +581,13 @@ export class CalibrationHost {
         this.editable();
         const input = await readJson(req);
         this.editable();
-        await this.options.camera.setCorrection(input);
-        const size = this.autoOutputSize();
-        if (size && this.input) {
-          const selection = { ...this.input, ...size };
-          await this.service.prepare(selection);
-          await controllerRuntime(
-            this.options.arm,
-          ).profileStore.saveCalibrationSetup({
-            ...selection,
-            deviceId: this.options.deviceId,
-            autoOutput: this.autoOutput,
-          });
-          this.input = selection;
-        }
+        if (!this.service.setup().phoneConnected)
+          throw new RobotArmError(
+            'PHONE_UNAVAILABLE',
+            'Enter the required phone display mode first',
+            409,
+          );
+        await this.saveCorrection(input);
         send(200, await this.configuration());
       } else send(404, { error: '404 Not Found' });
     } catch (error) {
@@ -488,12 +607,21 @@ export class CalibrationHost {
         (path === '/phone-calibration' || path === '/phone-calibration/') &&
         req.method === 'GET'
       ) {
+        const pageId = this.service.openPhonePage();
+        if (req.headers.accept === 'application/json') {
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          });
+          res.end(JSON.stringify({ pageId, markers: phoneMarkerElements() }));
+          return;
+        }
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',
           'Referrer-Policy': 'no-referrer',
         });
-        res.end(calibrationPhonePage(this.service.openPhonePage()));
+        res.end(calibrationPhonePage(pageId));
       } else {
         res.writeHead(404);
         res.end();
@@ -510,6 +638,7 @@ export class CalibrationHost {
     }
   }
   async close() {
+    this.alignment?.abort();
     this.phoneSocket.close();
     for (const res of this.streams) res.end();
     await this.service.stop();

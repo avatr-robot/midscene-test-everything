@@ -12,7 +12,17 @@ export class PhoneSocketServer {
     maxPayload: 65536,
   });
   private active?: WebSocket;
-  constructor(private readonly service: CalibrationWorkflow) {}
+  constructor(
+    private readonly service: Pick<
+      CalibrationWorkflow,
+      'phoneView' | 'phoneHeartbeat' | 'disconnectPhone'
+    > & {
+      receivePhone(
+        update: Parameters<CalibrationWorkflow['receivePhone']>[0],
+      ): void;
+      subscribe?: CalibrationWorkflow['subscribe'];
+    },
+  ) {}
   upgrade(req: IncomingMessage, stream: Duplex, head: Buffer) {
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (
@@ -40,7 +50,7 @@ export class PhoneSocketServer {
           previous = view;
         }
       };
-      const unsubscribe = this.service.subscribe(publish);
+      const unsubscribe = this.service.subscribe?.(publish);
       socket.on('message', (data, binary) => {
         if (socket.readyState !== WebSocket.OPEN) return;
         try {
@@ -48,6 +58,7 @@ export class PhoneSocketServer {
             this.service.phoneHeartbeat();
             expire.refresh();
             socket.send('pong');
+            publish();
             return;
           }
           const update = JSON.parse(data.toString());
@@ -75,7 +86,7 @@ export class PhoneSocketServer {
       socket.on('error', () => socket.terminate());
       socket.on('close', () => {
         clearTimeout(expire);
-        unsubscribe();
+        unsubscribe?.();
         if (this.active === socket) {
           this.active = undefined;
           this.service.disconnectPhone();
@@ -83,8 +94,11 @@ export class PhoneSocketServer {
       });
     });
   }
-  close() {
-    for (const socket of this.server.clients) socket.terminate();
+  close(reason?: string) {
+    for (const socket of this.server.clients) {
+      if (reason) socket.close(1000, reason);
+      else socket.terminate();
+    }
     this.server.close();
   }
 }

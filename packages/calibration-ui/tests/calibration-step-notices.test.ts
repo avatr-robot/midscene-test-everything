@@ -47,18 +47,19 @@ it('still shows transport connection failures on the phone step', () => {
   expect(html).toContain('标定连接已断开');
 });
 
-it('offers AI screen detection without a phone and keeps stale command errors out', () => {
+it('asks for a marker page before screen detection and keeps stale command errors out', () => {
   const html = renderToStaticMarkup(
     createElement(WebCameraMappingStep, {
       controller: controller(false),
       footer: null,
       onPair() {},
       onContinue() {},
-      onDetectAI: async () => {},
+      onDetect: async () => {},
     }),
   );
-  expect(html).toContain('使用 AI 检测');
-  expect(html).toContain('尚未连接手机网页');
+  expect(html).not.toContain('使用 AI 检测');
+  expect(html).toContain('识别屏幕标记');
+  expect(html).toContain('打开标记页');
   expect(html).not.toContain('Calibration marker');
 });
 

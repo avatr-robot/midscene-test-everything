@@ -1,5 +1,4 @@
 import { armUiTheme } from '@midscene/arm-kit-shared';
-import type { CameraMappingAccuracy } from '@midscene/arm-kit-shared/assisted-contracts';
 import type { CameraCorrection } from '@midscene/arm-kit-shared/contracts';
 import {
   Alert,
@@ -26,11 +25,9 @@ import {
 import { CameraCornerEditor } from './CameraCornerEditor';
 import { CorrectedPreview } from './CorrectedPreview';
 import { createCalibrationClient } from './client';
+import { WebCameraMappingStep } from './components/robot-arm/WebCameraMappingStep';
+import { useAssistedCalibration } from './hooks/useAssistedCalibration';
 import { CalibrationLanguageProvider, t, useCalibrationLanguage } from './i18n';
-import type {
-  CalibrationModelConfig,
-  CalibrationServerModel,
-} from './model-settings';
 import { calibrationPowerControl } from './power-state';
 import type {
   AssistedCalibrationInput,
@@ -43,7 +40,6 @@ import type { CameraProfile } from './types';
 import './styles.less';
 import './standalone/page.less';
 interface Configuration {
-  detectionModel?: CalibrationServerModel;
   deviceId: string;
   capabilities: EffectiveCapabilities;
   input?: AssistedCalibrationInput;
@@ -62,13 +58,14 @@ async function requestAt<T>(
   base: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(`${base}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers:
       body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(90000),
+    signal: signal ?? AbortSignal.timeout(90000),
   });
   const data = await response.json();
   if (!response.ok)
@@ -104,24 +101,16 @@ export function CalibrationWorkspace({
   const [config, setConfig] = useState<Configuration>();
   const [error, setError] = useState<string>();
   const [pollError, setPollError] = useState<string>();
-  const [draft, setDraft] = useState<CameraCorrection>();
+  const [reviewCamera, setReviewCamera] = useState(false);
+  const review = useAssistedCalibration(client, config?.deviceId, reviewCamera);
+  const [reviewFooter, setReviewFooter] = useState<HTMLDivElement | null>(null);
+  const [acceptedRevision, setAcceptedRevision] = useState<number>();
+  const reviewSize =
+    config?.correctionOutput ?? config?.output ?? review.setup.layout?.screen;
   const [editingSetup, setEditingSetup] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [loadingFrame, setLoadingFrame] = useState(false);
   const [footer, setFooter] = useState<HTMLDivElement | null>(null);
   const [navigation, setNavigation] = useState<HTMLDivElement | null>(null);
-  const [panelStep, setPanelStep] = useState(0);
-  const checkDraft = useCallback(async () => {
-    if (draft)
-      return (
-        await request<{
-          accuracy: CameraMappingAccuracy;
-        }>('/camera/check', draft)
-      ).accuracy;
-  }, [draft, request]);
-  const geometry = draft ?? config?.correction;
-  const outputSize = config?.correctionOutput ?? config?.output;
+  const [panelStep, setPanelStep] = useState(1);
   const refresh = useCallback(async () => {
     const next = await request<Configuration>('/configuration');
     setConfig(next);
@@ -151,32 +140,22 @@ export function CalibrationWorkspace({
       clearTimeout(timer);
     };
   }, [request]);
-  const openCorrection = async (path: string, body: unknown = {}) => {
-    setLoadingFrame(true);
-    try {
-      const { sourceWidth, sourceHeight, points, rotation } =
-        await request<CameraCorrection>(path, body);
-      const correction = { sourceWidth, sourceHeight, points, rotation };
-      await refresh();
-      setDraft(correction);
-    } finally {
-      setLoadingFrame(false);
-    }
-  };
-  const detect = async () => {
-    await openCorrection('/camera/markers');
-  };
-  const save = async () => {
-    if (!draft) return;
-    setSaving(true);
-    try {
-      await request('/camera/correction', draft);
-      await refresh();
-      setDraft(undefined);
-    } finally {
-      setSaving(false);
-    }
-  };
+  const align = useCallback(
+    async (signal: AbortSignal) => {
+      const next = await requestAt<Configuration>(
+        base,
+        '/camera/align',
+        {},
+        signal,
+      );
+      if (!next.input && !signal.aborted) {
+        const setup = await client.assistedCalibrationSetup();
+        if (!signal.aborted) setAcceptedRevision(setup.layout?.revision);
+      }
+      if (!signal.aborted) setConfig(next);
+    },
+    [base, client],
+  );
   return (
     <ConfigProvider theme={armUiTheme}>
       <CalibrationLanguageProvider>
@@ -189,13 +168,15 @@ export function CalibrationWorkspace({
                 </Typography.Text>
                 <Typography.Title level={2}>
                   {t(
-                    !config?.input || editingSetup
-                      ? 'Touch Tool'
-                      : [
-                          'Connect Phone',
-                          'Camera correction',
-                          'Arm calibration',
-                        ][panelStep],
+                    reviewCamera
+                      ? 'Camera correction'
+                      : (panelStep === 2 && !config?.input) || editingSetup
+                        ? 'Touch Tool'
+                        : [
+                            'Connect Phone',
+                            'Camera correction',
+                            'Arm calibration',
+                          ][panelStep],
                   )}
                 </Typography.Title>
               </div>
@@ -210,17 +191,39 @@ export function CalibrationWorkspace({
                 )}
               </Space>
             </div>
-            <div className="calibration-shell-progress" ref={setNavigation}>
-              {(!config?.input || editingSetup) && (
+            {reviewCamera && (
+              <div className="calibration-shell-progress">
                 <Steps
                   size="small"
                   current={0}
                   items={[
-                    'Touch Tool',
-                    'Connect Phone',
                     'Camera correction',
+                    'Touch Tool',
                     'Arm calibration',
                   ].map((title) => ({ title: t(title) }))}
+                />
+              </div>
+            )}
+            <div
+              hidden={reviewCamera}
+              className="calibration-shell-progress"
+              ref={setNavigation}
+            >
+              {((panelStep === 2 && !config?.input) || editingSetup) && (
+                <Steps
+                  size="small"
+                  current={1}
+                  onChange={(next) => {
+                    if (next === 0 && config?.correction) setReviewCamera(true);
+                  }}
+                  items={[
+                    'Camera correction',
+                    'Touch Tool',
+                    'Arm calibration',
+                  ].map((title, i) => ({
+                    title: t(title),
+                    disabled: i === 2 || (i === 0 && !config?.correction),
+                  }))}
                 />
               )}
             </div>
@@ -243,104 +246,149 @@ export function CalibrationWorkspace({
                   }
                 />
               )}
-              {!config ? (
-                !error && !pollError && <Spin />
-              ) : !config.input || editingSetup ? (
-                <CalibrationSetup
-                  footer={footer}
-                  capabilities={config.capabilities}
-                  initial={config.measuredSetup}
-                  onCancel={
-                    config.input ? () => setEditingSetup(false) : undefined
-                  }
-                  onSave={async (input) => {
-                    const next = await request<Configuration>(
-                      '/configuration',
-                      input,
-                    );
-                    setConfig(next);
-                    setEditingSetup(false);
+              {reviewCamera && config?.correction && (
+                <WebCameraMappingStep
+                  controller={review}
+                  camera={config.camera}
+                  hasCorners
+                  savedResult={{
+                    verified: Boolean(
+                      review.setup.layout &&
+                        (config.input
+                          ? config.correctionKey &&
+                            review.setup.mapping?.layout.revision ===
+                              review.setup.layout.revision &&
+                            review.setup.mapping?.vision.fingerprint ===
+                              config.correctionKey
+                          : acceptedRevision === review.setup.layout.revision),
+                    ),
                   }}
-                />
-              ) : (
-                <CalibrationPanel
-                  showSessionCancel={cancelAction === undefined}
-                  footerContainer={footer}
-                  navigationContainer={navigation}
-                  onStepChange={setPanelStep}
-                  onEditSetup={() => {
-                    if (config.editable) {
-                      setDraft(undefined);
-                      setEditingSetup(true);
-                    }
-                  }}
-                  controls={
-                    !config.ready ? (
-                      <CalibrationPowerButton
-                        config={config}
-                        apply={async (action) => {
-                          const next = await request<Configuration>(
-                            `/${action}`,
-                            {
-                              confirmed: true,
-                            },
-                          );
-                          setConfig(next);
-                        }}
-                      />
-                    ) : undefined
-                  }
-                  client={client}
-                  {...config}
-                  preview={
-                    <img
-                      className="calibration-preview"
+                  size={reviewSize}
+                  live={
+                    <CameraCornerEditor
+                      value={config.correction}
                       src={`${base}/camera/preview`}
-                      alt={config.camera.name}
+                      disabled
                     />
                   }
-                  mappingPreview={
-                    geometry && (
-                      <CameraCornerEditor
-                        value={geometry}
-                        src={`${base}/camera/preview`}
-                        disabled={!config.editable || saving || loadingFrame}
-                        onDragging={setDragging}
-                        onChange={setDraft}
-                      />
-                    )
-                  }
-                  outputSize={outputSize}
-                  correctedPreview={
-                    geometry &&
-                    outputSize && (
+                  corrected={
+                    reviewSize && (
                       <CorrectedPreview
-                        correction={geometry}
-                        size={outputSize}
+                        correction={config.correction}
+                        size={reviewSize}
                         src={`${base}/camera/preview`}
                       />
                     )
                   }
-                  checkDraft={
-                    draft && !dragging && !loadingFrame ? checkDraft : undefined
+                  footer={reviewFooter}
+                  onDetect={
+                    config.editable &&
+                    !(
+                      review.session?.stage === 'interrupted' &&
+                      review.session.samples > 0
+                    ) &&
+                    !(
+                      review.session?.stage === 'ready' &&
+                      (review.session.referencePosition ||
+                        review.session.safePosition)
+                    )
+                      ? () => align(AbortSignal.timeout(90000))
+                      : undefined
                   }
-                  onConfirmMapping={save}
-                  savingMapping={saving}
-                  onDetect={detect}
-                  onDetectAI={(modelConfig?: CalibrationModelConfig) =>
-                    openCorrection('/camera/detect', { modelConfig })
-                  }
-                  editing={Boolean(draft)}
-                  onComplete={onComplete}
-                  completionLabel={
-                    embedded ? 'Open Workspace' : 'Finish Calibration'
-                  }
+                  onContinue={() => setReviewCamera(false)}
                 />
               )}
+              <div hidden={reviewCamera}>
+                {!config ? (
+                  !error && !pollError && <Spin />
+                ) : (panelStep === 2 && !config.input) || editingSetup ? (
+                  <CalibrationSetup
+                    footer={footer}
+                    capabilities={config.capabilities}
+                    initial={config.measuredSetup}
+                    onCancel={
+                      config.input ? () => setEditingSetup(false) : undefined
+                    }
+                    onSave={async (input) => {
+                      const phone = await client.calibrationPhoneStatus();
+                      if (
+                        phone.state !== 'connected' ||
+                        phone.displayRequirement
+                      )
+                        throw new Error(
+                          t(
+                            phone.displayRequirement === 'home-screen'
+                              ? 'Open the calibration page from the iOS Home Screen to continue.'
+                              : 'Keep the phone page visible in full screen to continue.',
+                          ),
+                        );
+                      const next = await request<Configuration>(
+                        '/configuration',
+                        input,
+                      );
+                      setPanelStep(1);
+                      setConfig(next);
+                      setEditingSetup(false);
+                    }}
+                  />
+                ) : (
+                  <CalibrationPanel
+                    showSessionCancel={cancelAction === undefined}
+                    footerContainer={footer}
+                    navigationContainer={navigation}
+                    onStepChange={setPanelStep}
+                    onEditSetup={() => {
+                      if (config.editable) {
+                        setEditingSetup(true);
+                      }
+                    }}
+                    controls={
+                      !config.ready ? (
+                        <CalibrationPowerButton
+                          config={config}
+                          apply={async (action) => {
+                            const next = await request<Configuration>(
+                              `/${action}`,
+                              {
+                                confirmed: true,
+                              },
+                            );
+                            setConfig(next);
+                          }}
+                        />
+                      ) : undefined
+                    }
+                    client={client}
+                    {...config}
+                    preview={
+                      <img
+                        className="calibration-preview"
+                        src={`${base}/camera/preview`}
+                        alt={config.camera.name}
+                      />
+                    }
+                    onReviewCamera={
+                      config.correction
+                        ? () => setReviewCamera(true)
+                        : undefined
+                    }
+                    onAlign={align}
+                    onComplete={onComplete}
+                    completionLabel={
+                      embedded ? 'Open Workspace' : 'Finish Calibration'
+                    }
+                  />
+                )}
+              </div>
             </div>
           </div>
           <footer className="calibration-shell-footer">
-            <div className="arm-calibration-footer" ref={setFooter} />
+            {reviewCamera && (
+              <div className="arm-calibration-footer" ref={setReviewFooter} />
+            )}
+            <div hidden={reviewCamera}>
+              <div className="arm-calibration-footer" ref={setFooter} />
+            </div>
           </footer>
         </main>
       </CalibrationLanguageProvider>
