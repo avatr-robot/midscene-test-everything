@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { test } from '@rstest/core';
 import {
   configurationScript,
@@ -62,6 +63,29 @@ test('configuration scopes route and rollback to the chosen controller and adapt
   assert.ok(script.includes('nc -z -G 3 -s 192.168.1.2 192.168.1.6 29999'));
   assert.ok(!script.includes('delete default'));
   assert.ok(!script.includes('setmanual'));
+});
+
+test('route guard accepts scoped kernel clones and preserves explicit host routes', () => {
+  const script = configurationScript(
+    { host: '192.168.2.6', device: 'en13' },
+    '192.168.2.2',
+  );
+  // Execute just the route check with captured macOS route output.
+  const start = script.indexOf('if printf');
+  const end = script.indexOf('\nfi', start);
+  assert.ok(start >= 0 && end > start);
+  const guard = script.slice(start, end + 3);
+  for (const [flags, expected] of [
+    ['UP,HOST,LLINFO,WASCLONED,IFSCOPE,IFREF', 0],
+    ['UP,GATEWAY,HOST,DONE,WASCLONED,IFSCOPE,IFREF', 0],
+    ['UP,HOST,STATIC,IFSCOPE', 1],
+    ['UP,HOST,DONE', 1],
+  ]) {
+    const result = spawnSync('/bin/sh', ['-c', guard], {
+      env: { current: `destination: 192.168.2.6\n flags: <${flags}>` },
+    });
+    assert.equal(result.status, expected, flags);
+  }
 });
 
 test('saved adapter identity survives interface renumbering and missing adapters are rejected', async () => {

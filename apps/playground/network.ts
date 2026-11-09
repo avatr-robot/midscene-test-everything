@@ -119,9 +119,16 @@ ${mac ? `/sbin/ifconfig ${device} | /usr/bin/grep -qi 'ether ${mac}'` : ''}
 if /sbin/ifconfig -a | /usr/bin/awk '$1=="inet" && ($2=="${address}" || $2=="${host}") {found=1} END {exit !found}'; then
   echo '网络地址已变化，请刷新后重试。' >&2; exit 1
 fi
-# Do not overwrite an existing explicit route.
+# Wi-Fi and VPN probes can leave scoped, kernel-cloned entries for the host.
+# Leave it in place. Only the unscoped /32 on the selected port is added here.
 current=$(/sbin/route -n get ${host} 2>/dev/null || true)
-if printf '%s' "$current" | /usr/bin/grep -Eq 'destination: ${host.replaceAll('.', '[.]')}($|[[:space:]])'; then
+if printf '%s' "$current" | /usr/bin/awk '
+  $1=="destination:" && $2=="${host}" { exact=1 }
+  $1=="flags:" {
+    scopedClone = $2 ~ /[<,]WASCLONED[,>]/ && $2 ~ /[<,]IFSCOPE[,>]/
+    isStatic = $2 ~ /[<,]STATIC[,>]/
+  }
+  END { exit !(exact && (!scopedClone || isStatic)) }'; then
   echo '控制器已有专用路由，请先检查该路由后重试。' >&2; exit 1
 fi
 /sbin/ifconfig ${device} inet ${address} netmask 255.255.255.255 alias

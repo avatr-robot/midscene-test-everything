@@ -1210,13 +1210,13 @@ export class Mg400Adapter implements RobotArmAdapter {
         if (!isRobotArmError(error) || error.details?.vendorCode !== -1)
           throw error;
         check();
-        // Only TCP/IP development is supported. Prepare that one channel once;
-        // never fall back to an online, fieldbus or teach-pendant connection.
+        // A vendor refusal identifies a reachable controller that needs TCP/IP preparation.
         this.feedback.close();
         this.dashboard.close(undefined, true);
         this.motion.close(undefined, true);
         this.invalidateStateSample();
         await prepareMg400TcpConnection(this.config.host, {
+          checkConnection: check,
           port: this.config.dashboardPort,
           httpPort: this.config.httpPort,
           timeoutMs: this.config.commandTimeoutMs,
