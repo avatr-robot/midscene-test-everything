@@ -111,3 +111,56 @@ test('code-configured arm connects, reports its own settings, retries and releas
   }
   await assert.rejects(fetch(server.url));
 });
+
+test('auto discovery starts once, exposes failure, and retries with the discovered controller', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'playground-discovery-'));
+  rstest.stubEnv('MIDSCENE_ARM_DATA_DIR', directory);
+  const cameras = rstest
+    .spyOn(PlaygroundDevices.prototype, 'startAll')
+    .mockResolvedValue();
+  let release;
+  const waiting = new Promise((resolve) => {
+    release = resolve;
+  });
+  let probes = 0;
+  const hosts = [];
+  let server;
+  try {
+    server = await startArmPlayground({
+      connection: { adapter: 'test-arm', options: {} },
+      discoverHost: async () => {
+        if (++probes === 1) {
+          await waiting;
+          throw new Error('No controller found');
+        }
+        return '192.168.2.6';
+      },
+      createAdapter(host) {
+        hosts.push(host);
+        return createFakeAdapter();
+      },
+    });
+    const read = async (route) => (await fetch(server.url + route)).json();
+    assert.equal((await read('/api/arm')).phase, 'connecting');
+    release();
+    const { setup } = await read('/api/setup');
+    assert.equal(setup.error, 'No controller found');
+    assert.deepEqual(hosts, []);
+    const retry = await fetch(`${server.url}/api/setup/reconnect`, {
+      method: 'POST',
+      body: JSON.stringify({ session: setup.session }),
+    });
+    assert.equal(retry.status, 200);
+    const arm = await read('/api/arm');
+    assert.equal(arm.phase, 'connected');
+    assert.equal(arm.host, '192.168.2.6');
+    assert.deepEqual(hosts, ['192.168.2.6']);
+    assert.equal(probes, 2);
+  } finally {
+    release();
+    await server?.close();
+    cameras.mockRestore();
+    rstest.unstubAllEnvs();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -3,8 +3,9 @@ import { App as AntApp, Badge, Button, ConfigProvider } from 'antd';
 import enUS from 'antd/locale/en_US';
 import zhCN from 'antd/locale/zh_CN';
 import { Languages } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import logo from './assets/midscene-logo.png';
+import { CameraOnlyWorkspace } from './components/CameraOnlyWorkspace';
 import { ConnectionScreen } from './components/ConnectionScreen';
 import { DeviceWorkspace } from './components/DeviceWorkspace';
 import { useConnection } from './connection';
@@ -19,6 +20,10 @@ export function App(views: PlaygroundViews) {
   const { language, setLanguage } = usePreferences();
   const { phase, check } = useConnection();
   const connected = phase === 'connected';
+  const [cameraOnly, setCameraOnly] = useState(false);
+  useEffect(() => {
+    if (connected) setCameraOnly(false);
+  }, [connected]);
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -51,6 +56,8 @@ export function App(views: PlaygroundViews) {
         if (
           !store.setup ||
           store.serviceStatus === 'offline' ||
+          (store.setup.phase === 'connecting' &&
+            connection.phase !== 'connecting') ||
           (session && session !== store.setup.session)
         )
           await store.refreshConfiguration();
@@ -105,7 +112,13 @@ export function App(views: PlaygroundViews) {
                 </Button>
               </div>
             </header>
-            {connected ? <DeviceWorkspace /> : <ConnectionScreen />}
+            {connected ? (
+              <DeviceWorkspace />
+            ) : cameraOnly ? (
+              <CameraOnlyWorkspace onConnect={() => setCameraOnly(false)} />
+            ) : (
+              <ConnectionScreen onSkip={() => setCameraOnly(true)} />
+            )}
           </div>
         </AntApp>
       </Views.Provider>

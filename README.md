@@ -14,7 +14,7 @@ pnpm build
 pnpm dev
 ```
 
-Open the printed URL, connect your hardware, follow calibration and configure a model to run tasks. Confirm workspace clearance before movement; use **Stop robot** to stop.
+Open the printed URL. Playground checks `192.168.1.6` and `192.168.2.6` and connects automatically when one MG400 responds. If neither is available, retry or choose **Skip to cameras** for a live preview. For a custom address, ports or network setup, start with `pnpm dev --manual`. Once connected, follow calibration and configure a model to run tasks. Confirm workspace clearance before movement; use **Stop robot** to stop.
 
 Keep all six phone markers visible during camera calibration. If the camera misses a marker in a low-contrast frame, it retries once with contrast enhancement.
 

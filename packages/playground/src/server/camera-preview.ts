@@ -1,14 +1,19 @@
+import { randomUUID } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
+import type { CameraSessionManager } from '@midscene/arm-kit';
 import type { DeviceEntry } from './devices.js';
 
 /** Share the camera stream; corrected frames use the same accepted mapping as task screenshots. */
 export async function streamCameraPreview(
   res: ServerResponse,
-  entry: DeviceEntry,
+  entry: Pick<DeviceEntry, 'camera'> & Partial<Pick<DeviceEntry, 'device'>>,
   corrected = false,
 ) {
   const stream = entry.camera.stream;
-  if (corrected) await entry.device.configuration();
+  const device = corrected ? entry.device : undefined;
+  if (corrected && !device)
+    throw new Error('Connect the arm for corrected previews');
+  if (device) await device.configuration();
   if (res.destroyed) return;
   res.writeHead(200, {
     'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
@@ -24,8 +29,8 @@ export async function streamCameraPreview(
     if (corrected && Date.now() - lastCorrectedAt < 100) return;
     processing = true;
     try {
-      const jpeg = corrected
-        ? Buffer.from(await entry.device.screenshotBase64(), 'base64')
+      const jpeg = device
+        ? Buffer.from(await device.screenshotBase64(), 'base64')
         : frame.jpeg;
       if (res.destroyed || res.writableEnded) return;
       const header = Buffer.from(
@@ -54,4 +59,22 @@ export async function streamCameraPreview(
     stream.off('stopped', ended);
     stream.off('failed', ended);
   });
+}
+
+/** A camera-only preview owns the stream for the lifetime of this HTTP response. */
+export async function streamStandalonePreview(
+  res: ServerResponse,
+  cameras: CameraSessionManager,
+  id: string,
+) {
+  const owner = randomUUID();
+  const camera = await cameras.acquire(id, owner);
+  try {
+    if (res.destroyed) return;
+    const closed = new Promise<void>((resolve) => res.once('close', resolve));
+    await streamCameraPreview(res, { camera });
+    await closed;
+  } finally {
+    await cameras.release(id, owner);
+  }
 }

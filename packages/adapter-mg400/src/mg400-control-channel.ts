@@ -71,6 +71,19 @@ export function probeMg400Dashboard(
   });
 }
 
+/** The two factory Ethernet endpoints. Only a valid mode reply identifies a controller. */
+export async function discoverMg400Hosts(
+  probe = probeMg400Dashboard,
+): Promise<string[]> {
+  const hosts = ['192.168.1.6', '192.168.2.6'];
+  const replies = await Promise.all(
+    hosts.map((host) => probe(host, { timeoutMs: 1500 })),
+  );
+  return hosts.filter((_, i) =>
+    /^0,\{\s*\d+\s*\},\s*RobotMode\(\);$/.test(replies[i] ?? ''),
+  );
+}
+
 /** Internal TCP/IP connection preparation, not a user-selectable mode API.
  * On the supported MG400 firmware, wire value `tp` means TCP/IP development.
  * Never try alternate values: acknowledgment alone does not prove TCP works.

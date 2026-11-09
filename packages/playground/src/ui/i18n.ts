@@ -118,6 +118,11 @@ const messages = {
     'Select a camera and complete calibration to start a task.',
   ],
   tasksNotReady: ['任务面板待迁移', 'Task panel migration pending'],
+  skipToCamera: ['跳过，查看相机', 'Skip to cameras'],
+  rawPreviewFailed: [
+    '无法读取相机画面，请检查相机权限或刷新重试。',
+    'Camera preview unavailable. Check camera access or refresh to retry.',
+  ],
   playground: ['机械臂 Playground', 'Arm Playground'],
   preview: ['交互预览 · 未接入真实设备', 'UI preview · No physical device'],
   disconnected: ['未连接', 'Disconnected'],

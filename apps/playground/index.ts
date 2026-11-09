@@ -13,7 +13,7 @@ async function main() {
     closing ??= playground.close();
     return closing;
   });
-  cli.outro(`打开 ${playground.url}，点击「连接机械臂」。`);
+  cli.outro(`打开 ${playground.url} 查看 Playground。`);
 }
 
 main().catch(reportError);

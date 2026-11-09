@@ -29,6 +29,7 @@ type PhoneLinks = (token: string) => { name: string; url: string }[];
 export class PlaygroundDevices {
   entries = new Map<string, DeviceEntry>();
   readonly cameras: CameraSessionManager;
+  private ownsCameras: boolean;
   private Device: typeof RobotArmDevice;
   private phoneLinks: PhoneLinks;
   private pairings?: PhonePairings;
@@ -40,7 +41,7 @@ export class PlaygroundDevices {
   constructor(
     readonly arm: ArmController,
     {
-      cameras = new CameraSessionManager(),
+      cameras,
       Device = RobotArmDevice,
       phoneLinks = () => [],
       pairings,
@@ -51,7 +52,8 @@ export class PlaygroundDevices {
       pairings?: PhonePairings;
     } = {},
   ) {
-    this.cameras = cameras;
+    this.cameras = cameras ?? new CameraSessionManager();
+    this.ownsCameras = !cameras;
     this.Device = Device;
     this.phoneLinks = phoneLinks;
     this.pairings = pairings;
@@ -319,6 +321,6 @@ export class PlaygroundDevices {
     this.closed = true;
     await Promise.allSettled(this.opening.values());
     await Promise.all([...this.entries.keys()].map((id) => this.stop(id)));
-    await this.cameras.close();
+    if (this.ownsCameras) await this.cameras.close();
   }
 }

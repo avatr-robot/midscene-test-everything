@@ -6,6 +6,7 @@ import {
 } from 'node:net';
 import { afterEach, describe, expect, it } from '@rstest/core';
 import {
+  discoverMg400Hosts,
   prepareMg400TcpConnection,
   probeMg400Dashboard,
 } from '../src/mg400-control-channel.js';
@@ -147,5 +148,27 @@ describe('TCP/IP-only preparation', () => {
       }),
     ).rejects.toMatchObject({ code: 'VENDOR_ERROR' });
     expect(target.posted).toEqual(['tp']);
+  });
+});
+
+describe('MG400 discovery', () => {
+  const hosts = ['192.168.1.6', '192.168.2.6'];
+  for (const expected of hosts) {
+    it(`selects the MG400 at ${expected} and checks both endpoints`, async () => {
+      const checked: string[] = [];
+      expect(
+        await discoverMg400Hosts(async (host) => {
+          checked.push(host);
+          return host === expected ? '0,{4},RobotMode();' : '0,{},Other();';
+        }),
+      ).toEqual([expected]);
+      expect(checked).toEqual(hosts);
+    });
+  }
+  it('reports absent and ambiguous controllers', async () => {
+    expect(await discoverMg400Hosts(async () => null)).toEqual([]);
+    expect(await discoverMg400Hosts(async () => '0,{4},RobotMode();')).toEqual(
+      hosts,
+    );
   });
 });

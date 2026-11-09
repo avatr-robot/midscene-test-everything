@@ -6,7 +6,11 @@ import type { AddressInfo } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ArmController, listCameras } from '@midscene/arm-kit';
+import {
+  ArmController,
+  CameraSessionManager,
+  listCameras,
+} from '@midscene/arm-kit';
 import type { RobotArmAdapter } from '@midscene/arm-kit';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import type { ProfileStore } from '@midscene/arm-kit/internal/runtime/profile-store';
@@ -16,7 +20,10 @@ import {
   robotDataRoot,
 } from '@midscene/arm-kit/internal/storage/layout';
 import { PlaygroundArmControls } from './arm-controls.js';
-import { streamCameraPreview } from './camera-preview.js';
+import {
+  streamCameraPreview,
+  streamStandalonePreview,
+} from './camera-preview.js';
 import { CodeSetup } from './code-setup.js';
 import { PlaygroundDevices } from './devices.js';
 import { PhonePairings } from './phone-pairings.js';
@@ -29,7 +36,9 @@ import { StatusPanel } from './status-panel.js';
 import { PlaygroundTasks } from './tasks.js';
 
 export interface PlaygroundOptions {
-  createAdapter(): RobotArmAdapter | Promise<RobotArmAdapter>;
+  /** Resolve the controller address on startup and on each reconnect. */
+  discoverHost?(): Promise<string>;
+  createAdapter(host?: string): RobotArmAdapter | Promise<RobotArmAdapter>;
   connection?: { adapter: string; options: Record<string, string | number> };
   connectionDiagram?: 'ethernet';
   installationId?: string;
@@ -41,6 +50,7 @@ export interface PlaygroundOptions {
 
 export async function startArmPlayground({
   createAdapter,
+  discoverHost,
   connection,
   connectionDiagram,
   installationId,
@@ -58,7 +68,9 @@ export async function startArmPlayground({
         installationId,
         connection,
         connectionDiagram,
+        discoverHost,
       ),
+    autoConnect: Boolean(discoverHost),
     port,
     webRoot,
     developmentOrigins,
@@ -81,6 +93,7 @@ async function readBody(req: IncomingMessage, limit = 8192) {
   return JSON.parse(text || '{}');
 }
 interface HostOptions {
+  autoConnect?: boolean;
   createSetup(context: SessionContext): HostSetup;
   port?: number;
   webRoot?: string;
@@ -96,12 +109,14 @@ interface HostOptions {
 }
 export async function startPlaygroundHost({
   createSetup,
+  autoConnect = false,
   port = 0,
   webRoot = fileURLToPath(new URL('../../dist/ui/', import.meta.url)),
   models = [],
   handleRequest,
   developmentOrigins = [],
 }: HostOptions) {
+  const cameraManager = new CameraSessionManager();
   let adapterName: string | undefined;
   let devices: PlaygroundDevices | undefined;
   let tasks: PlaygroundTasks | undefined;
@@ -111,7 +126,7 @@ export async function startPlaygroundHost({
   let connecting = false;
   let connectionError: string | undefined;
   async function connectionStatus() {
-    if (connecting)
+    if (connecting || setup.phase === 'connecting')
       return { phase: 'connecting', host, setupSession: setup.session };
     if (!arm)
       return {
@@ -180,6 +195,7 @@ export async function startPlaygroundHost({
         );
         await pairings.load();
         devices = new PlaygroundDevices(arm, {
+          cameras: cameraManager,
           pairings,
           phoneLinks: (token) =>
             Object.values(networkInterfaces())
@@ -525,6 +541,7 @@ export async function startPlaygroundHost({
       if (url.pathname === '/api/cameras' && req.method === 'GET') {
         const cameras = await listCameras({
           refresh: url.searchParams.get('refresh') === 'true',
+          includeBuiltIn: !devices,
         });
         return send(200, {
           error: devices?.discoveryError,
@@ -555,7 +572,14 @@ export async function startPlaygroundHost({
         return send(200, {});
       }
       if (url.pathname === '/api/cameras/preview' && req.method === 'GET') {
-        const entry = devices?.entries.get(url.searchParams.get('id') ?? '');
+        const id = url.searchParams.get('id') ?? '';
+        if (!devices && id && url.searchParams.get('view') === 'raw') {
+          if (req.headers['sec-fetch-site'] === 'cross-site')
+            return send(403, { error: 'Open camera previews in Playground' });
+          await streamStandalonePreview(res, cameraManager, id);
+          return;
+        }
+        const entry = devices?.entries.get(id);
         if (!entry) return send(404, { error: 'Camera is not running' });
         const view = url.searchParams.get('view');
         if (view && !['raw', 'corrected'].includes(view))
@@ -645,6 +669,10 @@ export async function startPlaygroundHost({
       accept();
     });
   });
+  if (autoConnect)
+    void setup.reconnect({ session: setup.session }).catch(() => {
+      // The connection page exposes the error and lets the operator retry.
+    });
   let closing: Promise<void> | undefined;
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
@@ -654,6 +682,7 @@ export async function startPlaygroundHost({
         server.closeAllConnections();
         await setup.pending?.catch(() => {});
         await disconnectArm();
+        await cameraManager.close();
         await drained;
       })();
       return closing;

@@ -5,11 +5,12 @@ import { useViews } from '../extensions';
 import { useRobotArm } from '../hooks/useRobotArm';
 import { useLanguage, useT } from '../i18n';
 
-export function ConnectionScreen() {
+export function ConnectionScreen({ onSkip }: { onSkip(): void }) {
   const { ConnectionForm, connectionDiagram } = useViews();
   const label = useT();
   const arm = useRobotArm();
   const language = useLanguage();
+  const connecting = arm.busy || arm.setup?.phase === 'connecting';
   const showDiagram =
     (connectionDiagram ?? arm.setup?.connectionDiagram) === 'ethernet';
   return (
@@ -51,16 +52,27 @@ export function ConnectionScreen() {
             ) : (
               <Button
                 type="primary"
-                loading={arm.busy}
+                loading={connecting}
                 onClick={() => void arm.run(arm.api.connect)}
               >
-                {label('connect')}
+                {label(
+                  connecting
+                    ? 'connecting'
+                    : arm.setup?.error
+                      ? 'retry'
+                      : 'connect',
+                )}
               </Button>
             )
           ) : (
             <div className="connection-loading">
               <Spin />
             </div>
+          )}
+          {arm.setup && !connecting && (
+            <Button type="link" onClick={onSkip}>
+              {label('skipToCamera')}
+            </Button>
           )}
         </div>
         {showDiagram && (
