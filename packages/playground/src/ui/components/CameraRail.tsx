@@ -7,10 +7,12 @@ import { useT } from '../i18n';
 export function CameraRail({
   entries,
   selectedId,
+  selectedPreviewUrl,
   onSelect,
 }: {
   entries: CameraEntry[];
   selectedId: string | null;
+  selectedPreviewUrl?: string;
   onSelect: (id: string) => void;
 }) {
   const t = useT();
@@ -27,7 +29,13 @@ export function CameraRail({
         >
           <span className="camera-rail-thumb">
             {camera.stream?.state === 'running' ? (
-              <img src={cameraPreviewUrl(camera.id)} alt={camera.name} />
+              <img
+                src={
+                  (camera.id === selectedId && selectedPreviewUrl) ||
+                  cameraPreviewUrl(camera.id)
+                }
+                alt={camera.name}
+              />
             ) : (
               <VideoOff size={18} />
             )}

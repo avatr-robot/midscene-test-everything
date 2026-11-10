@@ -144,7 +144,7 @@ export function App(views: PlaygroundViews) {
             {connected ? (
               <DeviceWorkspace />
             ) : cameraOnly ? (
-              <CameraOnlyWorkspace onConnect={() => setCameraOnly(false)} />
+              <CameraOnlyWorkspace />
             ) : (
               <ConnectionScreen onSkip={() => setCameraOnly(true)} />
             )}

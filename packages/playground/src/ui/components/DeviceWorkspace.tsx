@@ -12,7 +12,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { Drawer, Modal, Tooltip } from 'antd';
+import { Drawer, Tooltip } from 'antd';
 import {
   ArrowRightLeft,
   Cable,
@@ -36,8 +36,10 @@ import { CameraRail } from './CameraRail';
 import { CameraStagePreview } from './CameraStagePreview';
 import { DeviceCalibration } from './DeviceCalibration';
 import { DeviceTransfer } from './DeviceTransfer';
+import { RobotConnectionDialog } from './RobotConnectionDialog';
 import { RobotReadinessCard } from './RobotReadinessCard';
 import { TaskWorkspace } from './TaskWorkspace';
+import { WorkspaceLayout } from './WorkspaceLayout';
 import { ActionAudit } from './robot-arm/ActionAudit';
 import { ControllerMotionSettings } from './robot-arm/ControllerMotionSettings';
 import { DeviceSettings } from './robot-arm/DeviceSettings';
@@ -158,189 +160,180 @@ export function DeviceWorkspace() {
           initialStep={calibrationStep}
         />
       ) : selected ? (
-        <main className="app-workspace">
-          <section className="streams-section">
-            <section className="camera-stage">
-              <header className="camera-stage-header">
-                <div className="camera-stage-title">
-                  <Typography.Title level={4} style={{ margin: 0 }}>
-                    {selected.name}
-                  </Typography.Title>
-                  <div className="camera-stage-meta">
-                    <Tag
-                      color={
-                        selected.stream?.state === 'running'
-                          ? 'green'
-                          : undefined
-                      }
-                    >
-                      {t(cameraStateLabel(selected))}
-                    </Tag>
-                    <Typography.Text type="secondary">
-                      {selected.stream
-                        ? `${selected.stream.width} × ${selected.stream.height}`
-                        : t('noStream')}
-                    </Typography.Text>
-                  </div>
-                </div>
-                <div className="camera-stage-actions">
-                  {availableScreens.length > 1 && (
-                    <Select
-                      value={deviceId}
-                      onChange={setPreferredScreenId}
-                      options={availableScreens.map((s) => ({
-                        value: s.id,
-                        label: s.name,
-                      }))}
-                      style={{ minWidth: 140 }}
-                    />
-                  )}
-
+        <WorkspaceLayout
+          sidebar={
+            perspectiveBlocked ? (
+              <RobotReadinessCard
+                camera={{ ...selected, hasCorrection: false }}
+                onOpenSetup={openCameraCorrection}
+              />
+            ) : ready ? (
+              <TaskWorkspace cameraId={deviceId!} />
+            ) : readiness?.status === 'required' ? (
+              <RobotReadinessCard
+                camera={selected}
+                onOpenSetup={() => setCalibrationId(deviceId)}
+              />
+            ) : readiness?.status === 'error' ? (
+              <Alert
+                type="error"
+                showIcon
+                message={
+                  language === 'zh'
+                    ? '无法检查设备标定'
+                    : 'Unable to check calibration'
+                }
+                description={readiness.error}
+                action={
                   <Button
-                    icon={<ScanLine size={16} />}
-                    disabled={!running}
-                    onClick={openCameraCorrection}
-                  >
-                    {language === 'zh'
-                      ? '识别屏幕标记'
-                      : 'Detect screen markers'}
-                  </Button>
-                  {ready && (
-                    <Segmented
-                      className="rv-segmented"
-                      aria-label={
-                        language === 'zh' ? '画面类型' : 'Camera view'
-                      }
-                      value={cameraView}
-                      onChange={(value) => setCameraView(value as CameraView)}
-                      options={[
-                        {
-                          value: 'raw',
-                          label: language === 'zh' ? '原始画面' : 'Original',
-                        },
-                        {
-                          value: 'corrected',
-                          label: language === 'zh' ? '校正画面' : 'Corrected',
-                        },
-                      ]}
-                    />
-                  )}
-                  <Tooltip title={t('refresh')}>
-                    <Button
-                      type="text"
-                      aria-label={t('refresh')}
-                      icon={<RefreshCw size={16} />}
-                      loading={status === 'loading'}
-                      onClick={() => {
-                        setPreviewRevision((value) => value + 1);
-                        void refresh();
-                      }}
-                    />
-                  </Tooltip>
-                  <Tooltip title={cameraActionLabel}>
-                    <Button
-                      type="text"
-                      aria-label={cameraActionLabel}
-                      icon={
-                        running ? <StopCircle size={16} /> : <Play size={16} />
-                      }
-                      loading={starting || pendingId === selected.id}
-                      onClick={() => {
-                        setPreviewError(undefined);
-                        void (running ? stop(selected.id) : start(selected.id));
-                      }}
-                    />
-                  </Tooltip>
-                </div>
-              </header>
-              <PerspectiveObservationCard
-                observation={perspective}
-                screenName={activeScreen?.name ?? selected.name}
-                onRecalibrate={openCameraCorrection}
-              />
-              <CameraStagePreview available={running}>
-                {selected.stream?.state === 'running' &&
-                previewError === previewKey ? (
-                  <Empty
-                    description={
-                      language === 'zh'
-                        ? '画面加载失败，请刷新重试'
-                        : 'Preview unavailable. Refresh to retry.'
+                    onClick={() =>
+                      setConfigurationRevision((value) => value + 1)
                     }
-                  />
-                ) : selected.stream?.state === 'running' ? (
-                  <img
-                    key={previewKey}
-                    className="stream-preview"
-                    src={cameraPreviewUrl(deviceId!, cameraView)}
-                    onError={() => setPreviewError(previewKey)}
-                    alt={selected.name}
-                  />
-                ) : starting ? (
-                  <Spin aria-label={t('cameraStarting')} />
-                ) : (
-                  <>
-                    <VideoOff size={40} strokeWidth={1.25} />
-                    <span>{t('noStream')}</span>
-                  </>
-                )}
-              </CameraStagePreview>
-              {(error || selected.error || selected.stream?.error) && (
-                <Typography.Text type="danger" role="alert">
-                  {error || selected.error || selected.stream?.error}
-                </Typography.Text>
-              )}
-              <CameraRail
-                entries={cameras}
-                selectedId={selectedId}
-                onSelect={select}
+                  >
+                    {language === 'zh' ? '重试' : 'Retry'}
+                  </Button>
+                }
               />
-            </section>
-          </section>
-          <aside className="workstation-playground">
-            <div className="task-panel">
-              {perspectiveBlocked ? (
-                <RobotReadinessCard
-                  camera={{ ...selected, hasCorrection: false }}
-                  onOpenSetup={openCameraCorrection}
-                />
-              ) : ready ? (
-                <TaskWorkspace cameraId={deviceId!} />
-              ) : readiness?.status === 'required' ? (
-                <RobotReadinessCard
-                  camera={selected}
-                  onOpenSetup={() => setCalibrationId(deviceId)}
-                />
-              ) : readiness?.status === 'error' ? (
-                <Alert
-                  type="error"
-                  showIcon
-                  message={
+            ) : (
+              <Spin
+                aria-label={
+                  language === 'zh' ? '检查设备标定' : 'Checking calibration'
+                }
+              />
+            )
+          }
+        >
+          <section className="camera-stage">
+            <header className="camera-stage-header">
+              <div className="camera-stage-title">
+                <Typography.Title level={4} style={{ margin: 0 }}>
+                  {selected.name}
+                </Typography.Title>
+                <div className="camera-stage-meta">
+                  <Tag
+                    color={
+                      selected.stream?.state === 'running' ? 'green' : undefined
+                    }
+                  >
+                    {t(cameraStateLabel(selected))}
+                  </Tag>
+                  <Typography.Text type="secondary">
+                    {selected.stream
+                      ? `${selected.stream.width} × ${selected.stream.height}`
+                      : t('noStream')}
+                  </Typography.Text>
+                </div>
+              </div>
+              <div className="camera-stage-actions">
+                {availableScreens.length > 1 && (
+                  <Select
+                    value={deviceId}
+                    onChange={setPreferredScreenId}
+                    options={availableScreens.map((s) => ({
+                      value: s.id,
+                      label: s.name,
+                    }))}
+                    style={{ minWidth: 140 }}
+                  />
+                )}
+
+                <Button
+                  icon={<ScanLine size={16} />}
+                  disabled={!running}
+                  onClick={openCameraCorrection}
+                >
+                  {language === 'zh' ? '识别屏幕标记' : 'Detect screen markers'}
+                </Button>
+                {ready && (
+                  <Segmented
+                    className="rv-segmented"
+                    aria-label={language === 'zh' ? '画面类型' : 'Camera view'}
+                    value={cameraView}
+                    onChange={(value) => setCameraView(value as CameraView)}
+                    options={[
+                      {
+                        value: 'raw',
+                        label: language === 'zh' ? '原始画面' : 'Original',
+                      },
+                      {
+                        value: 'corrected',
+                        label: language === 'zh' ? '校正画面' : 'Corrected',
+                      },
+                    ]}
+                  />
+                )}
+                <Tooltip title={t('refresh')}>
+                  <Button
+                    type="text"
+                    aria-label={t('refresh')}
+                    icon={<RefreshCw size={16} />}
+                    loading={status === 'loading'}
+                    onClick={() => {
+                      setPreviewRevision((value) => value + 1);
+                      void refresh();
+                    }}
+                  />
+                </Tooltip>
+                <Tooltip title={cameraActionLabel}>
+                  <Button
+                    type="text"
+                    aria-label={cameraActionLabel}
+                    icon={
+                      running ? <StopCircle size={16} /> : <Play size={16} />
+                    }
+                    loading={starting || pendingId === selected.id}
+                    onClick={() => {
+                      setPreviewError(undefined);
+                      void (running ? stop(selected.id) : start(selected.id));
+                    }}
+                  />
+                </Tooltip>
+              </div>
+            </header>
+            <PerspectiveObservationCard
+              observation={perspective}
+              screenName={activeScreen?.name ?? selected.name}
+              onRecalibrate={openCameraCorrection}
+            />
+            <CameraStagePreview available={running}>
+              {selected.stream?.state === 'running' &&
+              previewError === previewKey ? (
+                <Empty
+                  description={
                     language === 'zh'
-                      ? '无法检查设备标定'
-                      : 'Unable to check calibration'
-                  }
-                  description={readiness.error}
-                  action={
-                    <Button
-                      onClick={() =>
-                        setConfigurationRevision((value) => value + 1)
-                      }
-                    >
-                      {language === 'zh' ? '重试' : 'Retry'}
-                    </Button>
+                      ? '画面加载失败，请刷新重试'
+                      : 'Preview unavailable. Refresh to retry.'
                   }
                 />
+              ) : selected.stream?.state === 'running' ? (
+                <img
+                  key={previewKey}
+                  className="stream-preview"
+                  src={cameraPreviewUrl(deviceId!, cameraView)}
+                  onError={() => setPreviewError(previewKey)}
+                  alt={selected.name}
+                />
+              ) : starting ? (
+                <Spin aria-label={t('cameraStarting')} />
               ) : (
-                <Spin
-                  aria-label={
-                    language === 'zh' ? '检查设备标定' : 'Checking calibration'
-                  }
-                />
+                <>
+                  <VideoOff size={40} strokeWidth={1.25} />
+                  <span>{t('noStream')}</span>
+                </>
               )}
-            </div>
-          </aside>
-        </main>
+            </CameraStagePreview>
+            {(error || selected.error || selected.stream?.error) && (
+              <Typography.Text type="danger" role="alert">
+                {error || selected.error || selected.stream?.error}
+              </Typography.Text>
+            )}
+            <CameraRail
+              entries={cameras}
+              selectedId={selectedId}
+              onSelect={select}
+            />
+          </section>
+        </WorkspaceLayout>
       ) : (
         <section className="camera-empty">
           <Empty
@@ -428,29 +421,11 @@ export function DeviceWorkspace() {
           </section>
         </div>
       </Drawer>
-      <Modal
+      <RobotConnectionDialog
         open={connectionOpen}
-        onCancel={() => {
-          if (!arm.busy) setConnectionOpen(false);
-        }}
-        footer={null}
-        className="robot-settings-detail"
-        width={680}
-        title={
-          <>
-            <Cable size={18} />
-            {language === 'zh' ? '连接配置' : 'Connection settings'}
-          </>
-        }
-      >
-        {ConnectionForm && (
-          <ConnectionForm
-            arm={arm}
-            footer={null}
-            onContinue={() => setConnectionOpen(false)}
-          />
-        )}
-      </Modal>
+        onClose={() => setConnectionOpen(false)}
+        title={language === 'zh' ? '连接配置' : 'Connection settings'}
+      />
       {transferId && (
         <DeviceTransfer
           key={transferId}

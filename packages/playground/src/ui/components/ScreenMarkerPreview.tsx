@@ -167,7 +167,7 @@ function MarkerDialog({
         <Alert showIcon type="error" message={connectionError} />
       )}
       <img
-        src={`${cameraPreviewUrl(id)}&view=raw`}
+        src={cameraPreviewUrl(id)}
         alt={name}
         style={{
           width: '100%',

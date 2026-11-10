@@ -33,7 +33,10 @@ test('thumbnail uses the running camera preview and stops showing it when stoppe
       }),
     );
   const running = render(camera);
-  assert.ok(running.includes('/api/cameras/preview?id=usb%2Fcamera'));
+  // Standalone preview requires an explicit raw view before robot connection.
+  assert.ok(
+    running.includes('/api/cameras/preview?id=usb%2Fcamera&amp;view=raw'),
+  );
   assert.ok(running.includes('运行中'));
   assert.ok(!running.includes('未启动'));
   const stopped = render({ ...camera, stream: undefined });
