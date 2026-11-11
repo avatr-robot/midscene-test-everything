@@ -3,9 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-import { networkInterfaces } from 'node:os';
 import path from 'node:path';
 import type { CalibrationProfile } from '../contracts.js';
+import {
+  discoverWifiInterfaces,
+  phoneAddresses,
+} from '../network/phone-addresses.js';
 import { CalibrationHost, type CalibrationHostOptions } from './host.js';
 import { CalibrationPageLease } from './page-lease.js';
 
@@ -53,17 +56,19 @@ export async function runCalibrationPage(
   const token = randomUUID();
   let port = 0;
   let reviewResult = false;
-  const addresses = options.phoneHost
-    ? [options.phoneHost]
-    : Object.values(networkInterfaces())
-        .flat()
-        .filter((entry) => entry && entry.family === 'IPv4' && !entry.internal)
-        .map((entry) => entry!.address);
+  let finishedResult: CalibrationProfile | undefined;
+  const wifiInterfaces = options.phoneHost
+    ? []
+    : await discoverWifiInterfaces();
+  const addresses = () =>
+    options.phoneHost
+      ? [{ address: options.phoneHost, name: options.phoneHost }]
+      : phoneAddresses({ wifiInterfaces });
   const host = new CalibrationHost({
     ...options,
     phoneLinks: () =>
-      addresses.map((address) => ({
-        name: address,
+      addresses().map(({ address, name }) => ({
+        name,
         url: `http://${address}:${port}/phone-calibration?token=${token}`,
       })),
   });
@@ -93,9 +98,10 @@ export async function runCalibrationPage(
         return fail(403, 'Origin not allowed');
       if (url.pathname === '/_calibration/finish') {
         if (req.method !== 'POST') return fail(405, 'Method not allowed');
-        if (host.service.status()?.stage !== 'completed')
+        const state = host.service.status();
+        if (state?.stage !== 'completed' || !state.result)
           return fail(409, 'Complete calibration before finishing');
-        reviewResult = false;
+        finishedResult = state.result;
         res.writeHead(204);
         res.end();
         return;
@@ -189,6 +195,7 @@ export async function runCalibrationPage(
       const abort = () =>
         finish(options.signal?.reason ?? new Error('Calibration cancelled'));
       const timer = setInterval(() => {
+        if (finishedResult) return finish(undefined, finishedResult);
         const state = host.service.status();
         if (
           state?.stage === 'completed' &&

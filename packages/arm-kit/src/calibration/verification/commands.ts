@@ -12,6 +12,7 @@ import {
   type MotionResult,
   type MotionSpeed,
   RobotArmError,
+  type ScreenVisibilityEvidence,
 } from '../../contracts.js';
 import { assertPose, contactPoint, dot } from '../../domain.js';
 import type { RobotDriverBoundary } from '../../kernel/driver-boundary.js';
@@ -21,12 +22,15 @@ import {
   stageOptions,
   validateContactPolicy,
 } from '../../screen-interaction/motion-policy.js';
+import { explorationQualityWarnings } from '../exploration/quality.js';
 import { phonePointMm, screenPoseMm } from '../geometry.js';
 import { runBoundaryVerification } from './boundary.js';
+import { assertBatchParking, avoidCamera } from './camera-avoidance.js';
 import { returnToObservation } from './safe-position.js';
 import { resetCalibrationVerification } from './session-state.js';
 
 export interface CalibrationHost {
+  verifyCameraVisibility?(): Promise<ScreenVisibilityEvidence>;
   progress?(s: CalibrationSession): void;
   adapter: RobotDriverBoundary;
   profileStore: ProfileStore;
@@ -72,6 +76,14 @@ export async function applyCalibrationCommand(
   command: CalibrationCommand,
   ctx: ApplicationContext,
 ): Promise<void> {
+  if (s.auto?.minimumTravelTipZMm !== undefined)
+    ctx = {
+      ...ctx,
+      minimumTravelTipZMm: Math.max(
+        ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+        s.auto.minimumTravelTipZMm,
+      ),
+    };
   switch (command.type) {
     case 'verify-automatic-boundary': {
       if (!s.auto || !s.candidate || command.accepted !== true)
@@ -82,9 +94,12 @@ export async function applyCalibrationCommand(
         );
       const fast =
         s.auto.fast &&
-        s.auto.evidence.gridRmsMm <= 0.5 &&
-        s.auto.evidence.validationMaxMm <= 0.75 &&
-        s.auto.evidence.coverage >= 0.6;
+        explorationQualityWarnings(
+          ctx.screen,
+          s.candidate.quality,
+          s.auto.evidence,
+          true,
+        ).length === 0;
       await runBoundaryVerification(this, s, ctx, 'hover', {
         allowUnacceptedHover: true,
         returnPose: s.auto.startPose,
@@ -96,9 +111,14 @@ export async function applyCalibrationCommand(
         returnPose: s.auto.startPose,
         fast,
       });
-      // No camera-avoidance estimate in this host: use dev's manual Safe Position handoff.
-      s.stage = 'observation';
-      s.auto.observationRecorded = false;
+      if (s.auto.deferParkingBatchId) {
+        s.stage = 'verification';
+        break;
+      }
+      if (!(await avoidCamera(this, s, ctx, () => this.progress?.(s)))) {
+        s.stage = 'observation';
+        s.auto.observationRecorded = false;
+      }
       break;
     }
     case 'record-observation': {
@@ -117,6 +137,14 @@ export async function applyCalibrationCommand(
       assertPose(pose);
       this.target(pose, ctx);
       const contact = contactPoint(pose, ctx.tool.offsetMm);
+      if (
+        contact.z <
+        (ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY) - 1e-6
+      )
+        throw new RobotArmError(
+          'UNSAFE_OBSERVATION',
+          'Record the safe position at or above the taught reference height',
+        );
       const height =
         (dot(s.candidate.plane.normal, contact) - s.candidate.plane.offset) /
         dot(s.candidate.plane.normal, s.candidate.inward);
@@ -125,6 +153,19 @@ export async function applyCalibrationCommand(
           'UNSAFE_OBSERVATION',
           'Observation pose must be at least the safe clearance away from the screen',
         );
+      assertBatchParking(s, ctx, pose);
+      if (this.verifyCameraVisibility) {
+        const visibility = await this.verifyCameraVisibility();
+        await this.stable(pose, ctx);
+        this.check();
+        if (!visibility.clear)
+          throw new RobotArmError(
+            'CAMERA_OCCLUDED',
+            'The camera view of one or more screens is still blocked.',
+            409,
+          );
+        if (s.auto) s.auto.cameraVisibility = visibility;
+      }
       s.candidate.observationPose = pose;
       if (s.auto) s.auto.observationRecorded = true;
       s.stage = 'verification';

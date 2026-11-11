@@ -26,6 +26,18 @@ export const usePreferences = create<{
   },
 }));
 const messages = {
+  correctionSaved: ['透视校正已保存', 'Perspective correction saved'],
+  correctionSavedWithWarning: [
+    '透视校正已保存，但轮廓与当前画面偏差较大。机械臂移动前请重新校验或再次标定。',
+    'Perspective correction saved, but its outline differs from the live view. Recheck or recalibrate before moving the robot.',
+  ],
+  correctionCleared: ['透视校正已清除', 'Perspective correction cleared'],
+  clearCorrection: ['清除透视校正', 'Clear perspective correction'],
+  clearCorrectionTitle: ['清除透视校正？', 'Clear perspective correction?'],
+  clearCorrectionBody: [
+    '将删除这台相机保存的屏幕轮廓、输出尺寸和旋转，并返回原始画面。',
+    'This deletes the saved screen outline, output size and rotation for this camera and returns to the original view.',
+  ],
   transferTitle: ['设备切换路径', 'Device transfer route'],
   transferIntro: [
     '配置从当前设备到另一台设备的安全通道。先完成两台设备的标定，再验证路径；验证过程不会移动机械臂。',
@@ -118,7 +130,18 @@ const messages = {
     'Select a camera and complete calibration to start a task.',
   ],
   tasksNotReady: ['任务面板待迁移', 'Task panel migration pending'],
-  playground: ['机械臂 Playground', 'Arm Playground'],
+  skipToCamera: ['跳过，查看相机', 'Skip to cameras'],
+  rawPreviewFailed: [
+    '无法读取相机画面，请检查相机权限或刷新重试。',
+    'Camera preview unavailable. Check camera access or refresh to retry.',
+  ],
+  correctedPreviewFailed: [
+    '无法读取校正画面，请重新识别屏幕标记。',
+    'Corrected preview unavailable. Detect the screen markers again.',
+  ],
+  cameraView: ['画面类型', 'Camera view'],
+  rawView: ['原始画面', 'Original'],
+  correctedView: ['校正画面', 'Corrected'],
   preview: ['交互预览 · 未接入真实设备', 'UI preview · No physical device'],
   disconnected: ['未连接', 'Disconnected'],
   checking: ['正在检查连接', 'Checking connection'],

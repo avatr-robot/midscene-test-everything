@@ -6,6 +6,8 @@ import type {
   ToolProfile,
 } from '../contracts.js';
 export interface ApplicationContext {
+  installationTeaching?: import('../contracts.js').InstallationTeaching;
+  minimumTravelTipZMm?: number;
   robot: RobotArmProfile;
   tool: ToolProfile;
   screen: ScreenProfile;

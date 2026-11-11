@@ -6,6 +6,7 @@ import {
 } from 'node:net';
 import { afterEach, describe, expect, it } from '@rstest/core';
 import {
+  discoverMg400Hosts,
   prepareMg400TcpConnection,
   probeMg400Dashboard,
 } from '../src/mg400-control-channel.js';
@@ -53,7 +54,23 @@ async function controller(
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ value: 'connected' }));
+      res.end(
+        JSON.stringify(
+          req.url === '/protocol/exchange'
+            ? {
+                controlMode: 'disable',
+                coordinate: 'joint',
+                jogMode: 'jog',
+                toolCoordinate: 0,
+                userCoordinate: 0,
+                alarms: [[85], [], [], [], [], null],
+                outputs: Array(8).fill(0),
+                jointCoordinate: [0, 0, 0, 0],
+                cartesianCoordinate: [0, 0, 0, 0],
+              }
+            : { value: 'connected' },
+        ),
+      );
     });
   });
 
@@ -135,17 +152,91 @@ describe('TCP/IP-only preparation', () => {
     });
     expect(target.posted).toEqual(['tp']);
   });
-  it('fails without trying alternate modes when the acknowledged write does not open TCP', async () => {
+  it('uses the alternate firmware value only after a persistent mode refusal', async () => {
     const target = await controller(new Set(['tcp']), 'tp');
-    await expect(
-      prepareMg400TcpConnection('127.0.0.1', {
-        port: target.dashboardPort,
-        httpPort: target.httpPort,
-        settleMs: 0,
-        readinessTimeoutMs: 100,
-        timeoutMs: 500,
-      }),
-    ).rejects.toMatchObject({ code: 'VENDOR_ERROR' });
+    await prepareMg400TcpConnection('127.0.0.1', {
+      port: target.dashboardPort,
+      httpPort: target.httpPort,
+      settleMs: 5,
+      readinessTimeoutMs: 100,
+      timeoutMs: 500,
+    });
+    expect(target.posted).toEqual(['tp', 'tcp']);
+  });
+  it('does not try another mode when the Dashboard is silent', async () => {
+    const target = await controller(new Set());
+    const silent = createTcpServer((socket) => {
+      socket.on('error', () => {});
+      socket.once('data', () => socket.destroy());
+    });
+    await new Promise<void>((resolve) =>
+      silent.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      await expect(
+        prepareMg400TcpConnection('127.0.0.1', {
+          port: (silent.address() as AddressInfo).port,
+          httpPort: target.httpPort,
+          settleMs: 5,
+          readinessTimeoutMs: 30,
+          timeoutMs: 500,
+        }),
+      ).rejects.toThrow(/\[85\].*emergency stop/);
+      expect(target.posted).toEqual(['tp']);
+    } finally {
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
+  });
+});
+
+describe('MG400 discovery', () => {
+  const hosts = ['192.168.1.6', '192.168.2.6'];
+  for (const expected of hosts) {
+    it(`selects the MG400 at ${expected} and checks both endpoints`, async () => {
+      const checked: string[] = [];
+      expect(
+        await discoverMg400Hosts(async (host) => {
+          checked.push(host);
+          return host === expected ? '0,{4},RobotMode();' : '0,{},Other();';
+        }),
+      ).toEqual([expected]);
+      expect(checked).toEqual(hosts);
+    });
+  }
+  it('discovers a refusing controller without writing, then verifies a single mode change', async () => {
+    const target = await controller(new Set(['tp']), 'tcp');
+    const found = await discoverMg400Hosts((host, options) =>
+      host === hosts[1]
+        ? probeMg400Dashboard('127.0.0.1', {
+            ...options,
+            port: target.dashboardPort,
+          })
+        : Promise.resolve(null),
+    );
+    expect(found).toEqual([hosts[1]]);
+    expect(target.posted).toEqual([]);
+    await prepareMg400TcpConnection('127.0.0.1', {
+      port: target.dashboardPort,
+      httpPort: target.httpPort,
+      settleMs: 0,
+      timeoutMs: 500,
+    });
     expect(target.posted).toEqual(['tp']);
+    expect(
+      await probeMg400Dashboard('127.0.0.1', { port: target.dashboardPort }),
+    ).toBe('0,{4},RobotMode();');
+  });
+  it('prefers the ready controller when the other one refuses commands', async () => {
+    expect(
+      await discoverMg400Hosts(async (host) =>
+        host === hosts[0] ? '0,{4},RobotMode();' : '-1,{},RobotMode();',
+      ),
+    ).toEqual([hosts[0]]);
+  });
+  it('reports absent and ambiguous controllers', async () => {
+    expect(await discoverMg400Hosts(async () => null)).toEqual([]);
+    expect(await discoverMg400Hosts(async () => '0,{4},RobotMode();')).toEqual(
+      hosts,
+    );
   });
 });

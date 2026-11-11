@@ -2,6 +2,7 @@ import type {
   ApplicationContext,
   MotionTarget,
 } from '../application/context.js';
+import { atTravelHeight } from '../calibration/verification/travel-height.js';
 import type {
   ActionRequest,
   ActionResult,
@@ -139,6 +140,9 @@ export async function prepareScreenAction(
     ctx.tool,
     this.adapter.capabilities,
   );
+  plan.approach = atTravelHeight(plan.approach, ctx);
+  plan.lift = atTravelHeight(plan.lift, ctx);
+  plan.observation = atTravelHeight(plan.observation, ctx);
   // The release segment uses the profile's release factors rather than the
   // stage table, because it is the segment that ends the press.
   const releaseOptions = releaseStageOptions(

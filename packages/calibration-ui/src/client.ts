@@ -11,7 +11,24 @@ import type {
 export interface CalibrationClientOptions {
   baseUrl: string;
   timeoutMs?: number;
+  /** Present for an embedded Device queue lease. */
+  attemptId?: string;
   fetch?: typeof globalThis.fetch;
+}
+export class CalibrationRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+  get requiresCameraCheck() {
+    return (
+      this.code === 'MAPPING_REQUIRED' ||
+      this.code === 'VISION_BINDING_CHANGED' ||
+      this.code === 'CALIBRATION_MISMATCH'
+    );
+  }
 }
 export class CalibrationClient {
   private readonly baseUrl: string;
@@ -26,17 +43,23 @@ export class CalibrationClient {
         headers:
           body === undefined
             ? undefined
-            : { 'Content-Type': 'application/json' },
+            : {
+                'Content-Type': 'application/json',
+                ...(this.options.attemptId
+                  ? { 'X-Calibration-Attempt': this.options.attemptId }
+                  : {}),
+              },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(this.options.timeoutMs ?? 180000),
       },
     );
     const data = await response.json();
     if (!response.ok)
-      throw new Error(
+      throw new CalibrationRequestError(
         data.error?.message ??
           data.error ??
           `Calibration request failed (${response.status})`,
+        data.code,
       );
     return data as T;
   }

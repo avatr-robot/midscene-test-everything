@@ -50,6 +50,10 @@
     "./camera/profile": {
       "types": "./dist/camera/profile.d.ts",
       "import": "./dist/camera/profile.js"
+    },
+    "./marker-contracts": {
+      "types": "./dist/marker-contracts.d.ts",
+      "import": "./dist/marker-contracts.js"
     }
   }
 }

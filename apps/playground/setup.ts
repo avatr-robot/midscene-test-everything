@@ -3,9 +3,21 @@ import * as cli from '@clack/prompts';
 import {
   DOBOT_MG400_DEFAULTS,
   Mg400Adapter,
+  discoverMg400Hosts,
 } from '@midscene/arm-adapter-mg400';
 import type { PlaygroundOptions } from '@midscene/arm-kit-playground';
 import { listNetworkPorts, prepareNetwork } from './network.js';
+
+/** `--mock` or ARM_PLAYGROUND_MOCK=1 replaces the controller with a simulator. */
+export function mockArmRequested(
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  return (
+    argv.includes('--mock') ||
+    ['1', 'true'].includes((env.ARM_PLAYGROUND_MOCK ?? '').toLowerCase())
+  );
+}
 
 function answer<T>(value: T | symbol): T {
   if (typeof value === 'symbol') {
@@ -30,6 +42,44 @@ async function port(label: string, initial: number, min = 1) {
 }
 
 export async function setupMg400(): Promise<PlaygroundOptions | undefined> {
+  if (mockArmRequested()) {
+    // Load the simulator only in mock mode; a real connection never imports it.
+    const { MockMg400Adapter } = await import('./mock-arm.js');
+    cli.log.warn(
+      '模拟机械臂：不会连接或移动真实控制器，仅用于相机和界面调试。',
+    );
+    return {
+      installationId: 'mg400-mock',
+      connectionDiagram: 'ethernet',
+      autoConnect: true,
+      createAdapter: () => new MockMg400Adapter(),
+    };
+  }
+  if (!process.argv.includes('--manual')) {
+    const options = {
+      dashboardPort: Number(DOBOT_MG400_DEFAULTS.dashboardPort),
+      motionPort: Number(DOBOT_MG400_DEFAULTS.motionPort),
+      feedbackPort: Number(DOBOT_MG400_DEFAULTS.feedbackPort),
+    };
+    return {
+      connection: { adapter: 'mg400', options },
+      connectionDiagram: 'ethernet',
+      async discoverHost() {
+        const hosts = await discoverMg400Hosts();
+        if (!hosts.length)
+          throw new Error('未在 192.168.1.6 或 192.168.2.6 找到可用的 MG400。');
+        if (hosts.length > 1)
+          throw new Error(
+            '两个地址均有 MG400 响应。请用 pnpm dev --manual 指定控制器地址。',
+          );
+        return hosts[0];
+      },
+      createAdapter: (host) => {
+        if (!host) throw new Error('MG400 discovery did not return a host');
+        return new Mg400Adapter({ ...options, host, commandTimeoutMs: 5000 });
+      },
+    };
+  }
   if (!process.stdin.isTTY)
     throw new Error('请在交互式终端中运行 pnpm dev 以选择连接设备。');
   cli.intro('Midscene Playground · Dobot MG400');

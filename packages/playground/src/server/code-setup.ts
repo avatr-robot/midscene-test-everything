@@ -19,8 +19,13 @@ export class CodeSetup extends PlaygroundSession {
     private installationId?: string,
     private connection?: PlaygroundOptions['connection'],
     private connectionDiagram?: PlaygroundOptions['connectionDiagram'],
+    private discoverHost?: PlaygroundOptions['discoverHost'],
   ) {
     super(context);
+    if (discoverHost && !connection)
+      throw new TypeError(
+        'Controller discovery requires a registered connection',
+      );
     if (installationId && connection)
       throw new TypeError(
         'Choose an installationId or a registered connection',
@@ -85,18 +90,20 @@ export class CodeSetup extends PlaygroundSession {
       this.phase = 'connecting';
       this.error = undefined;
       try {
-        const adapter = await this.createAdapter();
+        if (this.discoverHost && this.connection) {
+          const host = await this.discoverHost();
+          this.connection = {
+            ...this.connection,
+            options: { ...this.connection.options, host },
+          };
+        }
+        const address = this.connection?.options.host;
+        const host = typeof address === 'string' ? address : undefined;
+        const adapter = await this.createAdapter(host);
         if (!adapter.id || !adapter.connectionIdentity)
           throw new Error('Adapter identity required');
         const { file, key } = await this.storage(adapter);
-        await this.replace(
-          adapter,
-          new ProfileStore(file),
-          key,
-          typeof this.connection?.options.host === 'string'
-            ? this.connection.options.host
-            : undefined,
-        );
+        await this.replace(adapter, new ProfileStore(file), key, host);
         this.phase = 'connected';
       } catch (error) {
         this.phase = 'error';

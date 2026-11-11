@@ -1,16 +1,22 @@
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
+import { registerControllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import { test } from '@rstest/core';
 import { PlaygroundDevices } from '../src/server/devices.ts';
 
-function fixture(pairings) {
+function fixture(pairings, screenTargets = []) {
+  const acquisitions = [];
   const owners = new Map();
   let opens = 0;
   let closes = 0;
   let state;
-  const camera = { stream: { getInfo: () => ({ state: 'running' }) } };
+  const camera = {
+    camera: { id: 'a' },
+    stream: { getInfo: () => ({ state: 'running' }) },
+  };
   const cameras = {
-    async acquire(id, owner) {
+    async acquire(id, owner, screenId) {
+      acquisitions.push({ id, screenId });
       await delay(5);
       const set = owners.get(id) ?? new Set();
       if (!set.size) opens++;
@@ -30,7 +36,24 @@ function fixture(pairings) {
       assert.equal(owners.size, 0);
     },
   };
-  const host = { service: { status: () => state } };
+  const host = {
+    prepare: async () => {},
+    close: async () => {},
+    service: {
+      status: () => state,
+      resetAttempt: () => {
+        state = undefined;
+      },
+      stop: async () => {
+        state = { stage: 'cancelled' };
+      },
+    },
+  };
+  class Host {
+    prepare = host.prepare;
+    close = host.close;
+    service = host.service;
+  }
   class Device {
     constructor(options) {
       this.options = options;
@@ -40,7 +63,7 @@ function fixture(pairings) {
       await cameras.acquire(this.options.camera, this.owner);
     }
     calibrate(options) {
-      this.pending = options.interaction(host, options.signal);
+      this.pending = options.interaction(options.host, options.signal);
       return this.pending;
     }
     async destroy() {
@@ -48,15 +71,25 @@ function fixture(pairings) {
       await cameras.release(this.options.camera, this.owner);
     }
   }
-  const registry = new PlaygroundDevices(
-    {},
-    { cameras, Device, phoneLinks: () => [], pairings },
-  );
+  const arm = {};
+  registerControllerRuntime(arm, {
+    profileStore: { list: () => ({ screenTargets }) },
+  });
+  const registry = new PlaygroundDevices(arm, {
+    cameras,
+    Device,
+    Host,
+    phoneLinks: () => [],
+    pairings,
+  });
   return {
     registry,
+    acquisitions,
     owners,
     camera,
-    host,
+    get host() {
+      return [...registry.entries.values()][0]?.host ?? host;
+    },
     counts: () => ({ opens, closes }),
     complete: () => {
       state = { stage: 'completed', result: { id: 'saved' } };
@@ -104,6 +137,32 @@ test('embedded calibration is owned by Device; phone token expires after complet
   assert.equal(f.registry.status('a').phase, 'completed');
   assert.equal(f.registry.phoneHost(session.token), undefined);
   await f.registry.close();
+});
+
+test('cancelled and completed leases start fresh; old cancel requests cannot end the retry', async () => {
+  const f = fixture();
+  try {
+    const opening = f.registry.startCalibration('a');
+    await f.registry.cancelCalibration('a');
+    await assert.rejects(opening);
+    assert.equal(f.registry.status('a').phase, 'idle');
+    const first = await f.registry.startCalibration('a');
+    await f.registry.cancelCalibration('a', first.attemptId);
+    const second = await f.registry.startCalibration('a');
+    assert.notEqual(second.attemptId, first.attemptId);
+    await f.registry.cancelCalibration('a', first.attemptId);
+    await delay(220);
+    assert.equal(f.registry.status('a').phase, 'running');
+    assert.equal(f.host.service.status(), undefined);
+    f.complete();
+    await f.registry.entries.get('a').calibration.pending;
+    const third = await f.registry.startCalibration('a');
+    await delay(220);
+    assert.equal(f.registry.status('a').phase, 'running');
+    assert.notEqual(third.attemptId, second.attemptId);
+  } finally {
+    await f.registry.close();
+  }
 });
 
 test('stopping a camera cancels calibration before releasing both camera leases', async () => {
@@ -245,5 +304,31 @@ test('known phone pairing restores its input host after restart without starting
     f.registry.entries.get('phone-camera').calibration.token,
     'persisted-token',
   );
+  await f.registry.close();
+});
+
+test('a persisted default screen retains the original camera correction scope across restarts', async () => {
+  const f = fixture(undefined, [
+    { id: 'a', cameraId: 'a', name: 'Default' },
+    { id: 'second', cameraId: 'a', name: 'Second' },
+  ]);
+  const first = await f.registry.open('a');
+  assert.equal(first.device.options.screenId, undefined);
+  assert.deepEqual(f.acquisitions[0], { id: 'a', screenId: undefined });
+  const second = await f.registry.open('second');
+  assert.equal(second.device.options.screenId, 'second');
+  assert.deepEqual(f.acquisitions[2], { id: 'a', screenId: 'second' });
+  await f.registry.close();
+});
+
+test('reading readiness after stop does not reacquire a stopped camera', async () => {
+  const f = fixture();
+  await f.registry.open('a');
+  await f.registry.stop('a');
+  await assert.rejects(f.registry.configuration('a'), {
+    code: 'VISION_UNAVAILABLE',
+  });
+  assert.equal(f.owners.size, 0);
+  assert.equal(f.counts().opens, 1);
   await f.registry.close();
 });

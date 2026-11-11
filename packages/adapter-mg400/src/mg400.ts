@@ -1204,19 +1204,20 @@ export class Mg400Adapter implements RobotArmAdapter {
       // 30004 is a preferred source, never a prerequisite: the adapter opens it
       // best-effort and keeps working through dashboard polling without it.
       this.feedback.start();
+      let initialState: RobotState;
       try {
-        await this.getState();
+        initialState = await this.getState();
       } catch (error) {
         if (!isRobotArmError(error) || error.details?.vendorCode !== -1)
           throw error;
         check();
-        // Only TCP/IP development is supported. Prepare that one channel once;
-        // never fall back to an online, fieldbus or teach-pendant connection.
+        // A vendor refusal identifies a reachable controller that needs TCP/IP preparation.
         this.feedback.close();
         this.dashboard.close(undefined, true);
         this.motion.close(undefined, true);
         this.invalidateStateSample();
         await prepareMg400TcpConnection(this.config.host, {
+          checkConnection: check,
           port: this.config.dashboardPort,
           httpPort: this.config.httpPort,
           timeoutMs: this.config.commandTimeoutMs,
@@ -1227,12 +1228,23 @@ export class Mg400Adapter implements RobotArmAdapter {
         await this.motion.connect();
         check();
         this.feedback.start();
-        await this.getStateFresh();
+        initialState = await this.getStateFresh();
       }
       check();
       await this.negotiateKinematics(generation);
       check();
+      if (initialState.enabled && !this.feedback.current()) {
+        try {
+          await this.feedback.waitForFrame(1000);
+        } catch (error) {
+          if (!isRobotArmError(error) || error.code !== 'FEEDBACK_UNAVAILABLE')
+            throw error;
+        }
+        check();
+      }
       this.connectionReady = true;
+      this.payloadEvidence();
+      check();
       this.hasConnected = true;
       this.reconnectAttempt = 0;
       this.clearReconnect();
@@ -2473,6 +2485,7 @@ export class Mg400Adapter implements RobotArmAdapter {
       throw new RobotArmError('BUSY', 'MG400 has an outstanding motion', 409);
     this.active = true;
     const generation = this.generation;
+    let dispatchAttempted = false;
     try {
       // Fresh on purpose: dispatching a motion is a physical go/no-go decision,
       // so it must not be taken from a bounded sample that may predate a fault.
@@ -2511,6 +2524,7 @@ export class Mg400Adapter implements RobotArmAdapter {
       this.invalidateStateSample();
       this.lastCommandAt = Date.now();
       const submittedAt = this.lastCommandAt;
+      dispatchAttempted = true;
       await this.motion.send(command);
       const terminal = (async (): Promise<MotionResult> => {
         try {
@@ -2625,6 +2639,11 @@ export class Mg400Adapter implements RobotArmAdapter {
       return createMotionHandle(randomUUID(), terminal);
     } catch (e) {
       this.active = false;
+      if (!dispatchAttempted && isRobotArmError(e))
+        throw new RobotArmError(e.code, e.message, e.status, {
+          ...e.details,
+          beforeMotionSubmission: true,
+        });
       throw e;
     }
   }

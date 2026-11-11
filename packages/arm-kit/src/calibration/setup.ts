@@ -4,6 +4,12 @@ import type {
   AssistedMappingInput,
   WebCalibrationMapping,
 } from '../assisted-contracts.js';
+import { mappingQualityWarnings } from '../assisted-contracts.js';
+import {
+  MARKER_CAPTURE_ATTEMPTS,
+  hasMappingMarkerCoverage,
+} from '../camera/calibration-markers.js';
+import { RobotVisionError } from '../camera/errors.js';
 import {
   RobotArmError,
   sameVisionMapping,
@@ -18,6 +24,36 @@ import {
   sameLayout,
   sameLayoutGeometry,
 } from './phone/session.js';
+
+function checkedMappingAccuracy(
+  mapping: Pick<WebCalibrationMapping, 'markerErrorPx' | 'webToImage'> & {
+    accuracy?: WebCalibrationMapping['accuracy'];
+  },
+) {
+  project(mapping.webToImage, { x: 0, y: 0 });
+  invertMapping(mapping.webToImage);
+  if (!Number.isFinite(mapping.markerErrorPx) || mapping.markerErrorPx < 0)
+    throw new RobotArmError('INVALID_MAPPING', 'Marker quality is unavailable');
+  const accuracy = mapping.accuracy;
+  if (
+    !accuracy ||
+    !hasMappingMarkerCoverage(
+      accuracy.fit?.count,
+      accuracy.validation?.count,
+    ) ||
+    [accuracy.fit, accuracy.validation].some(
+      ({ meanErrorCssPx, maxErrorCssPx }) =>
+        ![meanErrorCssPx, maxErrorCssPx].every(
+          (px) => Number.isFinite(px) && px >= 0,
+        ),
+    )
+  )
+    throw new RobotArmError(
+      'INVALID_MAPPING',
+      'Camera mapping requires distributed fit markers and finite independent check measurements.',
+    );
+  return accuracy;
+}
 
 export function calibrationGeometryKey(
   runtime: RobotArmRuntime,
@@ -43,9 +79,13 @@ export class CalibrationSetup {
     private readonly runtime: RobotArmRuntime,
     private readonly phone: CalibrationPhoneSession,
     private readonly vision: CalibrationVision,
+    private readonly deviceId?: string,
   ) {}
   status(): AssistedCalibrationSetup {
     return structuredClone({
+      teaching:
+        this.input &&
+        this.runtime.profileStore.installationTeaching(this.input),
       prepared: Boolean(this.input),
       selection: this.input
         ? {
@@ -69,6 +109,17 @@ export class CalibrationSetup {
         409,
       );
     return structuredClone(this.input);
+  }
+  /**
+   * Drops the page mapping built from a camera correction that no longer
+   * applies. The camera and output size stay selected, so mapping the same
+   * screen again needs no setup changes.
+   */
+  async clearMapping() {
+    this.mapping = undefined;
+    if (this.deviceId)
+      await this.runtime.profileStore.saveCalibrationMapping(this.deviceId);
+    return this.status();
   }
   prepare(input: AssistedCalibrationInput) {
     const previous = this.input;
@@ -146,6 +197,7 @@ export class CalibrationSetup {
     input: AssistedCalibrationInput,
     mapping: WebCalibrationMapping,
   ) {
+    checkedMappingAccuracy(mapping);
     if (
       mapping.vision.cameraId !== input.cameraId ||
       mapping.vision.width !== input.width ||
@@ -178,6 +230,8 @@ export class CalibrationSetup {
     };
   }
   async assertCurrent() {
+    await this.vision.assertPerspectiveCurrent?.();
+    this.phone.assertAvailable();
     if (
       !this.mapping ||
       !this.phone.update ||
@@ -203,7 +257,10 @@ export class CalibrationSetup {
       );
     return structuredClone(this.mapping);
   }
-  async map(output?: AssistedMappingInput) {
+  async map(
+    output?: AssistedMappingInput,
+    beforeCapture?: () => Promise<void>,
+  ) {
     this.inputSnapshot();
     if (output) {
       if (
@@ -220,19 +277,36 @@ export class CalibrationSetup {
       this.input!.height = output.height;
     }
     const layout = structuredClone(this.phone!.assertAvailable().layout);
+    let reusable = this.mapping;
+    if (!reusable && this.deviceId) {
+      const saved = this.runtime.profileStore.calibrationMapping(this.deviceId);
+      if (
+        saved &&
+        saved.geometryKey === this.geometryKey &&
+        sameLayoutGeometry(saved.mapping.layout, layout)
+      ) {
+        try {
+          checkedMappingAccuracy(saved.mapping);
+          reusable = { ...saved.mapping, layout };
+        } catch {
+          // Rebuild the page mapping using the current corrected image.
+        }
+      }
+    }
     // Camera-step entry may ensure the mapping again. Reuse verified
     // geometry without another marker scan. Each collection starts fresh.
     if (
-      this.mapping &&
-      sameLayout(layout, this.mapping.layout) &&
+      reusable &&
+      sameLayout(layout, reusable.layout) &&
       this.geometryKey === calibrationGeometryKey(this.runtime, this.input!) &&
-      this.mapping.vision.width === this.input!.width &&
-      this.mapping.vision.height === this.input!.height &&
+      reusable.vision.width === this.input!.width &&
+      reusable.vision.height === this.input!.height &&
       sameVisionMapping(
         await this.vision.binding(this.visionOptions()),
-        this.mapping.vision,
+        reusable.vision,
       )
     ) {
+      if (!this.mapping) await this.vision.assertPerspectiveCurrent?.();
       this.phone!.assertAvailable();
       if (
         !sameLayout(layout, this.phone!.update!.layout) ||
@@ -243,55 +317,62 @@ export class CalibrationSetup {
           'Phone layout, robot or tool changed during camera mapping',
           409,
         );
+      this.mapping = reusable;
       await this.updateSavedCameraMapping();
       return this.status()!;
     }
     this.mapping = undefined;
-    const shot = await this.vision.snapshot(this.visionOptions());
-    const body = await this.vision.detectMarkers(
-      Buffer.from(shot.base64, 'base64'),
-      layout.markers,
-    );
-    if (!sameLayout(layout, this.phone!.assertAvailable().layout))
-      throw new RobotArmError(
-        'PAGE_CHANGED',
-        'The phone page changed during detection',
-        409,
-      );
-    project(body.webToImage, { x: 0, y: 0 });
-    if (!Number.isFinite(body.markerErrorPx))
-      throw new RobotArmError(
-        'INVALID_MAPPING',
-        'Marker quality is unavailable',
-      );
-    const accuracy = body.accuracy;
-    if (
-      !accuracy ||
-      accuracy.fit?.count !==
-        layout.markers.filter((m) => m.purpose === 'fit').length ||
-      accuracy.validation?.count !==
-        layout.markers.filter((m) => m.purpose === 'check').length ||
-      [accuracy.fit, accuracy.validation].some(
-        (q) =>
-          ![q.meanErrorCssPx, q.maxErrorCssPx].every(
-            (n) => Number.isFinite(n) && n >= 0,
-          ) ||
-          q.meanErrorCssPx > 2 ||
-          q.maxErrorCssPx > 3,
+    const pageId = this.phone.assertAvailable().pageId;
+    await beforeCapture?.();
+    const display = this.phone.assertAvailable();
+    const checkPage = () => {
+      const page = this.phone.assertAvailable();
+      if (
+        page.pageId !== pageId ||
+        !sameLayout(layout, page.layout) ||
+        (display.markersPainted &&
+          (!page.markersPainted ||
+            page.markerRequest !== display.markerRequest))
       )
-    )
-      throw new RobotArmError(
-        'INVALID_MAPPING',
-        'Camera mapping requires distributed fit markers and independent checks (mean ≤2, maximum ≤3 CSS px). Refresh both services and the phone page.',
-      );
-    this.phone!.assertAvailable();
-    if (!sameLayout(layout, this.phone!.update!.layout))
-      throw new RobotArmError(
-        'PAGE_CHANGED',
-        'The phone page changed during marker detection',
-        409,
-      );
+        throw new RobotArmError(
+          'PAGE_CHANGED',
+          'The phone page changed during detection',
+          409,
+        );
+    };
+    checkPage();
+    let shot = await this.vision.snapshot(this.visionOptions());
+    const initialBinding = shot.binding!;
+    let body: Awaited<ReturnType<CalibrationVision['detectMarkers']>>;
+    for (let attempt = 1; ; attempt++) {
+      checkPage();
+      try {
+        body = await this.vision.detectMarkers(
+          Buffer.from(shot.base64, 'base64'),
+          layout.markers,
+        );
+        break;
+      } catch (error) {
+        checkPage();
+        if (
+          attempt >= MARKER_CAPTURE_ATTEMPTS ||
+          !(error instanceof RobotVisionError) ||
+          !['NO_SCREEN_DETECTED', 'CALIBRATION_MISMATCH'].includes(error.code)
+        )
+          throw error;
+        shot = await this.vision.snapshot(this.visionOptions());
+        if (!sameVisionMapping(initialBinding, shot.binding!))
+          throw new RobotArmError(
+            'VISION_BINDING_CHANGED',
+            'Camera correction changed during marker detection',
+            409,
+          );
+      }
+    }
+    checkPage();
+    const accuracy = checkedMappingAccuracy(body);
     const latest = await this.vision.binding(this.visionOptions());
+    checkPage();
     if (!sameVisionMapping(latest, shot.binding!))
       throw new RobotArmError(
         'VISION_BINDING_CHANGED',
@@ -307,6 +388,16 @@ export class CalibrationSetup {
     };
     try {
       await this.updateSavedCameraMapping();
+      if (
+        this.deviceId &&
+        this.geometryKey &&
+        !mappingQualityWarnings(this.mapping.accuracy, this.mapping.layout)
+          .length
+      )
+        await this.runtime.profileStore.saveCalibrationMapping(this.deviceId, {
+          geometryKey: this.geometryKey,
+          mapping: this.mapping,
+        });
     } catch (error) {
       this.mapping = undefined;
       throw error;
@@ -318,6 +409,12 @@ export class CalibrationSetup {
     const mapping = this.mapping!;
     const input = this.input!;
     const store = this.runtime.profileStore;
+    // A Device mapping is a draft for its next calibration. Only acceptance
+    // publishes it. The standalone workstation flow can update its own preview.
+    if (this.deviceId !== undefined) return;
+    // A weak draft remains reviewable. Publishing it over an accepted
+    // workstation's live coordinates goes through explicit calibration acceptance.
+    if (mappingQualityWarnings(mapping.accuracy, mapping.layout).length) return;
     const binding = store.list().workstation;
     if (
       !binding?.calibrationProfileId ||

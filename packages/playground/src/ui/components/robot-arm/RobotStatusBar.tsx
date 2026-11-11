@@ -1,3 +1,4 @@
+import { robotVoice } from '@midscene/arm-calibration-ui';
 import {
   Alert,
   Badge,
@@ -35,6 +36,7 @@ type Action =
   | 'enable'
   | 'disable'
   | 'clearFaults'
+  | 'recover'
   | 'resume'
   | 'emergencyStop'
   | 'payload';
@@ -58,6 +60,7 @@ const labels: Record<Action, string> = {
   disable: 'Disable',
   clearFaults: 'Clear Faults',
   resume: 'Resume',
+  recover: 'Check Recovery',
   emergencyStop: 'Emergency Stop',
   payload: 'Apply Payload',
 };
@@ -65,11 +68,13 @@ export function RobotStatusBar({
   cameraId,
   onConfigure,
   settings,
+  control,
   preparing = false,
 }: {
   cameraId?: string;
   onConfigure: () => void;
   settings?: ReactNode;
+  control?: ReactNode;
   preparing?: boolean;
 }) {
   const {
@@ -110,7 +115,7 @@ export function RobotStatusBar({
         confirmation.current?.state.state.enabled !==
           data?.state.state.enabled),
   );
-  const { controlPending } = useConnection();
+  const { controlPending, controlError, recover } = useConnection();
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
@@ -166,6 +171,15 @@ export function RobotStatusBar({
   const faults = state?.faults ?? [];
   const paused = Boolean(state?.paused || data?.state.softwarePaused);
   const has = (id: string) => capabilities?.controls.includes(id);
+  const payloadStatus = data?.state.payloadApplication?.status;
+  const needsPayloadSync =
+    payloadStatus === 'pending' || payloadStatus === 'unconfirmed';
+  const showPayloadStatus = Boolean(
+    data?.tool &&
+      state?.enabled &&
+      payloadStatus !== 'applied' &&
+      payloadStatus !== 'not-required',
+  );
   const enableBlocked =
     locked ||
     !data?.tool?.payload ||
@@ -177,6 +191,21 @@ export function RobotStatusBar({
     setBusy(true);
     setCommandError(undefined);
     try {
+      if (action === 'recover') {
+        if (useConnection.getState().setupSession !== expected.session)
+          throw new Error(
+            t(
+              'Robot state changed. Close this dialog and confirm the current operation again.',
+            ),
+          );
+        await recover();
+        const error = useConnection.getState().controlError;
+        if (error) throw new Error(error);
+        setConfirm(undefined);
+        return;
+      }
+      if (action === 'enable') robotVoice.notify('enabling', 1);
+      if (action === 'payload') robotVoice.notify('payload', 1);
       const response = await fetch('/api/arm/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -194,8 +223,21 @@ export function RobotStatusBar({
         throw new Error(
           value.error?.message ?? value.error ?? `HTTP ${response.status}`,
         );
+      const event = {
+        enable: 'enabled',
+        disable: 'disabled',
+        clearFaults: 'clearFaults',
+        resume: 'resuming',
+        emergencyStop: 'emergencySent',
+        payload: 'payloadDone',
+      } as const;
+      robotVoice.notify(event[action], action === 'emergencyStop' ? 3 : 1);
       setConfirm(undefined);
     } catch (error) {
+      robotVoice.notify(
+        action === 'emergencyStop' ? 'emergencyFailed' : 'failed',
+        3,
+      );
       setCommandError(String(error));
     } finally {
       pending.current = false;
@@ -207,6 +249,8 @@ export function RobotStatusBar({
   const confirms: Partial<Record<Action, string>> = {
     enable: 'Enable this arm? Keep people clear of its workspace.',
     clearFaults: 'Clear faults without enabling or moving?',
+    recover:
+      'Check recovery while the robot is stationary and fault-free. This does not enable or move the robot.',
     resume: 'Continue the controller? Interrupted tasks will not be replayed.',
     disable: 'Disable the stationary robot?',
     payload: 'Apply the saved tool payload?',
@@ -386,6 +430,7 @@ export function RobotStatusBar({
           </Tag>
         </div>
         <Space wrap className="robot-status-main-actions">
+          {control && <div className="robot-status-bar-control">{control}</div>}
           {(has('control.enable') ||
             has('control.enable-with-payload') ||
             has('control.disable')) && (
@@ -415,6 +460,14 @@ export function RobotStatusBar({
               {zh ? '继续' : 'Resume'}
             </Button>
           )}
+          {(data?.state.recoveryRequired || controlError) && !paused && (
+            <Button
+              disabled={locked || Boolean(faults.length)}
+              onClick={() => choose('recover')}
+            >
+              {t('Check Recovery')}
+            </Button>
+          )}
           {settings}
           <Badge count={faults.length}>
             <Button
@@ -436,7 +489,7 @@ export function RobotStatusBar({
             </Button>
           )}
         </Space>
-        {!data?.tool && !preparing && (
+        {(showPayloadStatus || (!data?.tool && !preparing)) && (
           <Typography.Text className="robot-tool-status" type="secondary">
             {data?.tool
               ? `${data.tool.name} · ${zh ? '负载状态' : 'Payload'}: ${zh ? { 'not-required': '无需配置', missing: '未配置', pending: '待应用', applied: '已应用', unconfirmed: '未确认', applying: '应用中' }[data.state.payloadApplication?.status ?? 'unconfirmed'] : (data.state.payloadApplication?.status ?? 'unknown')}`
@@ -451,15 +504,17 @@ export function RobotStatusBar({
               {zh ? '配置工具' : 'Configure tool'}
             </Button>
           )}
-          {has('control.apply-payload') && state?.enabled && (
-            <Button
-              size="small"
-              disabled={enableBlocked}
-              onClick={() => choose('payload')}
-            >
-              {zh ? '同步工具负载' : 'Apply tool payload'}
-            </Button>
-          )}
+          {has('control.apply-payload') &&
+            state?.enabled &&
+            needsPayloadSync && (
+              <Button
+                size="small"
+                disabled={enableBlocked}
+                onClick={() => choose('payload')}
+              >
+                {zh ? '同步工具负载' : 'Apply tool payload'}
+              </Button>
+            )}
         </Space>
       </fieldset>
       <Drawer

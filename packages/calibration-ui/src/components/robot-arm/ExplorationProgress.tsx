@@ -22,9 +22,28 @@ export function ExplorationProgress({
     automaticPhase,
     explorationMode = 'standard',
   } = session;
-  if (!capture) return null;
   const failed =
-    session.stage === 'interrupted' || session.stage === 'capture-failed';
+    (session.stage === 'interrupted' && session.collectionFailed) ||
+    session.stage === 'capture-failed';
+  if (session.calibration?.auto?.checkingVisibility)
+    return <output>{t('Checking screen visibility')}</output>;
+  if (session.stage === 'collecting' && session.recheckingPayload)
+    return <output>{t('Reconfirming the tool payload…')}</output>;
+  if (session.stage === 'collecting' && session.referenceTravel)
+    return (
+      <output>
+        {t(
+          session.referenceTravel === 'approach'
+            ? 'Preparing to move to the calibration reference. Keep the path clear.'
+            : 'Preparing to lift and return to the reference. Keep the path clear.',
+        )}
+      </output>
+    );
+  if (
+    !capture ||
+    (!failed && session.stage !== 'collecting' && session.stage !== 'reprobing')
+  )
+    return null;
   const local = automaticPhase === 'local';
   const total = explorationMode === 'standard' ? 9 : 6;
   const layout = session.mapping?.layout ?? session.layout;
@@ -54,10 +73,10 @@ export function ExplorationProgress({
         <Tag>
           {t(
             explorationMode === 'slide'
-              ? 'Sliding collection'
+              ? 'Fast'
               : explorationMode === 'fast'
                 ? 'Fast probing'
-                : 'Standard probing',
+                : 'Regular',
           )}
         </Tag>
         <Typography.Text strong>
@@ -97,7 +116,7 @@ export function ExplorationProgress({
       {explorationMode !== 'standard' && (
         <Typography.Paragraph type="secondary">
           {t(
-            'Fast and sliding collection assume a horizontal screen and a compliant tip. Secure the phone on a rigid support; do not hold it by hand during motion.',
+            'This mode assumes a horizontal screen and a compliant tip. Secure the phone on a rigid support; do not hold it by hand during motion.',
           )}
         </Typography.Paragraph>
       )}

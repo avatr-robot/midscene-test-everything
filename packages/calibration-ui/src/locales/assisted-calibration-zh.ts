@@ -1,24 +1,57 @@
 export const assistedCalibrationZh: Record<string, string> = {
+  'Phone step acknowledgement timed out. Touch at this position is unknown.':
+    '手机未在时限内确认本步，当前位置的接触状态未知。请检查标定页和连接后重试。',
+  'The phone cancelled the active pointer. Touch at this position is unknown.':
+    '手机浏览器取消了当前触点，当前位置的接触状态未知。',
+  'Phone contact changed while the robot was stationary. This position could not be measured.':
+    '机械臂静止期间，手机回报的触点未稳定，本次位置未计入测量。',
+  'Calibration positions': '标定位置',
+  'Safe Parking Position': '安全避让位',
+  '{0} · outside frame': '{0} · 画面外',
+  'Check camera mapping before starting calibration':
+    '开始标定前需要重新检查相机映射。',
+  'The robot was stopped manually. Confirm recovery before sampling.':
+    '机械臂已手动停止。恢复采样前，请确认恢复。',
+  'Emergency stop was triggered. Confirm recovery before sampling.':
+    '急停已触发。解除急停后，请确认恢复。',
+  'Resolve the controller fault and confirm recovery before sampling.':
+    '请处理控制器报警，再确认恢复。',
+  'Connection interrupted. Checking readiness before returning to sampling setup.':
+    '连接中断，重连并检查机械臂状态后将返回采样准备。',
+  'Resume the robot to continue calibration.':
+    '请在顶部恢复机械臂运行，再继续标定。',
+  'Check controller recovery before collecting points.':
+    '采样前，请先检查并恢复控制器。',
+  'Prepare the robot and tool payload before collecting points.':
+    '采样前，请确认机械臂已使能并已应用工具负载。',
+  'No measurement recorded for this step.': '本次标定未保存这一步的测量记录。',
   'Boundary verification': '边界验证',
+  'Preparing boundary verification': '正在准备边界验证',
+  'Preparing to move to the calibration reference. Keep the path clear.':
+    '机械臂准备前往标定参考位，请让开运动路径。',
+  'Preparing to lift and return to the reference. Keep the path clear.':
+    '机械臂准备抬起并返回参考位，请让开运动路径。',
+  'Continue to boundary verification': '继续边界验证',
   'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.':
     '采样拟合后自动执行悬停与接触边界验证，再记录安全位置、检查并保存。',
+  'I confirm the screen is horizontal and secured, the setup is ready, and the workspace is clear for sampling and automatic boundary verification.':
+    '我已确认屏幕水平固定、配置就绪、工作区净空，可以开始采样和自动边界验证。',
   'The screen is horizontal and securely fixed.': '屏幕已水平放置并固定。',
   'I confirm the setup and clear workspace for sampling and automatic boundary verification.':
     '我已确认配置及工作区净空，允许采样与自动边界验证。',
   'Boundary verification is complete. Record a Safe Position clear of the screen and camera; release the robot before recording.':
     '边界验证已完成。请记录远离屏幕和摄像头的安全位置，记录前松开机械臂。',
 
+  'Keep the phone page visible in full screen to continue.':
+    '请保持手机标定页在前台全屏显示后继续。',
+  'Open the calibration page from the iOS Home Screen to continue.':
+    '请将标定页添加到主屏幕，再从主屏幕图标打开。',
+  'Waiting for the phone to enter full screen…': '等待手机进入全屏…',
   'Detect screen markers': '识别屏幕标记',
-  'Use AI detection': '使用 AI 检测',
-  'AI model settings': 'AI 模型设置',
   'Set up camera first': '先校正相机',
   'Save screen area': '保存屏幕范围',
-  'No phone page is connected. Use AI detection to locate the screen, then connect the phone before arm calibration.':
-    '尚未连接手机网页，可以先使用 AI 检测屏幕。机械臂标定前仍需连接手机。',
-  'Page detection is unavailable or inaccurate? Use AI detection, then check the screen edges.':
-    '网页识别失败或边框不准确时，可点击「使用 AI 检测」，再检查并调整四角。',
-  'AI detection uses a camera image to locate the full screen. Check the corners before saving.':
-    'AI 将根据相机画面识别完整屏幕。保存前请检查四角是否贴合显示区域。',
+  'Open the marker page on the target screen to detect its edges.':
+    '请在待识别的屏幕上打开标记页，以识别屏幕边缘。',
   'Grid RMS {0} mm · Holdout maximum {1} mm · Coverage {2}%':
     '网格均方根误差 {0} mm · 留出最大偏差 {1} mm · 覆盖率 {2}%',
   'Run inner contact boundary': '执行接触内框验证',
@@ -291,9 +324,31 @@ export const assistedCalibrationZh: Record<string, string> = {
     '笔尖经过整个屏幕上方时均有足够间隙，悬停路径正确。',
   'Confirm Hover Verification': '确认悬停验证',
   'Calibration complete': '标定完成',
+  'Calibration finished. You can close this tab.': '标定已结束，可以关闭此页。',
+  'Could not finish calibration. Check the connection and try again.':
+    '未能结束标定，请检查连接后重试。',
   'Review measured clicks': '检查点击测量结果',
   'Verifying clicks': '正在验证点击',
   'Mean Error': '平均误差',
+  'Review calibration measurements': '请复核以下标定测量值',
+  'Review targets allow {0}% relative measurement error.':
+    '以下建议值均有 {0}% 的相对容差。',
+  '{0} {1}% (target ≥{2}%)': '{0} {1}%（建议 ≥{2}%）',
+  '{0} {1}% (target ≤{2}%)': '{0} {1}%（建议 ≤{2}%）',
+  'Grid RMS {0} mm ({3}% of short edge) · Holdout maximum {1} mm ({4}%) · Coverage {2}%':
+    '网格均方根误差 {0} mm（屏幕短边的 {3}%） · 独立验证最大误差 {1} mm（{4}%） · 覆盖率 {2}%',
+  'Grid RMS': '网格均方根误差（占屏幕短边）',
+  'Holdout maximum': '独立验证最大误差（占屏幕短边）',
+  'Touch coverage': '触点覆盖率',
+  'Plane RMS': '平面均方根误差（占高度补偿范围）',
+  'Plane inliers': '平面拟合内点占比',
+  'Plane sample span': '平面采点跨度（占对应屏幕边长）',
+  'Holdout height error': '独立验证高度误差（占高度补偿范围）',
+  'Screen axis skew': '屏幕两轴投影偏斜率',
+  'Fit marker mean error': '拟合标记平均误差（占页面短边）',
+  'Fit marker maximum error': '拟合标记最大误差（占页面短边）',
+  'Check marker mean error': '验证标记平均误差（占页面短边）',
+  'Check marker maximum error': '验证标记最大误差（占页面短边）',
   'Maximum Error': '最大误差',
   Target: '目标',
   Error: '误差',

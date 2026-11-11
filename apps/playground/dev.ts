@@ -39,7 +39,7 @@ async function main() {
       await frontend.close();
       return;
     }
-    cli.outro(`打开 ${frontend?.url ?? playground.url}，点击「连接机械臂」。`);
+    cli.outro(`打开 ${frontend?.url ?? playground.url} 查看 Playground。`);
   } catch (error) {
     await close();
     throw error;

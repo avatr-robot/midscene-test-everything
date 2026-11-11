@@ -1,5 +1,57 @@
 import { assistedCalibrationZh } from './assisted-calibration-zh';
+import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
+  'The preview phone does not match this screen’s saved binding. Use the bound phone or release the binding first.':
+    '预览手机与此屏幕保存的配对信息不一致。请使用已绑定的手机，或先解除原绑定。',
+  'Open the page on the phone, then select the device below.':
+    '在手机上打开页面，再在下方选择该设备。',
+  'Delete Screen': '删除屏幕',
+  'Delete this screen binding?': '删除此屏幕绑定？',
+  'Delete Saved Perspective': '删除已保存的透视',
+  'Delete the saved perspective for this screen?': '删除此屏幕已保存的透视？',
+  'The outline does not match the phone screen. Apply it anyway?':
+    '轮廓与手机屏幕不符。仍要应用吗？',
+  Apply: '应用',
+  Cancel: '取消',
+  'Perspective applied': '已应用透视',
+  'Perspective not applied': '尚未应用透视',
+  'Clear Perspective': '清除透视',
+  'Enter full screen on the page first.':
+    '请先在手机页面点「进入全屏」，再连接设备。',
+  'Page offline': '页面离线',
+  'Reconnect page': '重新连接页面',
+  'Reconnect {0}': '重新连接 {0}',
+  'Unlock the phone and bring this page back to the foreground, then reconnect it.':
+    '请解锁手机、把该页面切回前台，然后再重新连接。',
+  'Remove page': '移除页面',
+  'Remove page {0}': '移除页面 {0}',
+  'Remove this offline page with its screen and perspective? This cannot be undone.':
+    '移除这个离线页面，以及它对应的屏幕和透视？此操作不可撤销。',
+  'Saved and connected screen pages are listed below. Keep one active page per screen.':
+    '以下为已保存和已连接的页面；每块屏幕保持一个页面在线。',
+  'Connect the computer to Wi-Fi before pairing a phone':
+    '请先将电脑连接 Wi‑Fi，再配对手机',
+  'Waiting for the Controller queue': '正在等待机械臂执行队列',
+  'Wait for the Controller queue before starting calibration commands':
+    '请等待机械臂执行队列就绪后再开始标定',
+  'Open this address on the phone. The QR code binds it automatically.':
+    '在手机上打开此地址；扫描二维码会自动完成绑定。',
+  'Assign the screen page in Camera Mapping first':
+    '请先在相机映射中分配屏幕页面',
+  'Record Camera Boundary': '记录相机边界',
+  'Save Installation Teaching': '保存安装示教',
+  'Teach Camera Boundary': '示教相机边界',
+  'Reteach Installation': '重新示教',
+  'Saved installation teaching is shared by screens on this camera.':
+    '已保存的安装示教由当前相机的各块屏幕共用。',
+  'Record the camera-side boundary once to enable automatic camera avoidance.':
+    '记录一次相机侧边界，即可在边界验证后自动移动到相机安全位。',
+  'The phone is horizontal, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.':
+    '确认手机水平、触控笔竖直，参考位一侧整条机械臂的路径不会碰到相机，且没有其他障碍物。',
+  'Move straight from the reference towards the camera and stop at a safe boundary. Leave clearance for the whole arm, then release it before recording.':
+    '从参考位朝相机方向直线移动，在仍安全的位置停下。为整条机械臂留足间隙，松手后记录。',
+  'Moving to the camera-avoidance position': '正在移动到相机避让安全位',
+
   'Repeating validation heights': '正在重复测量验证点高度',
   'Repeated contact heights are inconsistent; check screen stability':
     '同一点多次测得的接触高度波动过大，请检查手机固定和触控笔接触。',
@@ -52,8 +104,8 @@ const calibrationZh: Record<string, string> = {
   'Stopped during: {0}': '停止时阶段：{0}',
   'Waiting for touch observation': '等待触摸反馈',
   'Touch lost: recovering this endpoint': '触摸丢失，正在当前点有限补探',
-  'Fast and sliding collection assume a horizontal screen and a compliant tip. Secure the phone on a rigid support; do not hold it by hand during motion.':
-    '快速和滑动采样采用水平屏幕假设，并要求笔尖具有弹性缓冲。请用稳固支撑固定手机，机械臂运动时不要用手扶持。',
+  'This mode assumes a horizontal screen and a compliant tip. Secure the phone on a rigid support; do not hold it by hand during motion.':
+    '此模式采用水平屏幕假设，并要求笔尖具有弹性缓冲。请用稳固支撑固定手机，机械臂运动时不要用手扶持。',
   'Recorded contacts and current target': '已记录触点与当前目标',
   'Numbered circles: planned points \u00b7 Green dots: measured contacts \u00b7 Ring: current target':
     '编号圆圈：计划采样点；绿点：实测触点；外圈：当前目标。',
@@ -85,12 +137,14 @@ const calibrationZh: Record<string, string> = {
   'Calibration connection lost. Reconnecting…': '标定连接已断开，正在重连…',
   'Phone disconnected during calibration. Restart this step.':
     '标定期间手机已断开，请重新开始本步骤。',
-  'Calibration marker {0} could not be decoded uniquely ({1} matches). Keep all calibration markers visible and in focus.':
-    '标记 {0} 识别失败（匹配到 {1} 处）。请让手机标定页上的所有标记清晰、完整地出现在画面中，然后重试。',
+  'Calibration marker {0} could not be decoded uniquely ({1} matches).':
+    '标记 {0} 识别失败（匹配到 {1} 处）。',
+  'Keep at least four of the six calibration markers visible and in focus.':
+    '请确保六个标定码中至少有四个在画面中清晰可见。',
   'Page marker fit verified; screen edges require visual confirmation':
     '页面标记拟合通过；屏幕边界仍需目视确认',
   'The browser did not report the page position within the screen. Automatic screen boundary detection is unavailable.':
-    '浏览器未提供网页在屏幕中的位置，无法自动推算完整屏幕边界。',
+    '浏览器未提供网页在屏幕中的位置（通常是没有全屏），无法自动推算完整屏幕边界。请让该页面进入全屏后重试。',
   'Open Workspace': '进入工作台',
   'Confirm Screen Area': '确认屏幕范围',
   'Drag the four corners to fit the phone display area.':
@@ -100,6 +154,8 @@ const calibrationZh: Record<string, string> = {
   'Confirm Area and Continue': '确认范围并继续',
   'Confirm the screen area before continuing.':
     '请先确认屏幕范围，再继续标定。',
+  'Calibrate {0}': '标定 {0}',
+  'Calibrate multiple screens': '批量标定多个屏幕',
   'Cancel Calibration': '取消本次标定',
   'Cancel Positioning': '取消位置记录',
   'Press Depth': '按压深度',
@@ -2206,7 +2262,10 @@ export const zh: Record<string, string> = {
   'Verification settings': '后续验证参数',
   'Each endpoint needs a confirmed touch. Lost contact is recovered only within a bounded range. Keep the phone and camera fixed.':
     '每个终点都需要确认触摸；丢失接触时仅在限定范围内尝试恢复。请保持手机和相机固定。',
-  'Standard probing': '标准探测',
+  Fast: '快速',
+  Regular: '普通',
+  'Confirm retry': '确认重试',
+  'Retry in regular mode?': '切换到普通模式重新采样？',
   'Fast probing': '快速探测',
   'No touch was detected before the safety height {0} mm. Sampling stopped.':
     '下降至安全高度 {0} mm 时仍未检测到触摸，采样已停止。',
@@ -2240,7 +2299,7 @@ export const zh: Record<string, string> = {
     '先测 3 个方向点，再用 4 个分布点拟合、2 个独立点验证。请保持工作区清空。',
   '{0} / {1} points recorded': '已记录 {0} / {1} 个采样点',
   'Fast calibration exhausted its local height-search budget':
-    '快速探测已用完本轮高度补探次数。请检查触控笔和支撑状态，再尝试标准探测。',
+    '快速探测已用完本轮高度补探次数。请检查触控笔和支撑状态，再尝试普通模式。',
   'No touch within the fast local recovery range':
     '当前采样点在限定高度范围内未恢复触摸，采样已停止。',
   'Contact was not sustained at height {0} mm after retry. Check the stylus and phone stability before retrying.':
@@ -2268,5 +2327,6 @@ export const zh: Record<string, string> = {
   'Speed, contact and release values for {0}. Saving does not enable or move the robot and keeps the existing calibration geometry.':
     '{0} 的速度、接触与释放参数。保存不会使能或移动机械臂，并保留已有的标定几何。',
   ...setupZh,
+  ...migratedZh,
   ...assistedCalibrationZh,
 };

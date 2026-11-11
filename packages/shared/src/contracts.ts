@@ -3,6 +3,7 @@ import {
   CALIBRATION_CLICK_RADIUS_PX,
   CALIBRATION_CLICK_REQUIRED,
 } from './assisted-contracts.js';
+import type { PerspectiveValiditySummary } from './camera/perspective-validity.js';
 /** Browser-safe public protocol. Native units and frames belong in adapters. */
 export * from './kernel/contracts.js';
 export * from './setup-contracts.js';
@@ -444,7 +445,9 @@ export interface ScreenProfile
   extends VersionedProfile,
     ScreenPhysicalSettings,
     ScreenImageSettings,
-    ScreenMotionSettings {}
+    ScreenMotionSettings {
+  visionTarget?: { cameraId: string; screenId: string };
+}
 /** Screen operations require a complete pixel mapping, unlike Profile storage. */
 export type MappedScreenProfile = ScreenProfile & {
   pixelWidth: number;
@@ -539,6 +542,7 @@ export interface CalibrationProfile extends ProfileBinding {
   plane: { normal: Vector3; offset: number };
   surface?: ScreenSurfaceCompensation;
   observationPose: CartesianPose;
+  pendingParkingBatchId?: string;
   quality: PlaneQuality;
   invalidReason?: string;
   verification?: CalibrationVerification;
@@ -554,7 +558,10 @@ export interface CalibrationVerification {
   protocol: 'web-v1' | 'auto-boundary-v1';
   web?: import('./assisted-contracts.js').WebVerificationEvidence;
   boundary?: BoundaryVerification;
-  auto?: AutoCalibrationEvidence & { humanAccepted: boolean };
+  auto?: AutoCalibrationEvidence & {
+    humanAccepted: boolean;
+    automaticAccepted?: boolean;
+  };
   hoverMotion: boolean;
   hoverHuman: boolean;
   confirmedAt: string;
@@ -567,6 +574,10 @@ export interface AutoCalibrationEvidence {
   validationRmsPx: number;
   validationMaxPx: number;
   validationMaxMm: number;
+  /** Held-out Z residual after applying local surface compensation. */
+  validationHeightMaxMm?: number;
+  /** Absolute cosine of the angle between the independently measured screen axes. */
+  axisSkewRatio?: number;
   coverage: number;
   surfaceMaxMm?: number;
   samples: {
@@ -582,7 +593,61 @@ export interface PlaneQuality {
   minorSpanMm: number;
   majorSpanMm: number;
 }
+export type InstallationTeachingPoint = 'reference' | 'cameraBoundary';
+/** Measured mounting, shared by screens on the same robot/tool/camera. */
+export interface InstallationTeaching {
+  invalidatedReason?: string;
+  id: string;
+  recordedAt: string;
+  referenceDeviceId?: string;
+  robotProfileId: string;
+  toolProfileId: string;
+  cameraId: string;
+  robotGeometryRevision: number;
+  toolGeometryRevision: number;
+  referencePose: CartesianPose;
+  poses: Record<InstallationTeachingPoint, CartesianPose>;
+  cameraBoundary: { point: ScreenPoint; normal: ScreenPoint };
+  corridorConfirmed: true;
+}
+export type CameraImageEdge = 'top' | 'right' | 'bottom' | 'left';
+export interface CameraAvoidanceEstimate {
+  direction: ScreenPoint;
+  confidence: number;
+  horizontalSkew: number;
+  verticalSkew: number;
+  source: 'installation-teaching' | 'source-image-edge' | 'perspective-quad';
+  nearImageEdge?: CameraImageEdge;
+}
+export interface InstallationTeachingDraft {
+  id: string;
+  context: string;
+  robotProfileId: string;
+  toolProfileId: string;
+  screenProfileId: string;
+  cameraId: string;
+  poses: Partial<Record<InstallationTeachingPoint, CartesianPose>>;
+}
 export interface ProfileData {
+  screenPages?: {
+    id: string;
+    pageKey: string;
+    token: string;
+    name: string;
+    cameraId?: string;
+    targetId?: string;
+  }[];
+  installationTeachingDrafts?: InstallationTeachingDraft[];
+  installationTeachings?: InstallationTeaching[];
+  screenTargets?: {
+    id: string;
+    cameraId: string;
+    name: string;
+    pageKey?: string;
+    markerSlot?: number;
+    archived?: boolean;
+  }[];
+  calibrationBatch?: import('./assisted-contracts.js').CalibrationBatchState;
   format: 'midscene.robot-arm.profiles';
   schemaVersion: 1;
   softwarePaused?: boolean;
@@ -605,6 +670,13 @@ export interface ProfileData {
     autoOutput: boolean;
     motion?: ScreenMotionSettings;
   }[];
+  calibrationMappings?: Record<
+    string,
+    {
+      geometryKey: string;
+      mapping: import('./assisted-contracts.js').WebCalibrationMapping;
+    }
+  >;
 }
 export interface WorkstationBinding extends ProfileBinding {
   revision: number;
@@ -640,7 +712,10 @@ export interface WorkstationState {
 /** Accept only the current phone-frame workflow; historical formats require recalibration. */
 export function calibrationAccepted(
   c: CalibrationProfile | undefined,
+  parkingBatchId?: string,
 ): boolean {
+  if (c?.pendingParkingBatchId && c.pendingParkingBatchId !== parkingBatchId)
+    return false;
   const v = c?.verification;
   if (v?.protocol === 'auto-boundary-v1') {
     const b = v.boundary;
@@ -653,7 +728,7 @@ export function calibrationAccepted(
         [b.hoverCorners, b.hoverEdges, b.contactCorners, b.contactEdges].every(
           (value) => value === true,
         ) &&
-        v.auto?.humanAccepted === true,
+        (v.auto?.humanAccepted === true || v.auto?.automaticAccepted === true),
     );
   }
   const web = v?.web;
@@ -790,13 +865,22 @@ export interface CurrentOperation {
   status: 'running' | 'completed' | 'cancelled' | 'stopped' | 'failed';
   error?: string;
 }
+export type RecoveryReason =
+  | 'socket-disconnect'
+  | 'manual-stop'
+  | 'emergency-stop'
+  | 'pause'
+  | 'fault'
+  | 'interruption';
 export interface RuntimeState {
+  stopRevision: number;
   aiRun?: { requestId: string };
   appliedPayload?: AppliedToolPayload;
   payloadApplication?: PayloadApplicationState;
   state: RobotState;
   operation?: CurrentOperation;
   recoveryRequired: boolean;
+  recoveryReason?: RecoveryReason;
   softwarePaused: boolean;
 }
 /** Controller initialization diagnostics; HTTP service availability is separate. */
@@ -855,12 +939,42 @@ export interface RobotActionAuditStatus {
   maxBytes: number;
 }
 /** Active verification of an already fitted phone coordinate frame. */
+export interface ScreenVisibilityEvidence {
+  clear: boolean;
+  checkedAt: string;
+  screens: Array<{
+    id: string;
+    visibleFraction: number;
+    interiorVisibleFraction?: number;
+    minimumTileFraction: number;
+  }>;
+}
+
+export type SharedParkingEvidence =
+  | ScreenVisibilityEvidence
+  | { operatorConfirmedAt: string };
+
 export interface CalibrationSession extends ProfileBinding {
   auto?: {
     evidence: AutoCalibrationEvidence;
+    deferParkingBatchId?: string;
     startPose: CartesianPose;
     fast: boolean;
     observationRecorded?: boolean;
+    cameraAvoidanceRecorded?: boolean;
+    minimumTravelTipZMm?: number;
+    avoidingCamera?: boolean;
+    checkingVisibility?: boolean;
+    cameraVisibility?: ScreenVisibilityEvidence;
+    batchParking?: {
+      pose?: CartesianPose;
+      obstacles: Array<Array<Pick<Vector3, 'x' | 'y'>>>;
+      estimatedObstacles?: Array<Array<Pick<Vector3, 'x' | 'y'>>>;
+      complete: boolean;
+      corridor?: NonNullable<
+        import('./assisted-contracts.js').CalibrationBatchPlan['transfer']
+      >['corridor'];
+    };
   };
   verificationRuns?: Array<{
     group: 'hover' | 'contact';
@@ -929,6 +1043,8 @@ export interface VisionBinding {
   fingerprint: string;
   width: number;
   height: number;
+  /** Observed evidence; deliberately excluded from mapping identity. */
+  validity?: PerspectiveValiditySummary;
 }
 export interface VisionSnapshot {
   base64: string;
@@ -1031,3 +1147,4 @@ export interface ControllerMotionSettingsUpdate {
 
 // Browser consumers use these types without loading Node camera backends.
 export type { CameraProfile, CameraCorrection } from './camera/profile.js';
+export type * from './camera/perspective-validity.js';

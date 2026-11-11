@@ -8,30 +8,62 @@ import type {
   AssistedCalibrationSetup,
   AssistedCalibrationState,
   AssistedMappingInput,
+  AutomaticCaptureHost,
+  AutomaticExplorationMode,
   CalibrationPageReply,
   CalibrationPageUpdate,
   CalibrationPhoneStatus,
   WebVerificationResult,
 } from '../assisted-contracts.js';
+import { mappingQualityWarnings } from '../assisted-contracts.js';
 import {
   type CalibrationCommand,
   type CalibrationProfile,
   type CartesianPose,
   RobotArmError,
+  isRobotArmError,
   semanticJson,
 } from '../contracts.js';
-import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
+import {
+  add,
+  assertPose,
+  contactPoint,
+  distance,
+  rotate,
+  scale,
+  unit,
+} from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
+import { verifyScreenVisibility } from './camera/visibility.js';
 import type { CalibrationVision } from './camera/vision.js';
 import { AutomaticCapture } from './exploration/capture.js';
 import { fitExploration } from './exploration/fit.js';
+import { explorationQualityWarnings } from './exploration/quality.js';
 import { invertMapping, pointDistance, project } from './phone/geometry.js';
 import { CalibrationPhoneSession, sameLayout } from './phone/session.js';
+import { knownScreenTravelHeight, pageOrderedQuad } from './screen-position.js';
 import { CalibrationSetup, calibrationGeometryKey } from './setup.js';
+import { SAMPLED_SURFACE_LIMIT_MM } from './surface.js';
+import { moveToTaughtPosition } from './taught-position.js';
 import { assertSafeObservation } from './verification/safe-position.js';
 
 const log = getDebug('robot-arm:web-calibration', { console: true });
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// Only feedback and data-quality failures permit motion after a measured probe.
+const recoverableSamplingErrors = new Set([
+  'AUTOMATIC_CAPTURE_FAILED',
+  'CALIBRATION_QUALITY',
+  'DUPLICATE_SAMPLE',
+  'FAST_ADAPTATION_LIMIT',
+  'SCREEN_TILT_UNSUPPORTED',
+  'TOUCH_AMBIGUOUS',
+  'TOUCH_CONTACT_LOST',
+  'TOUCH_NOT_FOUND',
+  'TOUCH_NOT_RELEASED',
+  'TOUCH_RELEASE_NOT_FOUND',
+  'TOUCH_SAFETY_LIMIT',
+]);
+
 type Fit = Pick<
   CalibrationProfile,
   | 'kind'
@@ -57,7 +89,10 @@ type SessionState = Omit<
 export interface AssistedCalibrationOptions {
   deviceId?: string;
   vision: CalibrationVision;
+  onPhoneObservation?: (update?: CalibrationPageUpdate) => void;
   phoneLinks?: () => { name: string; url: string }[];
+  referencePosition?: () => CartesianPose | undefined;
+  markerCodes?: readonly number[];
 }
 
 /** Coordinates an explicit calibration task; setup and phone requests have independent lifetimes. */
@@ -81,6 +116,7 @@ export class CalibrationWorkflow {
     // A keepalive cannot substitute for a fresh observation during motion.
     if (!this.measuring()) this.phone.lastSeen = Date.now();
     if (this.state?.calibration) this.changed();
+    void this.recoverSamplingSocket();
   }
   private measuring() {
     return (
@@ -88,8 +124,11 @@ export class CalibrationWorkflow {
       ['collecting', 'reprobing', 'verifying'].includes(this.state.stage)
     );
   }
-  disconnectPhone() {
+  disconnectPhone(transportLost = true) {
+    if (!transportLost) this.socketRecovery = undefined;
+    else if (this.socketRecovery) this.socketRecovery.awaitingClose = false;
     this.phone.lastSeen = 0;
+    this.options.onPhoneObservation?.();
     if (
       this.measuring() ||
       this.state?.stage === 'safety' ||
@@ -98,6 +137,8 @@ export class CalibrationWorkflow {
       this.retryVerification = this.state?.stage !== 'collecting';
       this.interrupt(
         'Phone disconnected during calibration. Restart this step.',
+        undefined,
+        transportLost ? 'phone' : undefined,
       );
     }
     this.changed();
@@ -105,7 +146,7 @@ export class CalibrationWorkflow {
   private readonly phoneLinks: () => { name: string; url: string }[];
   private state?: SessionState;
   private input?: AssistedCalibrationInput;
-  private readonly phone = new CalibrationPhoneSession();
+  private readonly phone: CalibrationPhoneSession;
   private capture?: Promise<void>;
   private captureOperationId?: string;
   private verification?: Promise<void>;
@@ -115,11 +156,50 @@ export class CalibrationWorkflow {
   private fittedGeometry?: Fit;
   private persistedCalibrationId?: string;
   private deviceRevision = 0;
+  private attemptRevision = 0;
+  private assertAttempt(revision: number) {
+    if (this.attemptRevision !== revision)
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'Calibration attempt was cancelled',
+        409,
+      );
+  }
+  /** A new Device lease keeps the phone and optical setup, but owns fresh samples. */
+  resetAttempt() {
+    if (
+      this.activeAction ||
+      this.capture ||
+      this.verification ||
+      this.ownsOperation()
+    )
+      throw new RobotArmError(
+        'BUSY',
+        'Previous calibration is still stopping',
+        409,
+      );
+    this.attemptRevision++;
+    this.socketRecovery = undefined;
+    this.state = undefined;
+    this.measurements = undefined;
+    this.fittedGeometry = undefined;
+    this.automaticEvidence = undefined;
+    this.persistedCalibrationId = undefined;
+    this.captureOperationId = undefined;
+    this.receipt = undefined;
+    this.receivingTarget = undefined;
+    this.batchTravelTipZMm = undefined;
+    this.batchParking = undefined;
+    this.phoneHome = false;
+    this.changed();
+  }
   recording() {
     if (!this.measurements)
       throw new RobotArmError('INVALID_STAGE', 'No points have been collected');
     return {
+      deviceId: this.options.deviceId,
       calibrationProfileId: this.persistedCalibrationId,
+      explorationMode: this.state!.explorationMode,
       points: this.measurements.snapshot().points,
       input: structuredClone(this.input!),
       mapping: structuredClone(this.state!.mapping!),
@@ -144,7 +224,7 @@ export class CalibrationWorkflow {
         409,
       );
     if (
-      this.actionBusy ||
+      this.activeAction ||
       this.capture ||
       this.verification ||
       this.runtime.current()?.status === 'running'
@@ -154,18 +234,27 @@ export class CalibrationWorkflow {
         'Finish the current operation before restoring points',
         409,
       );
+    if (recording?.deviceId !== this.options.deviceId)
+      throw new RobotArmError(
+        'PROFILE_MISMATCH',
+        'Collected points belong to a different screen',
+        409,
+      );
+    const gridCount = recording?.points?.length === 9 ? 6 : 9;
+    const checkCount = gridCount === 6 ? 2 : 3;
     if (
       !recording ||
       !(
         recording.points?.length === 14 ||
-        (recording.points?.length === 12 &&
+        (recording.points?.length === gridCount + 3 &&
           recording.points
             .slice(0, 3)
             .every((p) => p.purpose === 'direction') &&
           recording.points.slice(3).filter((p) => p.purpose === 'check')
-            .length === 3 &&
+            .length === checkCount &&
           recording.points.slice(3).filter((p) => p.purpose === 'fit')
-            .length === 6)
+            .length ===
+            gridCount - checkCount)
       ) ||
       !recording.referencePosition ||
       !recording.mapping
@@ -184,10 +273,13 @@ export class CalibrationWorkflow {
         409,
       );
     assertPose(recording.referencePosition);
-    this.actionBusy = true;
+    const revision = this.attemptRevision;
+    this.beginAction();
     try {
       await this.configuration.restore(recording.input, recording.mapping);
+      this.assertAttempt(revision);
       this.beginTask(recording.mapping, recording.referencePosition);
+      this.state!.explorationMode = recording.explorationMode;
       const tool = this.runtime.profileStore.getTool(
         recording.input.toolProfileId,
       );
@@ -195,8 +287,9 @@ export class CalibrationWorkflow {
         recording.mapping.layout,
         tool.offsetMm,
         this.changed,
+        recording.explorationMode,
       );
-      const directions = recording.points.length - 9;
+      const directions = recording.points.length - gridCount;
       measurements.localPoints.push(
         ...structuredClone(recording.points.slice(0, directions)),
       );
@@ -278,7 +371,6 @@ export class CalibrationWorkflow {
           this.input!.motion!.safeHeightMm,
         );
         this.state!.fitResidualsMm = this.fittedGeometry.fitResidualsMm;
-        this.state!.stage = 'return-ready';
       } else this.fitMeasurements();
       if (recording.safePosition) {
         assertPose(recording.safePosition);
@@ -289,6 +381,14 @@ export class CalibrationWorkflow {
           this.input!.motion!.safeHeightMm,
         );
         this.state!.safePosition = structuredClone(recording.safePosition);
+      }
+      if (this.state!.explorationQuality?.warnings?.length) {
+        this.captureStopRevision = this.runtime.stopRevision;
+        this.state!.stage = 'boundary-review';
+        return this.status()!;
+      }
+      this.state!.stage = 'return-ready';
+      if (recording.safePosition) {
         this.state!.stage = 'returning';
         // Restore measured geometry, but never replay movement or old verification.
         await this.adopt(this.fittedGeometry!, recording.safePosition, false);
@@ -302,25 +402,44 @@ export class CalibrationWorkflow {
       if (this.state) this.interrupt(errorText(error));
       throw error;
     } finally {
-      this.actionBusy = false;
+      this.endAction();
       this.changed();
     }
   }
+  private acceptingAutomatically = false;
   private retryVerification = false;
   private receipt?: WebVerificationResult;
   private receivingTarget?: string;
-  private actionBusy = false;
+  private activeAction?: Promise<void>;
+  private resolveAction?: () => void;
+  private beginAction() {
+    this.activeAction = new Promise<void>((resolve) => {
+      this.resolveAction = resolve;
+    });
+  }
+  private endAction() {
+    this.resolveAction?.();
+    this.resolveAction = undefined;
+    this.activeAction = undefined;
+  }
   private geometryKey?: string;
   constructor(
     private readonly runtime: RobotArmRuntime,
     private readonly options: AssistedCalibrationOptions,
   ) {
+    this.phone = new CalibrationPhoneSession(options.markerCodes);
     this.phoneLinks = options.phoneLinks ?? (() => []);
     this.configuration = new CalibrationSetup(
       runtime,
       this.phone,
       options.vision,
+      options.deviceId,
     );
+  }
+  private displayStage(s: SessionState) {
+    return s.stage === 'safety' && s.calibration?.auto?.avoidingCamera
+      ? 'avoiding-camera'
+      : s.stage;
   }
   status(): AssistedCalibrationState | null {
     if (!this.state) return null;
@@ -330,9 +449,11 @@ export class CalibrationWorkflow {
       s.calibration = this.runtime.getSession(s.calibration.id);
       if (
         ['interrupted', 'cancelled'].includes(s.calibration.status ?? '') &&
-        !['completed', 'cancelled'].includes(s.stage)
+        !['completed', 'cancelled', 'interrupted'].includes(s.stage)
       ) {
         if (s.autoRepair) s.autoRepair.active = false;
+        s.interruptedFrom = this.displayStage(s);
+        s.collectionFailed = s.stage === 'collecting';
         s.stage = 'interrupted';
         s.error ??=
           'Calibration was interrupted. Restart calibration here when ready.';
@@ -345,6 +466,11 @@ export class CalibrationWorkflow {
         anchors: [],
         points: [],
       }),
+      stage: this.displayStage(s),
+      awaitingSocketRecovery:
+        this.socketRecovery?.session === s &&
+        this.socketRecovery.stopRevision === this.runtime.stopRevision &&
+        this.runtime.recoveryReason === 'socket-disconnect',
       phoneConnected: this.phone?.connected() ?? false,
       layout: s.mapping?.layout ?? this.phone?.update?.layout,
     });
@@ -366,10 +492,13 @@ export class CalibrationWorkflow {
     const model = this.phone.update?.model;
     return {
       state: this.phone.presence(),
+      displayRequirement: this.phone.update && this.phone.displayRequirement(),
       diagnostics: this.phone.update && {
         version: this.phone.update.touchDiagnosticsVersion,
+        wakeState: this.phone.update.wakeState,
+        fullscreen: this.phone.update.fullscreen,
         pageId: this.phone.update.pageId,
-        receivedAt: this.phone.lastSeen,
+        receivedAt: this.phone.lastUpdateAt,
         updateSequence: this.phone.update.sequence,
         contact: Boolean(this.phone.update.contact),
         feedback: this.phone.update.stepFeedback,
@@ -389,14 +518,23 @@ export class CalibrationWorkflow {
     const reloaded = this.phone.receive(update);
     this.changed();
     const input = this.phone.update!;
+    this.options.onPhoneObservation?.(
+      this.phone.connected() ? input : undefined,
+    );
     const s = this.state;
-    if (!s || s.stage === 'cancelled') return { view: 'markers', anchors: [] };
+    if (!s || s.stage === 'cancelled') return this.phoneView();
     if (reloaded) {
       this.measurements?.resetStability();
     }
     if (
       reloaded &&
-      ['collecting', 'reprobing', 'safety', 'verifying'].includes(s.stage)
+      [
+        'collecting',
+        'reprobing',
+        'safety',
+        'verifying',
+        'boundary-review',
+      ].includes(s.stage)
     ) {
       this.retryVerification = s.stage !== 'collecting';
       this.interrupt(
@@ -412,6 +550,7 @@ export class CalibrationWorkflow {
         'collecting',
         'reprobing',
         'capture-failed',
+        'boundary-review',
         'verifying',
         'safety',
         'returning',
@@ -421,7 +560,7 @@ export class CalibrationWorkflow {
         'The phone layout changed. Check camera mapping before restarting here.',
       );
     if (
-      !input.visible &&
+      (!input.visible || this.phone.displayRequirement()) &&
       ['collecting', 'reprobing', 'verifying', 'safety', 'returning'].includes(
         s.stage,
       )
@@ -454,17 +593,116 @@ export class CalibrationWorkflow {
         };
       }
     }
+    void this.recoverSamplingSocket();
     return this.phoneView();
   }
+  private markerRequest?: string;
+  private aligned = false;
+  private insetMarkers = false;
+
+  requestMarkerDisplay(reposition = false) {
+    if (reposition) this.insetMarkers = !this.insetMarkers;
+    this.phoneHome = false;
+    this.markerRequest = randomUUID();
+    this.aligned = false;
+    this.changed();
+    return this.markerRequest;
+  }
+  markerObservation(request: string) {
+    const update = this.phone.update;
+    if (
+      this.phone.connected() &&
+      update?.markersPainted &&
+      update.markerRequest === request &&
+      this.markerRequest === request &&
+      this.phoneView().view === 'markers'
+    )
+      return update;
+  }
+  finishMarkerDisplay(request: string, aligned: boolean) {
+    if (this.markerRequest !== request) return;
+    this.markerRequest = undefined;
+    this.aligned = aligned;
+    this.changed();
+  }
+  private phoneHome = false;
+  restorePhoneHome() {
+    this.phoneHome = true;
+    this.changed();
+  }
+  resumePhonePage() {
+    this.phoneHome = false;
+    this.changed();
+  }
+  private visibilityProbe?: CalibrationPageReply['visibilityProbe'];
+  private visibilityContext?: CalibrationPageUpdate;
+  showVisibilityProbe(phase: 0 | 1) {
+    if (this.visibilityProbe)
+      throw new RobotArmError(
+        'BUSY',
+        'A screen visibility check is already active',
+        409,
+      );
+    if (this.phone.presence() !== 'connected') this.phone.assertConnected();
+    this.visibilityContext = structuredClone(this.phone.update!);
+    const id = randomUUID();
+    this.visibilityProbe = { id, phase };
+    this.options.onPhoneObservation?.(undefined);
+    this.changed();
+    return id;
+  }
+  visibilityObservation(id: string) {
+    const update = this.phone.update;
+    return this.visibilityProbe?.id === id &&
+      this.phone.connected() &&
+      update &&
+      this.visibilityContext &&
+      update?.pageId === this.visibilityContext?.pageId &&
+      update?.browserInstanceId === this.visibilityContext?.browserInstanceId &&
+      (this.visibilityContext.displayMode === 'browser' ||
+        sameLayout(update.layout, this.visibilityContext.layout)) &&
+      update?.visibilityProbeAck === id
+      ? update
+      : undefined;
+  }
+  clearVisibilityProbe(id: string) {
+    if (this.visibilityProbe?.id !== id) return;
+    this.visibilityProbe = undefined;
+    this.visibilityContext = undefined;
+    this.changed();
+  }
   phoneView(): CalibrationPageReply {
+    const view = this.normalPhoneView();
+    return this.visibilityProbe
+      ? { ...view, visibilityProbe: this.visibilityProbe }
+      : view;
+  }
+  private normalPhoneView(): CalibrationPageReply {
+    if (this.phoneHome) return { view: 'waiting', anchors: [] };
     const s = this.state;
-    if (!s || s.stage === 'cancelled') return { view: 'markers', anchors: [] };
+    if (
+      !s ||
+      s.stage === 'cancelled' ||
+      s.stage === 'ready' ||
+      (this.markerRequest && ['completed', 'interrupted'].includes(s.stage))
+    )
+      return {
+        view: this.aligned ? 'touch-preview' : 'markers',
+        markerRequest: this.markerRequest,
+        insetMarkers: this.insetMarkers,
+        anchors: [],
+      };
     const progress =
       s.stage === 'safety' && s.calibration
         ? this.runtime.getSession(s.calibration.id).progress
         : undefined;
     const imageToWeb = progress?.guide && invertMapping(s.mapping!.webToImage);
+    const measurements = this.measurements?.snapshot();
+    const stage = s.stage;
+    const needsReview =
+      stage === 'boundary-review' || stage === 'verification-failed';
     return {
+      reviewStage: needsReview ? stage : undefined,
       boundaryGuide:
         progress?.guide && imageToWeb
           ? {
@@ -477,25 +715,29 @@ export class CalibrationWorkflow {
               ),
             }
           : undefined,
-      view:
-        s.stage === 'positioning-safe'
-          ? 'return-ready'
-          : s.stage === 'ready'
-            ? 'markers'
-            : s.stage === 'verification-failed'
-              ? 'review'
-              : s.stage === 'collecting' || s.stage === 'reprobing'
+      view: needsReview
+        ? 'review'
+        : stage === 'positioning-boundary'
+          ? 'positioning'
+          : stage === 'avoiding-camera'
+            ? 'safety'
+            : stage === 'positioning-safe'
+              ? 'return-ready'
+              : stage === 'collecting' || stage === 'reprobing'
                 ? 'collect'
-                : s.stage === 'verifying'
+                : stage === 'verifying'
                   ? 'verify'
-                  : s.stage,
+                  : stage,
       imageTrial: Boolean(s.imageTrial && s.stage === 'verifying'),
-      capture: ['collecting', 'reprobing', 'interrupted'].includes(s.stage)
-        ? this.measurements?.snapshot().capture
-        : undefined,
-      automaticPhase: this.measurements?.snapshot().automaticPhase,
+      capture:
+        s.stage === 'collecting' ||
+        s.stage === 'reprobing' ||
+        (s.stage === 'interrupted' && s.collectionFailed)
+          ? measurements?.capture
+          : undefined,
+      automaticPhase: measurements?.automaticPhase,
       error: s.error,
-      anchors: this.measurements?.snapshot().anchors ?? [],
+      anchors: measurements?.anchors ?? [],
       target: s.target,
     };
   }
@@ -517,10 +759,12 @@ export class CalibrationWorkflow {
       error: message,
       errorDetails: s.errorDetails,
       detail: structuredClone({
+        deviceId: this.options.deviceId,
         stage: s.stage,
         explorationMode: s.explorationMode,
         phoneConnected: this.phone.connected(),
         phoneDiagnostics: this.phoneStatus().diagnostics,
+        phoneObservations: this.measurements?.phoneObservations,
         capture: snapshot?.capture,
         points: snapshot?.points,
         verificationAttempts: s.verificationAttempts,
@@ -528,7 +772,107 @@ export class CalibrationWorkflow {
       }),
     });
   }
-  private interrupt(message: string, cause?: unknown) {
+  private captureStopRevision?: number;
+  private socketRecovery?: {
+    session: SessionState;
+    operationId: string;
+    stopRevision: number;
+    phone: CalibrationPageUpdate;
+    waitForPhoneUpdate: boolean;
+    awaitingClose: boolean;
+    retryAfter: number;
+  };
+  private async recoverSamplingSocket() {
+    const pending = this.socketRecovery;
+    if (!pending || !this.phone.update) return;
+    const s = pending.session;
+    const phone = this.phone.update!;
+    if (
+      (phone.browserInstanceId ?? phone.pageId) !==
+        (pending.phone.browserInstanceId ?? pending.phone.pageId) ||
+      this.state !== s ||
+      s.stage !== 'interrupted' ||
+      this.runtime.stopRevision !== pending.stopRevision ||
+      !s.mapping ||
+      !sameLayout(s.mapping.layout, phone.layout)
+    ) {
+      this.socketRecovery = undefined;
+      return;
+    }
+    // A missing measurement alone can be a suspended page on a healthy socket.
+    if (pending.awaitingClose) {
+      if (phone === pending.phone) return;
+      if (phone.pageId === pending.phone.pageId) {
+        this.socketRecovery = undefined;
+        return;
+      }
+    }
+    if (
+      this.activeAction ||
+      this.capture ||
+      this.verification ||
+      !this.phone.connected() ||
+      Date.now() < pending.retryAfter ||
+      (pending.waitForPhoneUpdate && phone === pending.phone)
+    )
+      return;
+    const revision = this.attemptRevision;
+    const guard = () => {
+      this.assertAttempt(revision);
+      this.runtime.assertStopRevision(pending.stopRevision);
+      const current = this.phone.assertConnected();
+      if (
+        this.socketRecovery !== pending ||
+        this.state !== s ||
+        s.stage !== 'interrupted' ||
+        (current.browserInstanceId ?? current.pageId) !==
+          (phone.browserInstanceId ?? phone.pageId) ||
+        !s.mapping ||
+        !sameLayout(s.mapping.layout, current.layout) ||
+        this.currentGeometryKey() !== this.geometryKey
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Calibration context changed during recovery',
+          409,
+        );
+    };
+    this.beginAction();
+    try {
+      const mapping = await this.configuration.assertCurrent();
+      guard();
+      await this.runtime.recoverSamplingSocket(
+        pending.operationId,
+        pending.stopRevision,
+        guard,
+      );
+      guard();
+      this.beginTask(mapping, s.referencePosition, s.safePosition);
+      this.state!.teachingId = s.teachingId;
+      this.state!.cameraBoundaryPosition = s.cameraBoundaryPosition;
+    } catch (error) {
+      if (
+        isRobotArmError(error) &&
+        ['DISCONNECTED', 'BUSY', 'STATE_STALE', 'PHONE_DISCONNECTED'].includes(
+          error.code,
+        )
+      )
+        pending.retryAfter = Date.now() + 1000;
+      else {
+        this.socketRecovery = undefined;
+        if (this.state === s && s.stage === 'interrupted')
+          s.error = errorText(error);
+      }
+    } finally {
+      this.endAction();
+      this.changed();
+    }
+  }
+  private interrupt(
+    message: string,
+    cause?: unknown,
+    lostSocket?: 'phone' | 'phone-timeout' | 'controller',
+  ) {
     this.state!.errorDetails =
       cause instanceof RobotArmError
         ? { code: cause.code, status: cause.status, details: cause.details }
@@ -537,29 +881,115 @@ export class CalibrationWorkflow {
     const s = this.state!;
     const owned = this.ownsOperation();
     if (s.autoRepair) s.autoRepair.active = false;
+    if (s.stage !== 'interrupted') {
+      s.interruptedFrom = this.displayStage(s);
+      s.collectionFailed = s.stage === 'collecting';
+    }
+    const socketOnly =
+      s.collectionFailed &&
+      this.batchAttempt !== s.id &&
+      lostSocket &&
+      this.captureStopRevision === this.runtime.stopRevision;
+    this.socketRecovery = undefined;
     s.stage = 'interrupted';
     this.changed();
     s.error = message;
     s.target = undefined;
     if (owned)
       void this.runtime
-        .stop()
+        .stopCalibrationOperation(Boolean(socketOnly))
         .catch((e) => log('Failed to stop interrupted calibration:', e));
+    if (socketOnly && this.phone.update && this.captureOperationId) {
+      this.socketRecovery = {
+        session: s,
+        operationId: this.captureOperationId,
+        stopRevision: this.runtime.stopRevision,
+        phone: this.phone.update,
+        waitForPhoneUpdate: lostSocket !== 'controller',
+        awaitingClose: lostSocket === 'phone-timeout',
+        retryAfter: 0,
+      };
+    }
+  }
+  private markerCapture?: AssistedCalibrationSetup['markerCapture'];
+  private mappingCheck?: AssistedCalibrationSetup['mappingCheck'];
+  setMarkerCapture(value?: AssistedCalibrationSetup['markerCapture']) {
+    this.markerCapture = value;
+    this.changed();
   }
   setup(): AssistedCalibrationSetup {
-    return this.configuration.status();
+    return {
+      ...this.configuration.status(),
+      markerCapture: this.markerCapture,
+      mappingCheck: this.mappingCheck,
+    };
   }
   async prepare(input: AssistedCalibrationInput) {
-    return this.configureSetup(() => this.configuration.prepare(input));
+    return this.configureSetup(() => {
+      this.mappingCheck = undefined;
+      return this.configuration.prepare(input);
+    });
   }
   async mapSetup(output?: AssistedMappingInput) {
-    return this.configureSetup(() => this.configuration.map(output));
+    return this.configureSetup(async () => {
+      let request: string | undefined;
+      let mapped = false;
+      this.mappingCheck = 'checking';
+      this.changed();
+      try {
+        const result = await this.configuration.map(output, async () => {
+          // An unchanged mapping can be confirmed while the touch preview is open.
+          // A fresh optical check needs the phone to paint the codes again.
+          const view = this.phoneView().view;
+          let expected = this.markerRequest;
+          if (!expected) {
+            const page = this.phone.update;
+            if (
+              view !== 'touch-preview' &&
+              !(
+                view === 'markers' &&
+                (page?.markersPainted === false ||
+                  page?.markerRequest !== undefined)
+              )
+            )
+              return;
+            request = this.requestMarkerDisplay();
+            expected = request;
+          }
+          const deadline = Date.now() + 12000;
+          while (!this.markerObservation(expected)) {
+            if (this.markerRequest !== expected || Date.now() >= deadline)
+              throw new RobotArmError(
+                'PAGE_CHANGED',
+                'The phone did not report visible screen markers. Keep the paired page in the foreground.',
+                409,
+              );
+            this.phone.assertAvailable();
+            await delay(80);
+          }
+        });
+        mapped = Boolean(result.mapping);
+        if (!this.markerRequest && this.phone.update?.markersPainted && mapped)
+          this.aligned = true;
+        return result;
+      } finally {
+        this.mappingCheck = mapped ? 'confirmed' : 'failed';
+        if (request) this.finishMarkerDisplay(request, mapped);
+      }
+    });
+  }
+  /** The camera correction was cleared, so the page mapping no longer holds. */
+  async clearMapping() {
+    return this.configureSetup(() => {
+      this.mappingCheck = undefined;
+      return this.configuration.clearMapping();
+    });
   }
   private async configureSetup(
     work: () => AssistedCalibrationSetup | Promise<AssistedCalibrationSetup>,
   ) {
     if (
-      this.actionBusy ||
+      this.activeAction ||
       this.capture ||
       this.verification ||
       this.ownsOperation()
@@ -577,7 +1007,7 @@ export class CalibrationWorkflow {
         this.configuration.status().mapping,
       ]);
     const previous = configurationKey();
-    this.actionBusy = true;
+    this.beginAction();
     try {
       const result = await work();
       // UI entry can check the same setup more than once. Preserve measured
@@ -600,13 +1030,16 @@ export class CalibrationWorkflow {
       this.measurements = undefined;
       throw error;
     } finally {
-      this.actionBusy = false;
+      this.endAction();
       this.changed();
     }
   }
-  async create(): Promise<AssistedCalibrationState> {
+  private batchAttempt?: string;
+  async create(
+    options: { batch?: boolean } = {},
+  ): Promise<AssistedCalibrationState> {
     if (
-      this.actionBusy ||
+      this.activeAction ||
       this.capture ||
       this.verification ||
       this.ownsOperation()
@@ -616,13 +1049,30 @@ export class CalibrationWorkflow {
         'Finish the current calibration operation first',
         409,
       );
-    this.actionBusy = true;
+    const revision = this.attemptRevision;
+    this.beginAction();
     try {
       const mapping = await this.configuration.assertCurrent();
+      this.assertAttempt(revision);
       this.beginTask(mapping);
+      this.batchAttempt = options.batch ? this.state!.id : undefined;
+      const teaching = this.runtime.profileStore.installationTeaching(
+        this.input!,
+      );
+      if (teaching) {
+        this.state!.referencePosition =
+          !teaching.referenceDeviceId ||
+          teaching.referenceDeviceId === this.options.deviceId
+            ? teaching.referencePose
+            : undefined;
+        this.state!.cameraBoundaryPosition = teaching.poses.cameraBoundary;
+        this.state!.teachingId = teaching.id;
+        this.state!.referencePosition =
+          this.options.referencePosition?.() ?? this.state!.referencePosition;
+      }
       return this.status()!;
     } finally {
-      this.actionBusy = false;
+      this.endAction();
       this.changed();
     }
   }
@@ -631,7 +1081,11 @@ export class CalibrationWorkflow {
     referencePosition?: CartesianPose,
     safePosition?: CartesianPose,
   ) {
+    this.socketRecovery = undefined;
+    this.phoneHome = false;
     this.retryVerification = false;
+    this.receipt = undefined;
+    this.receivingTarget = undefined;
     this.deviceRevision = this.options.deviceId
       ? (this.runtime.profileStore.deviceBinding(this.options.deviceId)
           ?.revision ?? 0)
@@ -658,13 +1112,30 @@ export class CalibrationWorkflow {
   }
   private async assertMechanicalFrame(requirePhone = false) {
     const s = this.require();
+    const stage = s.stage;
+    const stopRevision = this.runtime.stopRevision;
+    await this.options.vision.assertPerspectiveCurrent?.();
+    if (
+      this.state !== s ||
+      s.stage !== stage ||
+      stopRevision !== this.runtime.stopRevision
+    )
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'Calibration changed or stopped during outline verification',
+        409,
+      );
     if (requirePhone) this.phone.assertConnected();
     if (
       !s.mapping ||
-      (requirePhone &&
-        !sameLayout(s.mapping.layout, this.phone.update!.layout)) ||
-      this.geometryKey !== this.currentGeometryKey()
+      (requirePhone && !sameLayout(s.mapping.layout, this.phone.update!.layout))
     )
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Check camera mapping before starting calibration',
+        409,
+      );
+    if (this.geometryKey !== this.currentGeometryKey())
       throw new RobotArmError(
         'CALIBRATION_INVALID',
         'Phone layout, robot or tool changed. Check the affected configuration and restart here.',
@@ -681,18 +1152,22 @@ export class CalibrationWorkflow {
       action === 'restart' && this.state?.id === id
         ? this.state
         : this.require(id);
-    if (this.actionBusy)
+    // Cancellation must preempt a pending read/verification instead of waiting
+    // behind the normal command gate and allowing that command to start motion.
+    const revision = this.attemptRevision;
+    if (action === 'cancel') {
+      this.attemptRevision++;
+      if (s.stage !== 'completed') await this.cancel();
+      return this.status()!;
+    }
+    if (this.activeAction)
       throw new RobotArmError(
         'BUSY',
         'Another calibration command is running',
         409,
       );
-    this.actionBusy = true;
+    this.beginAction();
     try {
-      if (action === 'cancel') {
-        await this.cancel();
-        return this.status()!;
-      }
       if (
         ['auto-repair', 'reprobe', 'apply-reprobe', 'verify'].includes(action)
       )
@@ -701,9 +1176,38 @@ export class CalibrationWorkflow {
           'Use automatic boundary verification and confirm the calibration result',
           409,
         );
-      if (action === 'restart') {
+      if (
+        action !== 'stop-capture' &&
+        this.phone.presence() === 'connected' &&
+        this.phone.displayRequirement()
+      )
+        throw new RobotArmError(
+          'PHONE_UNAVAILABLE',
+          'Enter the required phone display mode first',
+          409,
+        );
+      if (action === 'restart' || action === 'retry-standard') {
         if (
-          !['interrupted', 'cancelled', 'ready'].includes(s.stage) ||
+          action === 'retry-standard' &&
+          !(
+            s.stage === 'interrupted' &&
+            s.collectionFailed &&
+            s.explorationMode === 'slide'
+          )
+        )
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'No failed sliding collection to retry',
+            409,
+          );
+        if (
+          ![
+            'interrupted',
+            'cancelled',
+            'capture-failed',
+            'ready',
+            'boundary-review',
+          ].includes(s.stage) ||
           !confirmed
         )
           throw new RobotArmError(
@@ -712,13 +1216,127 @@ export class CalibrationWorkflow {
             409,
           );
         const mapping = await this.configuration.assertCurrent();
+        this.assertAttempt(revision);
         const sameGeometry = this.geometryKey === this.currentGeometryKey();
         const referencePosition = sameGeometry
           ? s.referencePosition
           : undefined;
         const safePosition = sameGeometry ? s.safePosition : undefined;
-        await this.cancel();
+        await this.stopPendingWork();
+        this.assertAttempt(revision);
+        const teachingId = sameGeometry ? s.teachingId : undefined;
+        const cameraBoundaryPosition = sameGeometry
+          ? s.cameraBoundaryPosition
+          : undefined;
         this.beginTask(mapping, referencePosition, safePosition);
+        this.state!.teachingId = teachingId;
+        this.state!.cameraBoundaryPosition = cameraBoundaryPosition;
+        if (action === 'retry-standard')
+          await this.startCollection(this.state!, 'standard', true, confirmed);
+      } else if (action === 'position-boundary') {
+        if (
+          !confirmed ||
+          s.stage !== 'ready' ||
+          !s.referencePosition ||
+          this.capture
+        )
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'Record the reference position first',
+            409,
+          );
+        await this.assertMechanicalFrame();
+        this.recordPositionRequested = false;
+        s.cameraBoundaryPosition = undefined;
+        s.teachingId = undefined;
+        s.stage = 'positioning-boundary';
+        this.capture = this.recordPosition(false, true)
+          .catch((e) => {
+            if (s.stage === 'positioning-boundary') s.stage = 'ready';
+            s.error = errorText(e);
+          })
+          .finally(() => {
+            this.capture = undefined;
+            this.changed();
+          });
+      } else if (action === 'record-boundary') {
+        if (!confirmed || s.stage !== 'positioning-boundary' || !this.capture)
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'Position the arm at the camera-side boundary first',
+            409,
+          );
+        this.recordPositionRequested = true;
+        await this.capture;
+        if (!s.cameraBoundaryPosition)
+          throw new RobotArmError(
+            'NOT_READY',
+            s.error ?? 'Boundary was not recorded',
+            409,
+          );
+      } else if (action === 'save-teaching') {
+        if (
+          !confirmed ||
+          s.stage !== 'ready' ||
+          !s.referencePosition ||
+          !s.cameraBoundaryPosition ||
+          this.capture
+        )
+          throw new RobotArmError(
+            'CONFIRMATION_REQUIRED',
+            'Record both positions and confirm the clear arm corridor',
+            409,
+          );
+        await this.assertMechanicalFrame();
+        const tool = this.runtime.profileStore.getTool(
+          this.input!.toolProfileId,
+        );
+        const reference = s.referencePosition;
+        const boundary = s.cameraBoundaryPosition;
+        const a = contactPoint(reference, tool.offsetMm);
+        const b = contactPoint(boundary, tool.offsetMm);
+        const separation = Math.hypot(b.x - a.x, b.y - a.y);
+        if (separation < 20)
+          throw new RobotArmError(
+            'INVALID_ARGUMENT',
+            'Record the camera-side boundary at least 20 mm from the reference',
+          );
+        if (
+          distance(
+            unit(rotate(reference.orientation, tool.contactDirection)),
+            unit(rotate(boundary.orientation, tool.contactDirection)),
+          ) > 0.005
+        )
+          throw new RobotArmError(
+            'INVALID_ARGUMENT',
+            'Keep the stylus contact direction unchanged',
+          );
+        const teaching = {
+          id: randomUUID(),
+          recordedAt: new Date().toISOString(),
+          referenceDeviceId: this.options.deviceId,
+          robotProfileId: this.input!.robotProfileId,
+          toolProfileId: tool.id,
+          cameraId: this.input!.cameraId,
+          robotGeometryRevision: this.runtime.profileStore.getRobot(
+            this.input!.robotProfileId,
+          ).geometryRevision,
+          toolGeometryRevision: tool.geometryRevision,
+          referencePose: reference,
+          poses: { reference, cameraBoundary: boundary },
+          cameraBoundary: {
+            point: { x: b.x, y: b.y },
+            normal: {
+              x: (b.x - a.x) / separation,
+              y: (b.y - a.y) / separation,
+            },
+          },
+          corridorConfirmed: true as const,
+        };
+        await this.runtime.configure(() =>
+          this.runtime.profileStore.saveInstallationTeaching(teaching),
+        );
+        s.teachingId = teaching.id;
       } else if (action === 'position-reference') {
         if (!['ready', 'reference-required'].includes(s.stage) || this.capture)
           throw new RobotArmError(
@@ -736,6 +1354,8 @@ export class CalibrationWorkflow {
         this.recordPositionRequested = false;
         s.error = undefined;
         s.referencePosition = undefined;
+        s.cameraBoundaryPosition = undefined;
+        s.teachingId = undefined;
         s.stage = 'positioning';
         this.capture = this.recordPosition()
           .catch((e) => {
@@ -772,7 +1392,10 @@ export class CalibrationWorkflow {
             409,
           );
       } else if (action === 'position-safe' && s.calibration?.auto) {
-        if (s.stage !== 'return-ready' || !confirmed)
+        if (
+          !['return-ready', 'positioning-safe'].includes(s.stage) ||
+          !confirmed
+        )
           throw new RobotArmError(
             'INVALID_STAGE',
             'Complete boundary verification before recording the Safe Position',
@@ -801,9 +1424,13 @@ export class CalibrationWorkflow {
             commandId: randomUUID(),
             expectedRevision: s.calibration.revision,
           },
+          undefined,
+          this.changed,
+          this.visibilityVerifier(),
         );
         s.safePosition = s.calibration.candidate!.observationPose;
         s.stage = 'review';
+        s.error = undefined;
       } else if (action === 'position-safe') {
         if (!['ready', 'return-ready'].includes(s.stage) || this.capture)
           throw new RobotArmError(
@@ -877,48 +1504,13 @@ export class CalibrationWorkflow {
           action,
         )
       ) {
-        if (this.capture || s.stage !== 'ready')
-          throw new RobotArmError(
-            'INVALID_STAGE',
-            'Record the starting position before automatic collection',
-            409,
-          );
-        if (!confirmed)
-          throw new RobotArmError(
-            'CONFIRMATION_REQUIRED',
-            'Confirm the contact and motion settings before collecting points',
-            409,
-          );
-        if (!s.referencePosition)
-          throw new RobotArmError(
-            'REFERENCE_POSITION_REQUIRED',
-            'Record a calibration reference position before collecting points',
-            409,
-          );
-        await this.assertMechanicalFrame(true);
-        s.automaticWorkflow = action !== 'start';
         const mode =
           action === 'start-slide'
             ? 'slide'
             : action === 'start-fast'
               ? 'fast'
               : 'standard';
-        s.explorationMode = mode;
-        s.stage = 'collecting';
-        s.error = undefined;
-        this.measurements = undefined;
-        s.requiredReferenceZ = undefined;
-        this.capture = this.capturePoints()
-          .catch((e) => {
-            if (['collecting', 'returning', 'safety'].includes(s.stage)) {
-              this.interrupt(errorText(e), e);
-              log('Automatic point collection failed:', e);
-            }
-          })
-          .finally(() => {
-            this.changed();
-            this.capture = undefined;
-          });
+        await this.startCollection(s, mode, action !== 'start', confirmed);
       } else if (
         action === 'stop-capture' &&
         s.calibration?.auto &&
@@ -937,6 +1529,7 @@ export class CalibrationWorkflow {
         if (
           ![
             'positioning',
+            'positioning-boundary',
             'positioning-safe',
             'collecting',
             'capture-failed',
@@ -952,6 +1545,32 @@ export class CalibrationWorkflow {
         s.error = undefined;
         if (this.ownsOperation()) await this.runtime.stop();
         await this.capture;
+      } else if (action === 'verify-boundary') {
+        if (s.stage !== 'boundary-review' || !confirmed)
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'Review the measurements before starting boundary verification',
+            409,
+          );
+        await this.configuration.assertCurrent();
+        await this.assertMechanicalFrame(true);
+        this.assertAttempt(revision);
+        if (this.state !== s || s.stage !== 'boundary-review')
+          throw new RobotArmError(
+            'ACTION_STOPPED',
+            'Boundary review was interrupted',
+            409,
+          );
+        try {
+          await this.verifyFittedBoundary(s);
+        } catch (error) {
+          if (
+            this.attemptRevision === revision &&
+            !['interrupted', 'cancelled'].includes(s.stage)
+          )
+            this.interrupt(errorText(error), error);
+          throw error;
+        }
       } else if (action === 'accept') {
         if (
           s.stage !== 'review' ||
@@ -969,7 +1588,10 @@ export class CalibrationWorkflow {
         s.result ??= await this.runtime.acceptWebCalibration(
           s.calibration.id,
           s.calibration.auto
-            ? { protocol: 'auto-boundary-v1' }
+            ? {
+                protocol: 'auto-boundary-v1',
+                automatic: this.acceptingAutomatically,
+              }
             : {
                 protocol: 'web-v1',
                 coordinateSpace: 'phone',
@@ -977,20 +1599,21 @@ export class CalibrationWorkflow {
                 results: s.verification,
                 attempts: s.verificationAttempts!,
               },
+          this.options.deviceId
+            ? {
+                ...s.binding!,
+                deviceId: this.options.deviceId,
+                revision: this.deviceRevision,
+                cameraId: this.input!.cameraId,
+                calibrationProfileId: s.calibration.candidate!.id,
+                vision: {
+                  ...s.mapping!.vision,
+                  confirmedAt: new Date().toISOString(),
+                },
+              }
+            : undefined,
+          () => this.assertAttempt(revision),
         );
-        if (this.options.deviceId) {
-          await this.runtime.profileStore.acceptDeviceBinding({
-            ...s.binding!,
-            deviceId: this.options.deviceId,
-            revision: this.deviceRevision,
-            cameraId: this.input!.cameraId,
-            calibrationProfileId: s.result.id,
-            vision: {
-              ...s.mapping!.vision,
-              confirmedAt: new Date().toISOString(),
-            },
-          });
-        }
         s.stage = 'completed';
       } else
         throw new RobotArmError(
@@ -999,13 +1622,70 @@ export class CalibrationWorkflow {
         );
       return this.status()!;
     } finally {
-      this.actionBusy = false;
+      this.endAction();
       this.changed();
     }
   }
-  private async recordPosition(recordTaskPosition = false) {
+  private async startCollection(
+    s: SessionState,
+    mode: AutomaticExplorationMode,
+    automaticWorkflow: boolean,
+    confirmed: boolean,
+  ) {
+    if (this.capture || s.stage !== 'ready')
+      throw new RobotArmError(
+        'INVALID_STAGE',
+        'Record the starting position before automatic collection',
+        409,
+      );
+    if (!confirmed)
+      throw new RobotArmError(
+        'CONFIRMATION_REQUIRED',
+        'Confirm the contact and motion settings before collecting points',
+        409,
+      );
+    if (!s.referencePosition)
+      throw new RobotArmError(
+        'REFERENCE_POSITION_REQUIRED',
+        'Record a calibration reference position before collecting points',
+        409,
+      );
+    await this.assertMechanicalFrame(true);
+    this.captureStopRevision = this.runtime.stopRevision;
+    s.automaticWorkflow = automaticWorkflow;
+    s.explorationMode = mode;
+    s.stage = 'collecting';
+    s.error = undefined;
+    this.measurements = undefined;
+    s.requiredReferenceZ = undefined;
+    this.capture = this.capturePoints()
+      .catch((e) => {
+        if (['collecting', 'returning', 'safety'].includes(s.stage)) {
+          this.interrupt(
+            errorText(e),
+            e,
+            isRobotArmError(e) && e.code === 'DISCONNECTED'
+              ? 'controller'
+              : undefined,
+          );
+          log('Automatic point collection failed:', e);
+        }
+      })
+      .finally(() => {
+        this.changed();
+        this.capture = undefined;
+      });
+  }
+  private async recordPosition(
+    recordTaskPosition = false,
+    recordBoundary = false,
+  ) {
     const s = this.state!;
-    const stage = recordTaskPosition ? 'positioning-safe' : 'positioning';
+    const stage = recordBoundary
+      ? 'positioning-boundary'
+      : recordTaskPosition
+        ? 'positioning-safe'
+        : 'positioning';
     const task = this.runtime.collectWebPoints(this.input!, async (host) => {
       while (s.stage === stage && !this.recordPositionRequested) {
         host.check();
@@ -1030,6 +1710,9 @@ export class CalibrationWorkflow {
         s.safePosition = pose;
         if (!this.fittedGeometry) s.referencePosition = undefined;
         s.stage = this.fittedGeometry ? 'return-ready' : 'ready';
+      } else if (recordBoundary) {
+        s.cameraBoundaryPosition = pose;
+        s.stage = 'ready';
       } else {
         s.referencePosition = pose;
         s.stage = 'ready';
@@ -1052,54 +1735,173 @@ export class CalibrationWorkflow {
         s.explorationMode,
       );
     this.measurements = measurements;
-    const task = this.runtime.collectAutomaticPoints(input, async (host) => {
-      await measurements.run(
-        {
-          ...host,
-          check: () => {
-            host.check();
-            if (s.stage !== 'collecting')
-              throw new RobotArmError(
-                'ACTION_STOPPED',
-                'Automatic collection stopped',
-                409,
-              );
+    const collectionInput = {
+      ...input,
+      onPayloadRecheck: (waiting: boolean) => {
+        s.recheckingPayload = waiting || undefined;
+        this.changed();
+      },
+    };
+    const collect = async (
+      host: AutomaticCaptureHost &
+        Required<Pick<AutomaticCaptureHost, 'preflight'>>,
+    ) => {
+      await this.assertMechanicalFrame(true);
+      host.check();
+      const teaching = this.runtime.profileStore.installationTeaching(input);
+      if (s.teachingId && teaching?.id !== s.teachingId)
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'Installation teaching changed',
+          409,
+        );
+      const reference = s.referencePosition!;
+      const travelToReference = async (reason: 'approach' | 'return') => {
+        s.referenceTravel = reason;
+        this.changed();
+        try {
+          await moveToTaughtPosition(
+            host,
+            teaching,
+            tool,
+            reference,
+            input.motion!,
+            Math.max(
+              knownScreenTravelHeight(this.runtime.profileStore.list(), input),
+              this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+            ),
+          );
+        } finally {
+          s.referenceTravel = undefined;
+          this.changed();
+        }
+      };
+      if (teaching) await travelToReference('approach');
+      let lastMoveConfirmed = false;
+      const checkCollecting = () => {
+        host.check();
+        if (s.stage !== 'collecting')
+          throw new RobotArmError(
+            'ACTION_STOPPED',
+            'Automatic collection stopped',
+            409,
+          );
+      };
+      try {
+        await measurements.run(
+          {
+            ...host,
+            check: checkCollecting,
+            move: async (pose, options) => {
+              lastMoveConfirmed = false;
+              await host.move(pose, options);
+              lastMoveConfirmed = true;
+            },
           },
-        },
-        s.referencePosition!,
-        {
-          tool,
-          webToImage: s.mapping!.webToImage,
-          screen: {
-            ...input.motion!,
-            id: s.id,
-            name: 'Exploration draft',
-            revision: 1,
-            geometryRevision: 1,
-            updatedAt: new Date().toISOString(),
-            direction: 'right-down',
-            physicalWidthMm: 0,
-            physicalHeightMm: 0,
-            pixelWidth: input.width,
-            pixelHeight: input.height,
+          reference,
+          {
+            tool,
+            webToImage: s.mapping!.webToImage,
+            minimumTravelTipZMm: Math.max(
+              teaching
+                ? contactPoint(teaching.referencePose, tool.offsetMm).z
+                : Number.NEGATIVE_INFINITY,
+              this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+            ),
+            screen: {
+              ...input.motion!,
+              id: s.id,
+              name: 'Exploration draft',
+              revision: 1,
+              geometryRevision: 1,
+              updatedAt: new Date().toISOString(),
+              direction: 'right-down',
+              physicalWidthMm: 0,
+              physicalHeightMm: 0,
+              pixelWidth: input.width,
+              pixelHeight: input.height,
+            },
           },
-        },
-      );
-    });
+        );
+        await this.assertMechanicalFrame(true);
+        checkCollecting();
+        this.fitMeasurements();
+      } catch (error) {
+        if (
+          !lastMoveConfirmed ||
+          !isRobotArmError(error) ||
+          !recoverableSamplingErrors.has(error.code)
+        )
+          throw error;
+        checkCollecting();
+        await this.assertMechanicalFrame(true);
+        checkCollecting();
+        try {
+          await travelToReference('return');
+        } catch (returnError) {
+          throw new RobotArmError(
+            isRobotArmError(returnError)
+              ? returnError.code
+              : 'REFERENCE_RETURN_FAILED',
+            `${error.message}. Return to the calibration reference failed: ${errorText(returnError)}`,
+            isRobotArmError(returnError) ? returnError.status : 409,
+            { samplingError: error.code },
+          );
+        }
+        throw error;
+      }
+      // Sampling can finish with the tip pressed. Park using the measured
+      // reference before waiting for a review of the new geometry.
+      if (lastMoveConfirmed && s.explorationQuality?.warnings?.length)
+        await travelToReference('return');
+    };
+    const task = this.runtime.collectAutomaticPoints(collectionInput, collect);
     this.captureOperationId = this.runtime.current()?.requestId;
+    let outlineCheck: Promise<void> | undefined;
+    let nextOutlineCheck = 0;
     const watchdog = setInterval(() => {
       if (s.stage === 'collecting' && !this.phone.connected())
-        this.interrupt('Phone feedback was lost during automatic collection');
+        this.interrupt(
+          'Phone feedback was lost during automatic collection',
+          undefined,
+          'phone-timeout',
+        );
+      if (
+        s.stage === 'collecting' &&
+        !outlineCheck &&
+        Date.now() >= nextOutlineCheck
+      ) {
+        nextOutlineCheck = Date.now() + 1_000;
+        outlineCheck = this.assertMechanicalFrame(true)
+          .catch((error) => {
+            if (s.stage === 'collecting')
+              this.interrupt(errorText(error), error);
+          })
+          .finally(() => {
+            outlineCheck = undefined;
+          });
+      }
     }, 100);
     try {
       await task;
     } finally {
       clearInterval(watchdog);
+      await outlineCheck;
     }
-    await this.assertMechanicalFrame(true);
     if (s.stage !== 'collecting') return;
-    this.fitMeasurements();
+    this.runtime.assertStopRevision(this.captureStopRevision!);
+    if (s.explorationQuality?.warnings?.length) {
+      s.stage = 'boundary-review';
+      this.changed();
+      return;
+    }
+    await this.verifyFittedBoundary(s);
+  }
+
+  private async verifyFittedBoundary(s: SessionState) {
+    this.runtime.assertStopRevision(this.captureStopRevision!);
     s.stage = 'returning';
+    this.changed();
     await this.adopt(this.fittedGeometry!, s.referencePosition!, false);
     if (s.stage !== 'returning') return;
     s.stage = 'safety';
@@ -1112,10 +1914,26 @@ export class CalibrationWorkflow {
         expectedRevision: s.calibration!.revision,
       },
       () => this.assertMechanicalFrame(true),
+      this.changed,
+      this.visibilityVerifier(),
     );
     if (s.stage !== 'safety') return;
-    s.safePosition = undefined;
-    s.stage = 'return-ready';
+    if (
+      s.calibration.auto?.deferParkingBatchId ||
+      s.calibration.auto?.observationRecorded
+    ) {
+      s.safePosition = s.calibration.auto.observationRecorded
+        ? s.calibration.candidate!.observationPose
+        : undefined;
+      s.stage = 'review';
+    } else {
+      s.safePosition = undefined;
+      s.stage = 'return-ready';
+      s.error =
+        s.calibration.auto?.cameraVisibility?.clear === false
+          ? 'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.'
+          : 'No reachable camera-clear Safe Position was found within the bounded search.';
+    }
     this.changed();
   }
 
@@ -1201,11 +2019,15 @@ export class CalibrationWorkflow {
       gridRmsMm: result.gridRmsMm,
       holdoutMaxMm: result.evidence.validationMaxMm,
       coverage: result.coverage,
+      shortSideMm: Math.min(fit.physicalWidthMm, fit.physicalHeightMm),
+      warnings: [
+        ...result.warnings,
+        ...mappingQualityWarnings(s.mapping!.accuracy, s.mapping!.layout),
+      ],
     };
     s.fitResidualsMm = fit.fitResidualsMm;
     this.automaticEvidence = result.evidence;
     this.fittedGeometry = fit;
-    s.stage = 'return-ready';
     if (s.safePosition) {
       try {
         assertSafeObservation(
@@ -1346,13 +2168,24 @@ export class CalibrationWorkflow {
     };
     checkReturning();
     const previousOperationId = this.runtime.current()?.requestId;
+    let travelTipZMm = this.batchTravelTipZMm;
+    if (this.batchParking) {
+      const store = this.runtime.profileStore;
+      const knownHeight = knownScreenTravelHeight(store.list(), s.binding!);
+      if (Number.isFinite(knownHeight))
+        travelTipZMm = Math.max(travelTipZMm ?? knownHeight, knownHeight);
+    }
     const starting = this.runtime.startCalibration(s.binding!, profileId, {
       reuseObservation: !returnToSafe,
       auto: this.automaticEvidence
         ? {
             evidence: this.automaticEvidence,
+            deferParkingBatchId: this.batchParking,
+            minimumTravelTipZMm: travelTipZMm,
             startPose: s.referencePosition!,
-            fast: s.explorationMode !== 'standard',
+            fast:
+              s.explorationMode !== 'standard' &&
+              !s.explorationQuality?.warnings?.length,
           }
         : undefined,
     });
@@ -1406,23 +2239,168 @@ export class CalibrationWorkflow {
     s.calibration = await this.runtime.calibrationCommand(
       s.calibration.id,
       command,
+      undefined,
+      this.changed,
     );
     this.changed();
     return this.status()!;
   }
   private async cancel() {
     const s = this.state!;
-    const active = this.ownsOperation();
     if (s.autoRepair) s.autoRepair.active = false;
     s.stage = 'cancelled';
-    this.changed();
     s.target = undefined;
-    if (active) await this.runtime.stop();
+    this.changed();
+    await this.stopPendingWork();
+    if (!s.result) s.stage = 'cancelled';
+  }
+  private async stopPendingWork() {
+    if (this.ownsOperation()) await this.runtime.stop();
     await this.capture;
     await this.verification;
-    s.stage = 'cancelled';
+  }
+  setBatchReference(pose: CartesianPose) {
+    const state = this.require();
+    if (state.stage !== 'ready' || this.capture)
+      throw new RobotArmError(
+        'INVALID_STAGE',
+        'Finish the current operation before confirming placement',
+        409,
+      );
+    assertPose(pose);
+    state.referencePosition = structuredClone(pose);
+    this.changed();
+  }
+  private batchTravelTipZMm?: number;
+  private batchParking?: string;
+  setBatchParking(batchId?: string) {
+    this.batchParking = batchId;
+  }
+  private visibilityVerifier() {
+    if (this.batchParking) return undefined;
+    const vision = this.options.vision;
+    const correction = vision.getCorrection?.();
+    if (!correction || !vision.rawFrame) return undefined;
+    return (signal: AbortSignal) =>
+      verifyScreenVisibility(
+        [
+          {
+            id: this.options.deviceId ?? 'screen',
+            points: pageOrderedQuad(correction.points, correction.rotation),
+            sourceWidth: correction.sourceWidth,
+            sourceHeight: correction.sourceHeight,
+            show: (phase) => this.showVisibilityProbe(phase),
+            observation: (id) => this.visibilityObservation(id),
+            clear: (id) => this.clearVisibilityProbe(id),
+          },
+        ],
+        () => vision.rawFrame!(),
+        signal,
+        () => {
+          this.runtime.assertStopRevision(this.captureStopRevision!);
+          if (
+            semanticJson(vision.getCorrection?.()) !== semanticJson(correction)
+          )
+            throw new RobotArmError(
+              'VISION_BINDING_CHANGED',
+              'The screen mapping changed during visibility verification.',
+              409,
+            );
+        },
+      );
+  }
+
+  setBatchTravelHeight(value?: number) {
+    if (value !== undefined && !Number.isFinite(value))
+      throw new RobotArmError('INVALID_ARGUMENT', 'Invalid travel height');
+    this.batchTravelTipZMm = value;
+  }
+  phoneObservation() {
+    return this.phone.update ? structuredClone(this.phone.update) : undefined;
+  }
+  async acceptAutomatically() {
+    const state = this.status();
+    const c = state?.calibration;
+    const evidence = c?.auto?.evidence;
+    const fast = state?.explorationMode === 'slide';
+    const reasons: string[] = [];
+    if (
+      state?.stage !== 'review' ||
+      (!c?.auto?.deferParkingBatchId &&
+        (!c?.auto?.observationRecorded || !c.auto.cameraAvoidanceRecorded))
+    )
+      reasons.push('The camera-avoidance Safe Position is missing');
+    if (
+      !c?.candidate ||
+      c.candidate.geometryStatus !== 'valid' ||
+      c.candidate.acceptanceStatus !== 'pending'
+    )
+      reasons.push('The automatic result has no valid pending candidate');
+    const quality = c?.candidate?.quality;
+    if (
+      !quality ||
+      !evidence ||
+      !Number.isInteger(quality.inliers) ||
+      !Number.isInteger(quality.total) ||
+      quality.inliers < 5 ||
+      quality.inliers > quality.total ||
+      !Array.isArray(evidence.samples) ||
+      evidence.samples.length < 7 ||
+      evidence.planeSource !== (fast ? 'assumed-horizontal' : 'measured') ||
+      !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
+      (evidence.surfaceMaxMm ?? 0) > SAMPLED_SURFACE_LIMIT_MM
+    )
+      reasons.push(
+        'Automatic acceptance requires complete contact and plane evidence for the selected sampling mode',
+      );
+    else {
+      const screen = this.runtime.profileStore.getScreen(
+        c.candidate!.screenProfileId,
+      );
+      const warnings = explorationQualityWarnings(
+        screen,
+        quality,
+        evidence,
+        fast,
+      );
+      if (state?.mapping)
+        warnings.push(
+          ...mappingQualityWarnings(
+            state.mapping.accuracy,
+            state.mapping.layout,
+          ),
+        );
+      for (const warning of warnings)
+        reasons.push(
+          `${warning.label} ${warning.percent.toFixed(2)}% (target ${warning.minimum ? '≥' : '≤'}${warning.targetPercent}%)`,
+        );
+    }
+    if (
+      !c?.boundary ||
+      ![
+        c.boundary.hoverCorners,
+        c.boundary.hoverEdges,
+        c.boundary.contactCorners,
+        c.boundary.contactEdges,
+      ].every(Boolean)
+    )
+      reasons.push('Complete both boundary verification groups');
+    if (!this.setup().teaching) reasons.push('Installation teaching changed');
+    if (reasons.length) return { accepted: false, reasons };
+    await this.configuration.assertCurrent();
+    this.acceptingAutomatically = true;
+    try {
+      await this.command(state!.id, 'accept', true);
+      return { accepted: true, reasons: [] };
+    } finally {
+      this.acceptingAutomatically = false;
+    }
   }
   async stop() {
+    const pending = this.activeAction;
+    this.attemptRevision++;
+    this.socketRecovery = undefined;
     if (this.state && this.state.stage !== 'completed') await this.cancel();
+    await pending;
   }
 }

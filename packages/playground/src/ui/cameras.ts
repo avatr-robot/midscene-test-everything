@@ -1,9 +1,35 @@
+import type { CalibrationPreviewPositions } from '@midscene/arm-kit-shared/assisted-contracts';
+import type { PerspectiveTarget } from '@midscene/arm-kit-shared/camera/vision-types';
+import type { CameraCorrection } from '@midscene/arm-kit-shared/contracts';
 import { create } from 'zustand';
 
-export interface CameraEntry {
+export type ScreenControlReason =
+  | 'CALIBRATION_REQUIRED'
+  | 'SCREEN_MAPPING_REQUIRED'
+  | 'MAPPING_REQUIRED'
+  | 'CONFIGURATION_UNAVAILABLE';
+export interface CameraScreenControl {
+  id: string;
+  calibrationId?: string;
+  calibrationAccepted: boolean;
+  pixelWidth?: number;
+  pixelHeight?: number;
+  ready: boolean;
+  reason?: ScreenControlReason;
+}
+export interface CameraScreen {
   id: string;
   name: string;
   hasCorrection?: boolean;
+  correction?: CameraCorrection;
+  previewPositions?: CalibrationPreviewPositions;
+  perspectiveTarget?: PerspectiveTarget;
+  /** Per-screen readiness for manual camera-view control. */
+  control?: CameraScreenControl;
+}
+export interface CameraEntry extends CameraScreen {
+  previewScreenId?: string;
+  screens?: CameraScreen[];
   error?: string;
   stream?: {
     state: string;
@@ -32,6 +58,7 @@ type CameraStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error';
 let listRevision = 0;
 export const useCameras = create<{
   cameras: CameraEntry[];
+  deviceSession?: string | null;
   selectedId: string | null;
   status: CameraStatus;
   select: (id: string) => void;
@@ -55,7 +82,8 @@ export const useCameras = create<{
     set({ pendingId: id, error: undefined });
     try {
       await cameraRequest('start', id);
-      await get().refresh();
+      // The stream just opened; do not probe the device list again.
+      await get().refresh(false);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -67,7 +95,7 @@ export const useCameras = create<{
     set({ pendingId: id, error: undefined });
     try {
       await cameraRequest('stop', id);
-      await get().refresh();
+      await get().refresh(false);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -89,7 +117,8 @@ export const useCameras = create<{
       const response = await fetch(
         discover ? '/api/cameras?refresh=true' : '/api/cameras',
         {
-          signal: AbortSignal.timeout(5000),
+          // Device enumeration can take several seconds while cameras stream.
+          signal: AbortSignal.timeout(20_000),
         },
       );
       if (revision !== listRevision) return;
@@ -122,6 +151,12 @@ export const useCameras = create<{
       const cameras = data.cameras as CameraEntry[];
       set({
         cameras,
+        deviceSession:
+          'deviceSession' in data &&
+          (typeof data.deviceSession === 'string' ||
+            data.deviceSession === null)
+            ? data.deviceSession
+            : undefined,
         error:
           'error' in data && typeof data.error === 'string'
             ? data.error

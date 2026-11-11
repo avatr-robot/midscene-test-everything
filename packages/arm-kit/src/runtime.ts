@@ -1,7 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import type { MotionTarget } from './application/context.js';
+import {
+  assertCameraBoundary,
+  cameraBoundaryExcessMm,
+} from './application/teaching-constraints.js';
+import type {
+  AutomaticCaptureHost,
+  CalibrationBatchState,
+} from './assisted-contracts.js';
+import { assertParkingCorridor } from './calibration/camera-avoidance.js';
 import { screenPoseMm } from './calibration/geometry.js';
 import { contactDepthMm, surfaceClearanceMm } from './calibration/surface.js';
+import { moveToTaughtPosition } from './calibration/taught-position.js';
+import {
+  type CameraAvoidanceState,
+  assertBatchParking,
+  avoidCamera,
+} from './calibration/verification/camera-avoidance.js';
 import { applyCalibrationCommand } from './calibration/verification/commands.js';
 import {
   calibrationSessionStatus,
@@ -10,6 +25,7 @@ import {
   sameCalibrationGeometry,
   verificationContextKey,
 } from './calibration/verification/session-state.js';
+import { atTravelHeight } from './calibration/verification/travel-height.js';
 import {
   type ActionRequest,
   type ActionResult,
@@ -19,7 +35,9 @@ import {
   type CartesianPose,
   type ContactMoveOptions,
   type CurrentOperation,
+  type DeviceBinding,
   type EnableRequest,
+  type MotionOptions,
   type MotionResult,
   type PayloadApplicationState,
   type ProfileBinding,
@@ -31,7 +49,10 @@ import {
   type RuntimeState,
   SCREEN_TILT_LIMIT_DEGREES,
   type SafePositionRequest,
+  type ScreenMotionSettings,
   type ScreenProfile,
+  type ScreenVisibilityEvidence,
+  type SharedParkingEvidence,
   type ToolProfile,
   type VisionBinding,
   assertScreenMapping,
@@ -39,6 +60,7 @@ import {
   calibrationAccepted,
   evaluatePayloadApplication,
   isRobotArmError,
+  semanticJson,
 } from './contracts.js';
 import {
   assertOrientation,
@@ -48,8 +70,11 @@ import {
   distance,
   dot,
   flangePose,
+  quaternionDistance,
+  rotate,
   scale,
   sub,
+  unit,
 } from './domain.js';
 import type { JogTarget, MotionRequest } from './kernel/contracts.js';
 import type {
@@ -57,6 +82,7 @@ import type {
   LinearSequenceTarget,
 } from './kernel/contracts.js';
 import { MotionExecutor } from './kernel/motion-executor.js';
+import { evaluateReadiness } from './kernel/readiness.js';
 import { checkRecovery } from './kernel/recovery.js';
 import { RobotKernel } from './kernel/robot-kernel.js';
 import { ProfileStore, validateScreen } from './runtime/profile-store.js';
@@ -119,12 +145,80 @@ const JOG_RELEASE_COOLDOWN_MS = 250;
 /** How often a failed jog release is retried before a real stop is issued. */
 const JOG_RETRY_MS = 400;
 const JOG_STOP_ATTEMPTS = 3;
+/**
+ * How long a pre-motion gate waits for controller feedback that a reset channel
+ * invalidated. A socket reset loses the evidence, not the controller's payload
+ * configuration: the adapter re-reads that load and re-confirms it as soon as the
+ * channels are back. Waiting here keeps a brief gap from failing a run while
+ * still refusing every command until the saved payload is confirmed again.
+ */
+const PAYLOAD_RECONFIRM_TIMEOUT_MS = 3000;
+/** Poll interval while waiting for that re-confirmation. */
+const PAYLOAD_RECONFIRM_POLL_MS = 100;
+/** Evidence the adapter rebuilds from the controller without any operator action. */
+const RECONFIRMABLE_PAYLOAD_REASONS = [
+  'connection-lost',
+  'readback-unavailable',
+  'disconnected',
+  'state-unavailable',
+  'controller-restarted',
+];
+function payloadApplicationOf(error: RobotArmError) {
+  return error.details?.payloadApplication as
+    | PayloadApplicationState
+    | undefined;
+}
+/** The saved payload is unconfirmed only because controller evidence was lost. */
+function payloadEvidenceGap(error: RobotArmError) {
+  return (
+    error.code === 'TOOL_PAYLOAD_NOT_APPLIED' &&
+    RECONFIRMABLE_PAYLOAD_REASONS.includes(
+      payloadApplicationOf(error)?.reason ?? '',
+    )
+  );
+}
+/** Feedback a reconnect repairs without an operator stop or recovery. */
+function isTransientFeedbackLoss(error: RobotArmError) {
+  return (
+    [
+      'DISCONNECTED',
+      'QUERY_INTERRUPTED',
+      'STATE_STALE',
+      'STATE_UNAVAILABLE',
+    ].includes(error.code) || payloadEvidenceGap(error)
+  );
+}
+function captureMotion(
+  options?: Pick<MotionOptions, 'speed' | 'acceleration'>,
+): MotionOptions {
+  return {
+    speed: options?.speed ?? { kind: 'ratio', value: 0.01 },
+    acceleration: options?.acceleration ?? { kind: 'ratio', value: 0.01 },
+    arrivalSamples: 1,
+  };
+}
 export class RobotArmRuntime extends RobotKernel {
+  private stopGeneration = 0;
+  get stopRevision() {
+    return this.stopGeneration;
+  }
+  assertStopRevision(revision: number) {
+    if (revision !== this.stopGeneration)
+      throw new RobotArmError(
+        'ACTION_STOPPED',
+        'A safety stop interrupted this operation',
+        409,
+      );
+  }
   /** Uncalibrated probing still owns the normal motion lease and driver checks. */
   async collectAutomaticPoints<T>(
-    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'> & {
+      cameraId?: string;
+      onPayloadRecheck?: (waiting: boolean) => void;
+    },
     work: (
-      host: import('./assisted-contracts.js').AutomaticCaptureHost,
+      host: AutomaticCaptureHost &
+        Required<Pick<AutomaticCaptureHost, 'preflight'>>,
     ) => Promise<T>,
     calibrationSessionId?: string,
   ): Promise<T> {
@@ -168,7 +262,30 @@ export class RobotArmRuntime extends RobotKernel {
     } else this.acquire('calibration');
     const operationId = this.operation!.requestId;
     const signal = this.abort!.signal;
+    const initialTeaching =
+      input.cameraId &&
+      this.profileStore.installationTeaching({
+        ...input,
+        cameraId: input.cameraId,
+      });
     const check = () => {
+      if (
+        input.cameraId &&
+        (initialTeaching ||
+          this.profileStore.installationTeaching({
+            ...input,
+            cameraId: input.cameraId,
+          })) &&
+        this.profileStore.installationTeaching({
+          ...input,
+          cameraId: input.cameraId,
+        })?.id !== (initialTeaching || undefined)?.id
+      )
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'Installation teaching changed during collection',
+          409,
+        );
       signal.throwIfAborted();
       this.check();
       if (
@@ -185,19 +302,46 @@ export class RobotArmRuntime extends RobotKernel {
           'Automatic collection context changed',
           409,
         );
-      this.assertAppliedPayload(tool);
+      try {
+        this.assertAppliedPayload(tool);
+      } catch (error) {
+        // A reset channel drops the evidence, not the configuration. This check
+        // runs between commands, so it must not fail an attempt that the next
+        // dispatch gate will re-confirm; a changed payload still throws here.
+        if (!isRobotArmError(error) || !payloadEvidenceGap(error)) throw error;
+      }
     };
+    let recheckingPayload = false;
+    const setPayloadRecheck = (waiting: boolean) => {
+      if (recheckingPayload === waiting) return;
+      recheckingPayload = waiting;
+      input.onPayloadRecheck?.(waiting);
+    };
+    let marked = false;
     try {
-      await this.ready(tool);
-      check();
-      await this.profileStore.markOperation(operationId, 'calibration');
-      const value = await work({
+      const host: Parameters<typeof work>[0] = {
         signal,
         check,
         stop: () => this.adapter.stop(),
+        preflight: async (poses, motion) => {
+          for (const pose of poses) {
+            check();
+            assertPose(pose);
+            assertOrientation(pose, this.capabilities);
+            if (initialTeaching)
+              assertCameraBoundary(pose, initialTeaching, { tool });
+            await this.adapter.preflightCartesian(
+              'linear',
+              pose,
+              captureMotion(motion),
+              robot.workspace,
+            );
+          }
+          check();
+        },
         read: async () => {
           check();
-          await this.ready(tool);
+          await this.ready(tool, setPayloadRecheck);
           const pose = await this.adapter.getPose();
           assertPose(pose);
           check();
@@ -210,20 +354,17 @@ export class RobotArmRuntime extends RobotKernel {
             if (!submitted) probeOptions?.beforeSubmit?.();
           };
           checkSubmission();
-          await this.ready(tool);
+          await this.ready(tool, setPayloadRecheck);
           assertPose(pose);
+          const teaching =
+            input.cameraId &&
+            this.profileStore.installationTeaching({
+              ...input,
+              cameraId: input.cameraId,
+            });
+          if (teaching) assertCameraBoundary(pose, teaching, { tool });
           assertOrientation(pose, this.capabilities);
-          const options = {
-            speed: probeOptions?.speed ?? {
-              kind: 'ratio' as const,
-              value: 0.01,
-            },
-            acceleration: probeOptions?.acceleration ?? {
-              kind: 'ratio' as const,
-              value: 0.01,
-            },
-            arrivalSamples: 1,
-          };
+          const options = captureMotion(probeOptions);
           await this.adapter.preflightCartesian(
             'linear',
             pose,
@@ -231,23 +372,40 @@ export class RobotArmRuntime extends RobotKernel {
             robot.workspace,
           );
           checkSubmission();
-          await this.motionExecutor.move(
-            pose,
-            robot.workspace,
-            options,
-            probeOptions?.timeoutMs ?? 120000,
-            {
-              check: checkSubmission,
-              signal,
-              accepting: (promise) => {
-                this.accepting = promise;
+          const previousMotionSubmitted = this.motionSubmitted;
+          try {
+            await this.motionExecutor.move(
+              pose,
+              robot.workspace,
+              options,
+              probeOptions?.timeoutMs ?? 120000,
+              {
+                check: checkSubmission,
+                signal,
+                accepting: (promise) => {
+                  this.accepting = promise;
+                  if (recheckingPayload)
+                    void promise?.then(
+                      () => setPayloadRecheck(false),
+                      () => undefined,
+                    );
+                },
+                submitted: () => {
+                  submitted = true;
+                  this.motionSubmitted = true;
+                },
               },
-              submitted: () => {
-                submitted = true;
-                this.motionSubmitted = true;
-              },
-            },
-          );
+            );
+          } catch (error) {
+            // A failed acceptance is ambiguous unless the driver confirms it
+            // never reached the motion channel. Preserve any earlier motion.
+            if (
+              isRobotArmError(error) &&
+              error.details?.beforeMotionSubmission === true
+            )
+              this.motionSubmitted = previousMotionSubmitted;
+            throw error;
+          }
           const actual = await this.motionExecutor.stable(
             pose,
             5000,
@@ -266,7 +424,60 @@ export class RobotArmRuntime extends RobotKernel {
               409,
             );
         },
-      });
+      };
+      const collect = async () => {
+        let deadline: number | undefined;
+        let interrupted: RobotArmError | undefined;
+        try {
+          while (true) {
+            try {
+              await this.ready(tool, setPayloadRecheck);
+              check();
+              if (
+                interrupted &&
+                deadline !== undefined &&
+                performance.now() >= deadline
+              )
+                throw interrupted;
+              if (!marked) {
+                await this.profileStore.markOperation(
+                  operationId,
+                  'calibration',
+                );
+                marked = true;
+              }
+              return await work(host);
+            } catch (error) {
+              if (
+                !input.onPayloadRecheck ||
+                calibrationSessionId ||
+                this.motionSubmitted ||
+                signal.aborted ||
+                !isRobotArmError(error) ||
+                !isTransientFeedbackLoss(error)
+              )
+                throw error;
+              if (deadline === undefined) {
+                interrupted = error;
+                deadline = performance.now() + PAYLOAD_RECONFIRM_TIMEOUT_MS;
+                setPayloadRecheck(true);
+              }
+              const remaining = deadline - performance.now();
+              if (remaining <= 0)
+                throw new RobotArmError(
+                  error.code,
+                  'Could not reconfirm the robot connection and tool payload before calibration motion.',
+                  error.status,
+                  error.details,
+                );
+              await this.hold(Math.min(PAYLOAD_RECONFIRM_POLL_MS, remaining));
+            }
+          }
+        } finally {
+          setPayloadRecheck(false);
+        }
+      };
+      const value = await collect();
       check();
       if (!calibrationSessionId) {
         await this.profileStore.clearOperation();
@@ -275,11 +486,32 @@ export class RobotArmRuntime extends RobotKernel {
       return value;
     } catch (error) {
       if (this.operation?.requestId === operationId && this.leased) {
-        if (!signal.aborted)
-          await this.controlledStop().catch(() => {
-            this.recoveryRequired = true;
-          });
-        else await this.stopPromise;
+        if (!signal.aborted) {
+          if (!calibrationSessionId && !this.motionSubmitted) {
+            if (marked)
+              await this.profileStore.clearOperation(operationId).catch(() => {
+                this.requireRecovery('interruption');
+              });
+          } else {
+            const disconnected =
+              !calibrationSessionId &&
+              isRobotArmError(error) &&
+              error.code === 'DISCONNECTED';
+            if (disconnected) this.requireRecovery('socket-disconnect');
+            else if (
+              input.onPayloadRecheck &&
+              this.motionSubmitted &&
+              isRobotArmError(error) &&
+              isTransientFeedbackLoss(error) &&
+              // An evidence gap is a configuration precondition, not an
+              // interruption: no command was travelling when it was reported,
+              // so recovering the controller would only cost the operator a stop.
+              !payloadEvidenceGap(error)
+            )
+              this.requireRecovery('interruption');
+            await this.controlledStop().catch(() => undefined);
+          }
+        } else await this.stopPromise;
         if (this.operation?.requestId === operationId)
           this.release(signal.aborted ? 'stopped' : 'failed', error);
       }
@@ -291,7 +523,9 @@ export class RobotArmRuntime extends RobotKernel {
 
   /** Passive hand-guided sampling owns the same lease as every motion task. */
   async collectWebPoints<T>(
-    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+    input: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'> & {
+      cameraId?: string;
+    },
     work: (
       host: import('./assisted-contracts.js').AssistedCaptureHost,
     ) => Promise<T>,
@@ -328,7 +562,13 @@ export class RobotArmRuntime extends RobotKernel {
           'Robot or tool geometry changed',
           409,
         );
-      this.assertAppliedPayload(tool);
+      try {
+        this.assertAppliedPayload(tool);
+      } catch (error) {
+        // Same rule as automatic collection: evidence a reset channel dropped is
+        // re-confirmed before the next command, while a changed payload throws.
+        if (!isRobotArmError(error) || !payloadEvidenceGap(error)) throw error;
+      }
     };
     try {
       await this.ready(tool);
@@ -428,7 +668,9 @@ export class RobotArmRuntime extends RobotKernel {
     id: string,
     evidence:
       | import('./assisted-contracts.js').WebVerificationEvidence
-      | { protocol: 'auto-boundary-v1' },
+      | { protocol: 'auto-boundary-v1'; automatic?: boolean },
+    binding?: DeviceBinding,
+    guard?: () => void,
   ): Promise<CalibrationProfile> {
     if (
       this.commandBusy ||
@@ -452,7 +694,7 @@ export class RobotArmRuntime extends RobotKernel {
       const c = s.candidate!;
       if (evidence.protocol === 'auto-boundary-v1') {
         if (
-          !s.auto?.observationRecorded ||
+          !(s.auto?.observationRecorded || s.auto?.deferParkingBatchId) ||
           s.stage !== 'verification' ||
           s.dragMode ||
           !s.boundary ||
@@ -471,7 +713,11 @@ export class RobotArmRuntime extends RobotKernel {
         c.verification = {
           protocol: 'auto-boundary-v1',
           boundary: { ...s.boundary },
-          auto: { ...structuredClone(s.auto.evidence), humanAccepted: true },
+          auto: {
+            ...structuredClone(s.auto.evidence),
+            humanAccepted: evidence.automatic !== true,
+            automaticAccepted: evidence.automatic === true,
+          },
           hoverMotion: true,
           hoverHuman: false,
           confirmedAt: new Date().toISOString(),
@@ -507,7 +753,8 @@ export class RobotArmRuntime extends RobotKernel {
         };
       }
       c.acceptanceStatus = 'accepted';
-      if (!calibrationAccepted(c))
+      c.pendingParkingBatchId = s.auto?.deferParkingBatchId;
+      if (!calibrationAccepted(c, c.pendingParkingBatchId))
         throw new RobotArmError(
           'NOT_VERIFIED',
           'Web touch measurements did not meet acceptance thresholds',
@@ -519,7 +766,14 @@ export class RobotArmRuntime extends RobotKernel {
       s.revision++;
       c.updatedAt = new Date().toISOString();
       c.revision++;
-      await this.profileStore.commitCalibration(s, () => this.check());
+      await this.profileStore.commitCalibration(
+        s,
+        () => {
+          this.check();
+          guard?.();
+        },
+        binding,
+      );
       this.session = s;
       this.release('completed');
       return structuredClone(c);
@@ -539,6 +793,10 @@ export class RobotArmRuntime extends RobotKernel {
     }
   }
   screenActionGuard?: (request: ActionRequest) => Promise<void>;
+  batchTransferContext?: (
+    from: string,
+    to: string,
+  ) => CalibrationBatchState | undefined;
   private aiTaskRequestId?: string;
   beginAiTask(requestId: string): void {
     if (this.aiTaskRequestId || this.leased || this.stopInProgress)
@@ -625,7 +883,7 @@ export class RobotArmRuntime extends RobotKernel {
   ) {
     if (!this.adapter.resolver.descriptor('motion.linear-sequence'))
       return undefined;
-    this.assertAppliedPayload(ctx.tool);
+    await this.confirmAppliedPayload(ctx.tool);
     this.check();
     await this.profileStore.markOperation(
       this.operation!.requestId,
@@ -764,9 +1022,11 @@ export class RobotArmRuntime extends RobotKernel {
     try {
       await this.adapter.connect();
       this.connectionEstablished = true;
-      const state = await this.adapter.getState();
+      const state = await this.adapter.getState(true);
+      this.recordPayloadEvidence();
       if (state.moving || state.dragMode || state.paused || state.faults.length)
         this.recoveryRequired = true;
+      await this.preflightConnection(state);
     } catch (error) {
       // A failed startup connect or read leaves the controller unconfirmed, so
       // setup must not treat it as untouched. Unlike a steady-state read
@@ -774,6 +1034,48 @@ export class RobotArmRuntime extends RobotKernel {
       // Connect itself stays available for a later retry.
       this.recoveryRequired = true;
       throw error;
+    }
+  }
+  /**
+   * Check motion preconditions when the service connects, not when the first
+   * calibration command needs them. An operator can spend minutes configuring
+   * screens between connecting and starting a batch; discovering an unconfirmed
+   * payload only then costs a stopped queue and a manual recovery. This read is
+   * non-fatal and writes nothing: the controller's reported load is adopted when
+   * it is available, and an unconfirmed payload stays visible as pending.
+   */
+  private async preflightConnection(state: RobotState): Promise<void> {
+    if (!this.describeCapabilities().payload) return;
+    const id = randomUUID();
+    const detail: Record<string, unknown> = {
+      control: 'connection-preflight',
+      enabled: state.enabled,
+      moving: state.moving,
+      dragMode: state.dragMode,
+      faults: state.faults.length,
+      recoveryRequired: this.recoveryRequired,
+    };
+    try {
+      detail.payload = this.payloadState(undefined, state);
+      const toolProfileId = this.profileStore.list().workstation?.toolProfileId;
+      if (
+        toolProfileId &&
+        state.enabled &&
+        !state.moving &&
+        !state.dragMode &&
+        !state.paused &&
+        !state.faults.length
+      )
+        await this.confirmAppliedPayload(
+          this.profileStore.getTool(toolProfileId),
+        );
+      detail.result = 'checked';
+      this.audit('control', id, 'completed', detail);
+    } catch (error) {
+      // Startup must not fail because configuration needs the operator: the
+      // pending payload is reported instead, and every motion still waits for it.
+      detail.result = 'pending';
+      this.audit('control', id, 'completed', detail, error);
     }
   }
   describeCapabilities() {
@@ -802,21 +1104,29 @@ export class RobotArmRuntime extends RobotKernel {
       readinessPolicy: this.adapter.adapter.readinessPolicy,
     };
   }
-  async state(toolProfileId?: string): Promise<RuntimeState> {
+  async state(
+    toolProfileId?: string,
+    options: { fresh?: boolean } = {},
+  ): Promise<RuntimeState> {
     // A failed read is a connection problem, not a physical interruption. The
     // recovery gate is latched by actions that actually moved the arm, by Stop
     // and Pause confirmation, and by faults — never by an unreachable
     // controller, otherwise a dropped channel would demand recovery that itself
     // needs the channel to clear.
-    const state = await this.adapter.getState(false);
-    if (state.faults.length) this.recoveryRequired = true;
+    const state = await this.adapter.getState(options.fresh === true);
+    if (state.status?.emergencyStop === 'active')
+      this.requireRecovery('emergency-stop');
+    else if (state.faults.length || state.status?.protectiveStop === 'active')
+      this.requireRecovery('fault');
     if (state.connected) this.connectionEstablished = true;
     this.recordPayloadEvidence();
     return {
       state,
       operation: this.operation ? { ...this.operation } : undefined,
       recoveryRequired: this.recoveryRequired,
+      recoveryReason: this.recoveryReason,
       softwarePaused: this.softwarePaused,
+      stopRevision: this.stopGeneration,
       appliedPayload: this.adapter.appliedPayload(),
       payloadApplication: this.payloadState(toolProfileId, state),
       aiRun: this.aiTaskRequestId
@@ -847,30 +1157,138 @@ export class RobotArmRuntime extends RobotKernel {
     // Workstation sampling and screen actions do not use stored user bounds.
     // Keep the Profile field for callers that explicitly request bounded SDK motion.
     const { workspace: _workspace, ...installation } = robot;
-    return { robot: installation, tool, screen };
+    const data = this.profileStore.list();
+    const cameraId =
+      data.devices?.find((d) => d.screenProfileId === screen.id)?.cameraId ??
+      (data.workstation?.screenProfileId === screen.id
+        ? data.workstation.cameraId
+        : undefined);
+    const teaching =
+      cameraId &&
+      this.profileStore.installationTeaching({
+        robotProfileId: robot.id,
+        toolProfileId: tool.id,
+        cameraId,
+      });
+    return {
+      robot: installation,
+      tool,
+      screen,
+      installationTeaching: teaching || undefined,
+      minimumTravelTipZMm: teaching
+        ? contactPoint(teaching.referencePose, tool.offsetMm).z
+        : undefined,
+    };
   }
-  private async ready(tool?: ToolProfile): Promise<void> {
+  /**
+   * Pre-motion gate. It re-reads the controller while a reset channel has left
+   * readiness or payload evidence unconfirmed, so a brief reconnect neither
+   * fails a run nor lets a command out on unconfirmed configuration. Returning
+   * without a confirmed payload remains impossible: the last error is thrown
+   * once the bounded re-confirmation window expires.
+   */
+  private async ready(
+    tool?: ToolProfile,
+    onWait?: (waiting: boolean) => void,
+  ): Promise<void> {
     if (this.softwarePaused)
       throw new RobotArmError(
         'ROBOT_PAUSED',
         'Resume and perform recovery check before reissuing motion',
         409,
       );
-    await this.adapter.assertReady();
-    if (tool) this.assertAppliedPayload(tool);
-    else if (!this.payloadCurrent())
-      throw new RobotArmError(
-        'TOOL_PAYLOAD_NOT_APPLIED',
-        'Enable with the current saved tool payload before motion.',
-        409,
-      );
+    const deadline = performance.now() + PAYLOAD_RECONFIRM_TIMEOUT_MS;
+    let waiting = false;
+    try {
+      while (true) {
+        try {
+          await this.adapter.assertReady();
+          if (tool) this.assertAppliedPayload(tool);
+          else if (!this.payloadCurrent())
+            throw new RobotArmError(
+              'TOOL_PAYLOAD_NOT_APPLIED',
+              'Enable with the current saved tool payload before motion.',
+              409,
+            );
+          return;
+        } catch (error) {
+          if (
+            !isRobotArmError(error) ||
+            !isTransientFeedbackLoss(error) ||
+            performance.now() >= deadline
+          )
+            throw error;
+          if (!waiting) {
+            waiting = true;
+            onWait?.(true);
+          }
+        }
+        this.check();
+        // A fresh sample is what re-adopts the controller's reported load after
+        // a reconnect; the profile is never assumed to still be in force.
+        await this.adapter.getState(true).catch(() => undefined);
+        this.check();
+        await this.hold(PAYLOAD_RECONFIRM_POLL_MS);
+      }
+    } finally {
+      if (waiting) onWait?.(false);
+    }
+  }
+  /** Admission check that absorbs the same transient evidence gap as `ready`. */
+  private async confirmAppliedPayload(tool: ToolProfile): Promise<void> {
+    const deadline = performance.now() + PAYLOAD_RECONFIRM_TIMEOUT_MS;
+    while (true) {
+      try {
+        this.assertAppliedPayload(tool);
+        return;
+      } catch (error) {
+        if (
+          !isRobotArmError(error) ||
+          !payloadEvidenceGap(error) ||
+          performance.now() >= deadline
+        )
+          throw error;
+      }
+      this.check();
+      await this.adapter.getState(true).catch(() => undefined);
+      this.check();
+      await this.hold(PAYLOAD_RECONFIRM_POLL_MS);
+    }
   }
   private payloadCurrent() {
     return ['not-required', 'applied'].includes(this.payloadState().status);
   }
+  /** Read-only admission check for calibration before any sampling is queued. */
+  async assertCalibrationMotionReady(
+    toolProfileId: string,
+  ): Promise<CartesianPose> {
+    const tool = this.profileStore.getTool(toolProfileId);
+    const snapshot = await this.state(toolProfileId, { fresh: true });
+    const { pose, status } = snapshot.state;
+    const readiness =
+      status && evaluateReadiness(status, this.adapter.adapter.readinessPolicy);
+    if (
+      snapshot.recoveryRequired ||
+      snapshot.softwarePaused ||
+      !pose ||
+      !readiness?.ready
+    )
+      throw new RobotArmError(
+        'NOT_READY',
+        'Check controller readiness before starting batch calibration.',
+        409,
+        { reasons: readiness?.reasons },
+      );
+    await this.confirmAppliedPayload(tool);
+    return pose;
+  }
   async readiness() {
     const readiness = await this.adapter.readiness().catch((error) => {
-      this.recoveryRequired = true;
+      this.requireRecovery(
+        isRobotArmError(error) && error.code === 'DISCONNECTED'
+          ? 'socket-disconnect'
+          : 'interruption',
+      );
       throw error;
     });
     const runtime = await this.state();
@@ -983,19 +1401,23 @@ export class RobotArmRuntime extends RobotKernel {
     return this.exclusive(work, true);
   }
   private target(p: CartesianPose, _ctx: Context): void {
+    if (_ctx.installationTeaching)
+      assertCameraBoundary(p, _ctx.installationTeaching, _ctx);
     assertOrientation(p, this.adapter.capabilities);
     if (this.adapter.capabilities.workspace)
       assertTarget(p, this.adapter.capabilities.workspace);
   }
-  private assertAppliedPayload(tool: ToolProfile) {
+  private assertAppliedPayload(tool: ToolProfile, state?: RobotState) {
     const limits = this.describeCapabilities().payload;
     if (!limits) return;
     assertToolPayload(tool.payload, limits);
-    const payloadApplication = this.payloadState(tool.id);
+    const payloadApplication = this.payloadState(tool.id, state);
     if (payloadApplication.status !== 'applied')
       throw new RobotArmError(
         'TOOL_PAYLOAD_NOT_APPLIED',
-        'Tool payload is not confirmed for the saved tool. Apply it according to the adapter requirements before motion.',
+        payloadApplication.reason === 'parameters-changed'
+          ? 'The controller tool payload differs from the saved tool payload. Sync the saved payload before motion.'
+          : 'Tool payload is not confirmed for the saved tool. Apply it according to the adapter requirements before motion.',
         409,
         { payloadApplication },
       );
@@ -1004,7 +1426,7 @@ export class RobotArmRuntime extends RobotKernel {
     targets: MotionTarget[],
     ctx: Context,
   ): Promise<void> {
-    this.assertAppliedPayload(ctx.tool);
+    await this.confirmAppliedPayload(ctx.tool);
     for (const target of targets) {
       this.check();
       try {
@@ -1036,7 +1458,7 @@ export class RobotArmRuntime extends RobotKernel {
     acceleration = ctx.screen.actionAcceleration,
     contact?: ContactMoveOptions,
   ): Promise<MotionResult> {
-    this.assertAppliedPayload(ctx.tool);
+    await this.confirmAppliedPayload(ctx.tool);
     await this.ready();
     this.check();
     this.target(p, ctx);
@@ -1492,37 +1914,152 @@ export class RobotArmRuntime extends RobotKernel {
     });
   }
   private async executeTransfer(
-    route: PreparedTransferRoute,
+    fromCalibrationId: string,
+    route: PreparedTransferRoute | undefined,
     destination: CalibrationProfile,
     phase: (phase: 'moving' | 'arrived') => void,
   ): Promise<void> {
+    const batch = this.batchTransferContext?.(
+      fromCalibrationId,
+      destination.id,
+    );
+    const corridor = batch?.transfer;
+    if (!route && !batch)
+      throw new RobotArmError(
+        'TRANSFER_REQUIRED',
+        'No current confirmed corridor or verified route connects these screens',
+        409,
+      );
     const screens = this.transferScreens();
-    if (
-      route.toCalibrationId !== destination.id ||
-      route.contextKey !== transferContextKey(screens)
-    )
+    const contextKey = transferContextKey(screens);
+    const from = screens.find(
+      (entry) => entry.calibration.id === fromCalibrationId,
+    );
+    if (!from)
       throw new RobotArmError(
         'TRANSFER_STALE',
-        'Verify the transfer route again after device configuration changes',
+        'The source screen calibration changed',
+        409,
       );
-    const from = screens.find(
-      (entry) => entry.calibration.id === route.fromCalibrationId,
-    )!;
     const ctx = this.context(from.calibration);
-    // Rebuild from immutable input; do not trust cached generated poses alone.
-    const current = prepareTransferRoute(route, screens);
+    const start = from.calibration.observationPose;
+    const end = destination.observationPose;
+    const shared = batch?.sharedSafePosition;
+    const usesSharedPose = Boolean(
+      batch?.sharedSafePositionVerified &&
+        shared &&
+        semanticJson(start) === semanticJson(shared) &&
+        semanticJson(end) === semanticJson(shared) &&
+        from.calibration.robotProfileId === destination.robotProfileId &&
+        from.calibration.toolProfileId === destination.toolProfileId &&
+        semanticJson(atTravelHeight(start, ctx)) ===
+          semanticJson(atTravelHeight(end, this.context(destination))),
+    );
+    const usesCorridor = Boolean(
+      !usesSharedPose &&
+        corridor?.corridorConfirmed &&
+        (!route || route.contextKey !== contextKey),
+    );
+    const assertCurrent = () => {
+      const currentBatch =
+        usesSharedPose || usesCorridor
+          ? this.batchTransferContext?.(fromCalibrationId, destination.id)
+          : undefined;
+      if (
+        contextKey !== transferContextKey(this.transferScreens()) ||
+        ((usesSharedPose || usesCorridor) &&
+          (currentBatch?.id !== batch?.id ||
+            currentBatch?.revision !== batch?.revision))
+      )
+        throw new RobotArmError(
+          'TRANSFER_STALE',
+          'Device calibration or the confirmed batch corridor changed while checking the transfer',
+          409,
+        );
+      this.check();
+    };
+    let input: TransferRouteInput | undefined = route;
+    if (usesCorridor && corridor) {
+      const height = corridor.travelTipZMm;
+      const sourceTip = contactPoint(start, ctx.tool.offsetMm);
+      const targetTip = contactPoint(end, ctx.tool.offsetMm);
+      if (
+        ![
+          height,
+          corridor.highestObstacleZMm,
+          corridor.clearanceMm,
+          ...Object.values(corridor.corridor),
+        ].every(Number.isFinite) ||
+        corridor.clearanceMm <= 0 ||
+        height < corridor.highestObstacleZMm + corridor.clearanceMm ||
+        height < Math.max(sourceTip.z, targetTip.z)
+      )
+        throw new RobotArmError(
+          'UNSAFE_OBSERVATION',
+          'The confirmed travel height does not cover both observation positions',
+          409,
+        );
+      assertParkingCorridor(sourceTip, corridor.corridor);
+      assertParkingCorridor(targetTip, corridor.corridor);
+      input = {
+        fromCalibrationId,
+        toCalibrationId: destination.id,
+        confirmed: true,
+        waypoints: [sourceTip, targetTip].map((tip) =>
+          flangePose(
+            { ...tip, z: height },
+            start.orientation,
+            ctx.tool.offsetMm,
+          ),
+        ),
+      };
+    }
+    let current: PreparedTransferRoute | undefined;
+    if (!usesSharedPose) {
+      if (!input)
+        throw new RobotArmError(
+          'TRANSFER_REQUIRED',
+          'These screens have no current common safe position or confirmed travel corridor',
+          409,
+        );
+      if (
+        !usesCorridor &&
+        (route?.toCalibrationId !== destination.id ||
+          route.fromCalibrationId !== fromCalibrationId ||
+          route.contextKey !== contextKey)
+      )
+        throw new RobotArmError(
+          'TRANSFER_STALE',
+          'Verify the transfer route again after device configuration changes',
+          409,
+        );
+      current = prepareTransferRoute(input, screens);
+    }
+    const expected = current?.poses[0] ?? atTravelHeight(start, ctx);
     await this.stable(await this.adapter.getPose(), ctx);
+    const actual = this.lastStablePose!;
     this.check();
     if (
-      distance(this.lastStablePose!.positionMm, current.poses[0].positionMm) >
-      0.5
+      distance(actual.positionMm, expected.positionMm) > 0.5 ||
+      quaternionDistance(actual.orientation, expected.orientation) > 0.01
     )
       throw new RobotArmError(
         'TRANSFER_START_CHANGED',
-        'Arm is no longer at the source observation position; recalibrate before transfer',
+        'Arm is no longer at the source observation position; recover before transfer',
         409,
       );
-    const poses = [this.lastStablePose!, ...current.poses];
+    if (!current) {
+      assertTransferClearance([actual], screens, ctx.tool);
+      assertCurrent();
+      phase('arrived');
+      return;
+    }
+    const poses = [actual, ...current.poses];
+    if (usesCorridor)
+      assertParkingCorridor(
+        contactPoint(actual, ctx.tool.offsetMm),
+        corridor?.corridor,
+      );
     assertTransferClearance(poses, screens, ctx.tool);
     const options = this.transferOptions(ctx.screen);
     await this.preflight(
@@ -1533,12 +2070,7 @@ export class RobotArmRuntime extends RobotKernel {
       })),
       ctx,
     );
-    if (route.contextKey !== transferContextKey(this.transferScreens()))
-      throw new RobotArmError(
-        'TRANSFER_STALE',
-        'Device calibration changed while checking the transfer',
-      );
-    this.check();
+    assertCurrent();
     phase('moving');
     for (const pose of current.poses) {
       this.check();
@@ -1553,7 +2085,8 @@ export class RobotArmRuntime extends RobotKernel {
     aiTaskRequestId?: string,
     deviceVision?: VisionBinding,
     transfer?: {
-      route: PreparedTransferRoute;
+      fromCalibrationId: string;
+      route?: PreparedTransferRoute;
       phase: (phase: 'moving' | 'arrived') => void;
     },
   ): Promise<ActionResult> {
@@ -1602,6 +2135,12 @@ export class RobotArmRuntime extends RobotKernel {
         const mapping = ctx.screen.phoneMapping;
         const vision =
           deviceVision ?? this.profileStore.list().workstation?.vision;
+        if (vision?.validity?.state === 'invalid')
+          throw new RobotArmError(
+            'CALIBRATION_MISMATCH',
+            'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
+            409,
+          );
         if (
           !mapping ||
           !vision ||
@@ -1624,10 +2163,15 @@ export class RobotArmRuntime extends RobotKernel {
           ctx,
           c.observationPose,
         );
-        await this.executeTransfer(transfer.route, c, (phase) => {
-          transferring = phase === 'moving';
-          transfer.phase(phase);
-        });
+        await this.executeTransfer(
+          transfer.fromCalibrationId,
+          transfer.route,
+          c,
+          (phase) => {
+            transferring = phase === 'moving';
+            transfer.phase(phase);
+          },
+        );
       }
       const result = await executeScreenAction.call(
         this.screenMotionHost(),
@@ -1835,8 +2379,9 @@ export class RobotArmRuntime extends RobotKernel {
       actual.orientation,
       ctx.tool.offsetMm,
     );
-    this.target(pose, ctx);
-    return pose;
+    const travel = atTravelHeight(pose, ctx);
+    this.target(travel, ctx);
+    return travel;
   }
   private async recoverLift(
     c: CalibrationProfile,
@@ -1864,7 +2409,9 @@ export class RobotArmRuntime extends RobotKernel {
     await this.move(target, ctx, options.speed, options.acceleration);
     await this.stable(target, ctx);
   }
-  private async controlledStop(): Promise<void> {
+  private async controlledStop(
+    disconnectedBeforeMotion = false,
+  ): Promise<void> {
     try {
       // Send Stop immediately, then clear the queue again after a racing acceptance.
       const accepting = this.accepting;
@@ -1905,17 +2452,33 @@ export class RobotArmRuntime extends RobotKernel {
       this.screenSequence?.dispose();
       this.screenSequence = undefined;
     } catch (e) {
-      this.recoveryRequired = true;
+      if (
+        !(
+          disconnectedBeforeMotion &&
+          isRobotArmError(e) &&
+          e.code === 'DISCONNECTED'
+        )
+      )
+        this.recoveryRequired = true;
       throw e;
     }
   }
   async stop(): Promise<void> {
+    this.requireRecovery('manual-stop');
+    await this.stopCalibrationOperation();
+  }
+  /** Internal stop initiated by a calibration interlock, not an operator command. */
+  async stopCalibrationOperation(socketDisconnected = false): Promise<void> {
+    this.requireRecovery(
+      socketDisconnected ? 'socket-disconnect' : 'interruption',
+    );
+    this.stopGeneration++;
     // A jog is not part of the motion queue, so Stop must release it explicitly.
     if (this.jogTimer) await this.stopJog().catch(() => undefined);
     const eventId = this.operation?.requestId ?? randomUUID();
     await this.audited(
       'control',
-      { control: 'stop' },
+      { control: 'stop', recoveryReason: this.recoveryReason },
       () => this.safetyControl('stop', () => this.finishStop()),
       eventId,
     );
@@ -1944,7 +2507,6 @@ export class RobotArmRuntime extends RobotKernel {
     return true;
   }
   private async finishStop(): Promise<void> {
-    if (this.leased || this.motionSubmitted) this.recoveryRequired = true;
     const pending = this.controlledStop();
     await pending;
     if (await this.interruptSession()) {
@@ -1997,6 +2559,8 @@ export class RobotArmRuntime extends RobotKernel {
    * fault; only an unconfirmable stop fails here.
    */
   async emergencyStop(): Promise<void> {
+    this.requireRecovery('emergency-stop');
+    this.stopGeneration++;
     if (this.jogTimer) await this.stopJog().catch(() => undefined);
     const send = this.adapter.emergencyStop?.bind(this.adapter);
     if (!send)
@@ -2031,6 +2595,8 @@ export class RobotArmRuntime extends RobotKernel {
    * running, and it leaves the runtime requiring an explicit recovery check.
    */
   async pause(): Promise<void> {
+    this.requireRecovery('pause');
+    this.stopGeneration++;
     const send = this.adapter.pause?.bind(this.adapter);
     if (!send)
       throw new RobotArmError(
@@ -2138,6 +2704,70 @@ export class RobotArmRuntime extends RobotKernel {
       throw error;
     }
   }
+  /** Only the interrupted collection may release its socket-only gate. */
+  async recoverSamplingSocket(
+    operationId: string,
+    revision: number,
+    validateAttempt: () => void,
+  ) {
+    const guard = () => {
+      validateAttempt();
+      this.assertStopRevision(revision);
+      if (this.recoveryReason !== 'socket-disconnect')
+        throw new RobotArmError(
+          'RECOVERY_REQUIRED',
+          'Explicit recovery check is required',
+          409,
+        );
+      this.check();
+    };
+    if (this.current()?.requestId !== operationId)
+      throw new RobotArmError(
+        'STALE_CONTEXT',
+        'The interrupted collection no longer owns recovery',
+        409,
+      );
+    if (this.leased || this.stopInProgress)
+      throw new RobotArmError(
+        'BUSY',
+        'Wait for the interrupted collection to finish',
+        409,
+      );
+    await this.exclusive(
+      async () => {
+        guard();
+        try {
+          await checkRecovery(this.adapter, this.softwarePaused, guard);
+        } catch (error) {
+          const reasons = isRobotArmError(error) && error.details?.reasons;
+          if (Array.isArray(reasons)) {
+            if (reasons.includes('SIGNAL_EMERGENCYSTOP_ACTIVE'))
+              this.requireRecovery('emergency-stop');
+            else if (
+              reasons.includes('ROBOT_FAULT') ||
+              reasons.includes('SIGNAL_PROTECTIVESTOP_ACTIVE')
+            )
+              this.requireRecovery('fault');
+            else if (reasons.includes('ROBOT_PAUSED'))
+              this.requireRecovery('pause');
+            else this.requireRecovery('interruption');
+          }
+          throw error;
+        }
+        guard();
+        await this.profileStore.clearOperation(operationId);
+        guard();
+        this.recoveryRequired = false;
+      },
+      true,
+      { kind: 'control', requestId: operationId },
+    );
+    this.audit('control', operationId, 'completed', {
+      control: 'recover',
+      automatic: true,
+      recoveryReason: 'socket-disconnect',
+    });
+  }
   async recover(): Promise<void> {
     if (this.leased)
       throw new RobotArmError(
@@ -2148,6 +2778,7 @@ export class RobotArmRuntime extends RobotKernel {
     const before = this.adapter.payloadApplicationSnapshot();
     const detail: Record<string, unknown> = {
       control: 'recover',
+      recoveryReason: this.recoveryReason,
       payloadBefore: before,
     };
     await this.audited('control', detail, () =>
@@ -2249,7 +2880,10 @@ export class RobotArmRuntime extends RobotKernel {
           await this.adapter[type]();
           if (type === 'connect') this.connectionEstablished = true;
         }
-        if (type !== 'disconnect') await this.adapter.getState();
+        if (type !== 'disconnect') {
+          const state = await this.adapter.getState();
+          if (type === 'connect') await this.preflightConnection(state);
+        }
       }, type !== 'enable'),
     );
   }
@@ -2481,13 +3115,423 @@ export class RobotArmRuntime extends RobotKernel {
       lease: leaseId ?? null,
     });
   }
-  async enterDragMode(): Promise<void> {
+  private teachingContext(input: {
+    robotProfileId: string;
+    toolProfileId: string;
+    cameraId: string;
+    screenProfileId: string;
+  }) {
+    const robot = this.profileStore.getRobot(input.robotProfileId);
+    const tool = this.profileStore.getTool(input.toolProfileId);
+    if (
+      robot.adapterId !== this.id ||
+      robot.connectionIdentity !== this.connectionIdentity
+    )
+      throw new RobotArmError(
+        'PROFILE_MISMATCH',
+        'Select the current robot installation',
+        409,
+      );
+    return JSON.stringify([
+      'camera-boundary-v2',
+      robot.id,
+      tool.id,
+      input.cameraId,
+      input.screenProfileId,
+      robot.geometryRevision,
+      tool.geometryRevision,
+    ]);
+  }
+  installationTeachingDraft(input: {
+    robotProfileId: string;
+    toolProfileId: string;
+    cameraId: string;
+    screenProfileId: string;
+  }) {
+    return (
+      this.profileStore
+        .list()
+        .installationTeachingDrafts?.find(
+          (t) => t.context === this.teachingContext(input),
+        ) ?? null
+    );
+  }
+  private teachingCaptureBusy = false;
+  async captureInstallationPoint(
+    input: {
+      robotProfileId: string;
+      toolProfileId: string;
+      cameraId: string;
+      screenProfileId: string;
+    },
+    point: import('./contracts.js').InstallationTeachingPoint,
+  ) {
+    if (!['reference', 'cameraBoundary'].includes(point))
+      throw new RobotArmError(
+        'INVALID_ARGUMENT',
+        'Unknown installation position',
+      );
+    if (this.teachingCaptureBusy)
+      throw new RobotArmError(
+        'BUSY',
+        'A teaching capture is already running',
+        409,
+      );
+    const capture = async () => {
+      const abort = this.abort;
+      const check = () => {
+        if (abort !== this.abort || abort?.signal.aborted)
+          throw new RobotArmError(
+            'ACTION_STOPPED',
+            'Teaching capture interrupted',
+            409,
+          );
+        this.check();
+      };
+      check();
+      const state = await this.state(input.toolProfileId);
+      const pose = state.state.pose;
+      if (
+        !pose ||
+        !state.state.connected ||
+        !state.state.enabled ||
+        state.state.moving ||
+        state.state.faults.length ||
+        state.state.status?.quality.stale
+      )
+        throw new RobotArmError(
+          'NOT_READY',
+          'Enable the robot and hold it still before recording',
+          409,
+        );
+      const tool = this.profileStore.getTool(input.toolProfileId);
+      this.assertAppliedPayload(tool);
+      const measured = await this.motionExecutor.stable(
+        pose,
+        10000,
+        check,
+        (ms) => this.hold(ms),
+      );
+      const latest = await this.adapter.getState();
+      check();
+      if (
+        !latest.connected ||
+        !latest.enabled ||
+        latest.moving ||
+        latest.faults.length ||
+        latest.status?.quality.stale
+      )
+        throw new RobotArmError(
+          'NOT_READY',
+          'Enable the robot and hold it still before recording',
+          409,
+        );
+      const context = this.teachingContext(input);
+      const previous = this.installationTeachingDraft(input);
+      const draft: import('./contracts.js').InstallationTeachingDraft =
+        previous ?? { ...input, id: randomUUID(), context, poses: {} };
+      if (point === 'reference') draft.poses = {};
+      else if (!draft.poses.reference)
+        throw new RobotArmError(
+          'NOT_READY',
+          'Record the reference position first',
+          409,
+        );
+      draft.id = randomUUID();
+      draft.poses[point] = structuredClone(measured);
+      await this.profileStore.saveInstallationTeachingDraft(draft, check);
+      return draft;
+    };
+    this.teachingCaptureBusy = true;
+    try {
+      return this.leased &&
+        this.operation?.kind === 'drag' &&
+        this.operation.status === 'running'
+        ? await capture()
+        : await this.configure(capture);
+    } finally {
+      this.teachingCaptureBusy = false;
+    }
+  }
+  async teachInstallation(input: {
+    binding: {
+      robotProfileId: string;
+      toolProfileId: string;
+      cameraId: string;
+      screenProfileId: string;
+    };
+    draftId: string;
+    corridorConfirmed: boolean;
+  }) {
+    return this.configure(async () => {
+      const { binding } = input;
+      if (input.corridorConfirmed !== true)
+        throw new RobotArmError(
+          'CONFIRMATION_REQUIRED',
+          'Confirm the clear approach corridor before recording installation',
+          409,
+        );
+      const state = await this.state(binding.toolProfileId);
+      if (
+        !state.state.connected ||
+        !state.state.enabled ||
+        state.state.moving ||
+        state.state.dragMode ||
+        state.state.faults.length ||
+        state.state.status?.quality.stale
+      )
+        throw new RobotArmError(
+          'NOT_READY',
+          'Stop teaching motion and confirm the clear approach corridor before recording installation',
+          409,
+        );
+      const draft = this.installationTeachingDraft(binding);
+      if (!draft || draft.id !== input.draftId)
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Record installation positions for the current equipment',
+          409,
+        );
+      const { reference, cameraBoundary } = draft.poses;
+      if (!reference || !cameraBoundary)
+        throw new RobotArmError(
+          'NOT_READY',
+          'Record the reference and camera-side boundary',
+          409,
+        );
+      const tool = this.profileStore.getTool(binding.toolProfileId);
+      this.assertAppliedPayload(tool);
+      const a = contactPoint(reference, tool.offsetMm);
+      const b = contactPoint(cameraBoundary, tool.offsetMm);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const separation = Math.hypot(dx, dy);
+      if (separation < 20)
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Record the camera-side boundary at least 20 mm from the reference',
+        );
+      if (
+        distance(
+          unit(rotate(reference.orientation, tool.contactDirection)),
+          unit(rotate(cameraBoundary.orientation, tool.contactDirection)),
+        ) > 0.005
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Keep the stylus contact direction unchanged; rotation around its axis is allowed',
+        );
+      const teaching: import('./contracts.js').InstallationTeaching = {
+        ...binding,
+        id: randomUUID(),
+        recordedAt: new Date().toISOString(),
+        referenceDeviceId: binding.screenProfileId,
+        robotGeometryRevision: this.profileStore.getRobot(
+          binding.robotProfileId,
+        ).geometryRevision,
+        toolGeometryRevision: tool.geometryRevision,
+        referencePose: reference,
+        poses: { reference, cameraBoundary },
+        cameraBoundary: {
+          point: { x: b.x, y: b.y },
+          normal: { x: dx / separation, y: dy / separation },
+        },
+        corridorConfirmed: true,
+      };
+      await this.profileStore.saveInstallationTeaching(teaching);
+      return teaching;
+    });
+  }
+  async parkScreenGroup(
+    binding: ProfileBinding,
+    calibrationId: string,
+    parking: NonNullable<
+      NonNullable<CalibrationSession['auto']>['batchParking']
+    >,
+    minimumTravelTipZMm: number,
+    verifyVisibility: (
+      signal: AbortSignal,
+    ) => Promise<ScreenVisibilityEvidence>,
+    guard: () => void,
+    confirmPages: () => Promise<void>,
+    operatorConfirmed = false,
+  ): Promise<{ pose: CartesianPose; visibility: SharedParkingEvidence }> {
+    const profile = this.profileStore.getCalibration(calibrationId);
+    const ctx = this.context(binding);
+    ctx.minimumTravelTipZMm = Math.max(
+      ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+      minimumTravelTipZMm,
+    );
+    if (
+      !calibrationAccepted(
+        profile,
+        this.profileStore.list().calibrationBatch?.id,
+      )
+    )
+      throw new RobotArmError(
+        'CALIBRATION_INVALID',
+        'A verified screen from the current batch is required for shared parking.',
+        409,
+      );
+    this.validateCalibration(profile, binding, ctx, false);
+    if (!operatorConfirmed) await confirmPages();
+    guard();
+    const input = { ...binding, cameraId: ctx.installationTeaching?.cameraId };
+    return this.collectAutomaticPoints(input, async (host) => {
+      const check = () => {
+        guard();
+        host.check();
+      };
+      const state: CameraAvoidanceState = {
+        candidate: structuredClone(profile),
+        stage: 'verification',
+        auto: { batchParking: parking },
+      };
+      if (operatorConfirmed) {
+        check();
+        const pose = await host.read();
+        const teaching = ctx.installationTeaching;
+        if (
+          !teaching ||
+          cameraBoundaryExcessMm(pose.positionMm, teaching) > -20 ||
+          cameraBoundaryExcessMm(
+            contactPoint(pose, ctx.tool.offsetMm),
+            teaching,
+          ) > -20
+        )
+          throw new RobotArmError(
+            'CAMERA_CLEARANCE_REQUIRED',
+            'The current position must clear the taught camera boundary by at least 20 mm.',
+            409,
+          );
+        assertBatchParking(state, ctx, pose);
+        await this.motionExecutor.stable(pose, 5000, check, (ms) =>
+          this.hold(ms),
+        );
+        check();
+        return {
+          pose,
+          visibility: { operatorConfirmedAt: new Date().toISOString() },
+        };
+      }
+      const found = await avoidCamera(
+        {
+          profileStore: this.profileStore,
+          check,
+          interrupted: () => host.signal.aborted,
+          stationaryPose: async () => {
+            check();
+            return host.read();
+          },
+          safeLift: (pose, candidate, context, onScreen) =>
+            this.safeLift(pose, candidate, context, onScreen),
+          preflight: async (targets) => {
+            check();
+            await host.preflight(
+              targets.map((target) => target.pose),
+              targets[0]?.options,
+            );
+            check();
+          },
+          move: (pose, _context, speed, acceleration) => {
+            check();
+            return host.move(pose, { speed, acceleration });
+          },
+          stable: (pose) =>
+            this.motionExecutor
+              .stable(pose, 5000, check, (ms) => this.hold(ms))
+              .then(() => undefined),
+          verifyCameraVisibility: async () => {
+            check();
+            const evidence = await verifyVisibility(host.signal);
+            check();
+            return evidence;
+          },
+        },
+        state,
+        ctx,
+      );
+      check();
+      if (!found && state.auto?.cameraVisibility)
+        throw new RobotArmError(
+          'CAMERA_VIEW_OBSTRUCTED',
+          'The arm reached a candidate Safe Position, but the camera could not verify every screen.',
+          409,
+          {
+            screens: state.auto.cameraVisibility.screens.map((screen) => ({
+              id: screen.id,
+              percent: Math.round(
+                100 *
+                  (screen.interiorVisibleFraction ?? screen.visibleFraction),
+              ),
+            })),
+          },
+        );
+      if (!found || !state.auto?.cameraVisibility?.clear)
+        throw new RobotArmError(
+          'CAMERA_AVOIDANCE_FAILED',
+          'No reachable camera-clear Safe Position was found within the bounded search.',
+          409,
+        );
+      return {
+        pose: state.candidate!.observationPose,
+        visibility: state.auto.cameraVisibility,
+      };
+    });
+  }
+
+  async positionInstallationPoint(
+    input: {
+      robotProfileId: string;
+      toolProfileId: string;
+      cameraId: string;
+      motion?: Pick<ScreenMotionSettings, 'actionSpeed' | 'actionAcceleration'>;
+    },
+    point: import('./contracts.js').InstallationTeachingPoint,
+  ) {
+    const teaching = this.profileStore.installationTeaching(input);
+    if (!teaching)
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'Record installation teaching for the current robot, tool and camera',
+        409,
+      );
+    const target =
+      point === 'reference'
+        ? teaching.referencePose
+        : point === 'cameraBoundary'
+          ? teaching.poses.cameraBoundary
+          : undefined;
+    if (!target)
+      throw new RobotArmError(
+        'INVALID_ARGUMENT',
+        'Unknown installation position',
+      );
+    const tool = this.profileStore.getTool(input.toolProfileId);
+    const motion = input.motion ?? this.describeCapabilities().setupDefaults;
+    if (!motion)
+      throw new RobotArmError(
+        'MOTION_SETTINGS_REQUIRED',
+        'This adapter needs explicit screen motion settings',
+      );
+    return this.collectAutomaticPoints(input, (host) =>
+      moveToTaughtPosition(host, teaching, tool, target, motion),
+    );
+  }
+  async enterDragMode(
+    selection?: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+  ): Promise<void> {
     if (this.aiTaskRequestId)
       throw new RobotArmError('BUSY', 'An AI task owns the workstation', 409);
     this.acquire('drag');
     const eventId = this.operation!.requestId;
     try {
-      await this.drag(true);
+      await this.drag(
+        true,
+        selection
+          ? this.profileStore.getTool(selection.toolProfileId)
+          : undefined,
+      );
       this.check();
       this.audit('drag', eventId, 'completed', { control: 'drag-enter' });
     } catch (e) {
@@ -2499,7 +3543,9 @@ export class RobotArmRuntime extends RobotKernel {
   async exitDragMode(): Promise<void> {
     if (this.recoveryRequired && !this.leased) {
       try {
-        await this.drag(false);
+        // Stop invalidated the Drag lease. The measured exit needs a new,
+        // recovery-only control lease so another Stop can still interrupt it.
+        await this.exclusive(() => this.drag(false), true);
         this.audit('drag', randomUUID(), 'completed', {
           control: 'drag-exit',
           standalone: true,
@@ -2685,6 +3731,10 @@ export class RobotArmRuntime extends RobotKernel {
     id: string,
     command: CalibrationCommand,
     beforeMove?: () => Promise<void>,
+    onProgress?: () => void,
+    verifyCameraVisibility?: (
+      signal: AbortSignal,
+    ) => Promise<ScreenVisibilityEvidence>,
   ): Promise<CalibrationSession> {
     if (
       !command ||
@@ -2820,9 +3870,26 @@ export class RobotArmRuntime extends RobotKernel {
             if (this.session?.id === id && !this.abort?.signal.aborted) {
               this.session.progress = next.progress;
               this.session.verificationRuns = next.verificationRuns;
+              if (this.session.auto && next.auto)
+                Object.assign(this.session.auto, {
+                  avoidingCamera: next.auto.avoidingCamera,
+                  checkingVisibility: next.auto.checkingVisibility,
+                  cameraVisibility: next.auto.cameraVisibility,
+                });
+              onProgress?.();
             }
           },
           adapter: this.adapter,
+          verifyCameraVisibility: verifyCameraVisibility
+            ? async () => {
+                this.check();
+                const signal = this.abort!.signal;
+                const result = await verifyCameraVisibility(signal);
+                signal.throwIfAborted();
+                this.check();
+                return result;
+              }
+            : undefined,
           profileStore: this.profileStore,
           check: () => this.check(),
           interrupted: () => Boolean(this.abort?.signal.aborted),

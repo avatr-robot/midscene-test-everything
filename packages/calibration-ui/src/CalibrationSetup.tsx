@@ -1,5 +1,5 @@
 import { Button, InputNumber, Modal, Space, Typography } from 'antd';
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { SetupIllustration } from './components/robot-arm/SetupIllustration';
 import { ToolSetupStep } from './components/robot-arm/ToolSetupStep';
@@ -10,6 +10,7 @@ import {
 } from './components/robot-arm/setup-draft';
 import { t, useCalibrationLanguage } from './i18n';
 import type { EffectiveCapabilities, ToolProfile } from './robot-arm-api';
+import { speakCalibration } from './voice/calibration';
 
 export interface MeasuredCalibrationSetup {
   width?: number;
@@ -23,14 +24,17 @@ export function CalibrationSetup({
   initial,
   onCancel,
   footer,
+  showIllustration = true,
 }: {
   footer?: HTMLElement | null;
+  showIllustration?: boolean;
   capabilities?: EffectiveCapabilities;
   initial?: MeasuredCalibrationSetup;
   onCancel?(): void;
   onSave(input: MeasuredCalibrationSetup): Promise<void>;
 }) {
   useCalibrationLanguage();
+  useEffect(() => speakCalibration('toolSetup'), []);
   const id = useId();
   const inferred = initial && inferAxialTool(initial.tool);
   const [axis, setAxis] = useState<ToolAxis>(inferred?.axis ?? '-Z');
@@ -115,19 +119,21 @@ export function CalibrationSetup({
         )}
         {footer ? createPortal(actions, footer) : actions}
       </div>
-      <aside className="robot-setup-guide-card">
-        <figure className="robot-setup-media-slot">
-          <SetupIllustration step="tool" />
-          <figcaption className="robot-setup-reference-toolbar">
-            {t('Setup illustration')}
-          </figcaption>
-        </figure>
-        <Typography.Paragraph>
-          {t(
-            'Measure from the flange origin to the contact tip, including the holder.',
-          )}
-        </Typography.Paragraph>
-      </aside>
+      {showIllustration && (
+        <aside className="robot-setup-guide-card">
+          <figure className="robot-setup-media-slot">
+            <SetupIllustration step="tool" />
+            <figcaption className="robot-setup-reference-toolbar">
+              {t('Setup illustration')}
+            </figcaption>
+          </figure>
+          <Typography.Paragraph>
+            {t(
+              'Measure from the flange origin to the contact tip, including the holder.',
+            )}
+          </Typography.Paragraph>
+        </aside>
+      )}
       <Modal
         open={advanced}
         title={t('Advanced Tool Settings')}

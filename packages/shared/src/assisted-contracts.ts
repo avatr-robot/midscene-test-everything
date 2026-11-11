@@ -1,21 +1,30 @@
+import type { CalibrationQualityReading } from './calibration-quality.js';
 import type {
   CalibrationProfile,
   CalibrationSession,
   CartesianPose,
   MotionAcceleration,
+  MotionOptions,
   MotionSpeed,
   ProfileBinding,
   ScreenMotionSettings,
   Vector3,
   VisionBinding,
 } from './contracts.js';
+export * from './calibration-quality.js';
 
 export const CALIBRATION_CLICK_RADIUS_PX = 13;
 export const CALIBRATION_CLICK_COUNT = 15;
 export const CALIBRATION_CLICK_REQUIRED = 15;
 export const CALIBRATION_PHONE_PATH = '/phone-calibration';
 export const CALIBRATION_PHONE_POLICY = {
+  visibilityPattern: {
+    columns: 8,
+    rows: 12,
+    colors: ['#40e55b', '#e540d9'],
+  },
   heartbeatMs: 750,
+  stepAcknowledgementMs: 5000,
   measurementFreshMs: 10000,
   displayFreshMs: 10000,
 } as const;
@@ -45,6 +54,7 @@ export interface PhoneTouchEvent {
   point?: WebPoint;
 }
 export interface CalibrationPhoneStatus {
+  displayRequirement?: 'home-screen' | 'fullscreen';
   model?: string;
   diagnostics?: {
     version?: 2;
@@ -52,6 +62,8 @@ export interface CalibrationPhoneStatus {
     receivedAt: number;
     updateSequence: number;
     contact: boolean;
+    wakeState?: CalibrationPageUpdate['wakeState'];
+    fullscreen?: boolean;
     feedback?: CalibrationPageUpdate['stepFeedback'];
     events: PhoneTouchEvent[];
   };
@@ -151,6 +163,8 @@ export interface CalibrationPointProgress {
     | 'slide'
     | 'recover';
   targets?: WebPoint[];
+  /** Recorded grid contacts in page CSS pixels, excluding direction probes. */
+  measuredPoints?: WebPoint[];
   heightSearch?: {
     precision?: boolean;
     predictedZ: number;
@@ -211,12 +225,25 @@ export interface CalibrationPageLayout {
   >;
 }
 export interface CalibrationPageUpdate {
+  /** Reported by the optical marker page before capture. */
+  platform?: 'android' | 'harmonyos' | 'ios' | 'other';
+  displayMode?: 'browser' | 'fullscreen' | 'standalone';
+  fullscreen?: boolean;
+  wakeState?: 'system' | 'video' | 'pending' | 'blocked';
+  /** View actually displayed by the phone. */
+  view?: CalibrationPageReply['view'];
+  markersPainted?: boolean;
+  markerRequest?: string;
+  visibilityProbeAck?: string;
   touchDiagnosticsVersion?: 2;
   /** Bounded diagnostic history; never used as contact evidence. */
   touchEvents?: PhoneTouchEvent[];
   model?: string;
   /** Issued by the host when it serves this document. */
   pageId: string;
+  browserInstanceId?: string;
+  resumeBrowserInstanceId?: string;
+  claimBrowserInstance?: boolean;
   sequence: number;
   visible: boolean;
   layout: CalibrationPageLayout;
@@ -230,7 +257,9 @@ export interface CalibrationPageUpdate {
     outcome: 'ready' | 'no_touch' | 'touched' | 'unknown';
     /** Echoed only when the phone supports a fresh held-contact snapshot. */
     contactMode?: 'current';
-    reason?: 'multiple_contacts';
+    /** A pointer ended after this request arrived but before the browser's first painted reading. */
+    releasedBeforeAck?: boolean;
+    reason?: 'multiple_contacts' | 'pointer_cancelled';
     point?: WebPoint;
   };
   captureAck?: string;
@@ -244,10 +273,19 @@ export interface CalibrationPageUpdate {
   }>;
 }
 export interface CalibrationPageReply {
+  visibilityProbe?: { id: string; phase: 0 | 1 };
+  /** Same-camera transition from camera-only preview to a paired Device. */
+  pairingToken?: string;
+  insetMarkers?: boolean;
+  markerRequest?: string;
   boundaryGuide?: { group: 'hover' | 'contact'; corners: WebPoint[] };
+  /** Distinguishes a pending or failed check on the phone's review screen. */
+  reviewStage?: 'boundary-review' | 'verification-failed';
   imageTrial?: boolean;
   view:
     | 'markers'
+    | 'waiting'
+    | 'touch-preview'
     | 'collect'
     | 'reference-required'
     | 'capture-failed'
@@ -286,12 +324,22 @@ export interface WebCalibrationMapping {
   markerErrorPx: number;
   accuracy: CameraMappingAccuracy;
 }
+/** Approximate stylus footprints in the original camera image, in source pixels. */
+export interface CalibrationPreviewPositions {
+  reference?: WebPoint;
+  cameraBoundary?: WebPoint;
+  safe?: WebPoint;
+}
 /** Configuration prepared before any calibration task exists. */
 export interface AssistedCalibrationSetup {
   selection?: Pick<
     AssistedCalibrationInput,
     'robotProfileId' | 'toolProfileId' | 'cameraId' | 'width' | 'height'
   >;
+  teaching?: import('./contracts.js').InstallationTeaching;
+  markerCapture?: { request: string; attempt: number; captureAt: number };
+  /** Progress of the latest page-mapping check in this setup. */
+  mappingCheck?: 'checking' | 'confirmed' | 'failed';
   prepared: boolean;
   phoneConnected: boolean;
   layout?: CalibrationPageLayout;
@@ -326,9 +374,14 @@ export interface WebVerificationEvidence {
 }
 export interface AssistedCalibrationState {
   id: string;
+  cameraBoundaryPosition?: CartesianPose;
+  teachingId?: string;
   stage:
+    | 'positioning-boundary'
+    | 'avoiding-camera'
     | 'ready'
     | 'positioning-safe'
+    | 'boundary-review'
     | 'positioning'
     | 'collecting'
     | 'reference-required'
@@ -356,9 +409,17 @@ export interface AssistedCalibrationState {
   mapping?: WebCalibrationMapping;
   automaticPhase?: 'local' | 'grid';
   samples: number;
+  /** Travel to the reference before probing or after a sampling/fit check. */
+  referenceTravel?: 'approach' | 'return';
+  recheckingPayload?: boolean;
   /** Operator-authorized collection, safe return and verification sequence. */
   automaticWorkflow?: boolean;
   explorationMode?: AutomaticExplorationMode;
+  /** Collection failed before boundary verification. */
+  collectionFailed?: boolean;
+  /** Stage at which this attempt was interrupted. */
+  interruptedFrom?: AssistedCalibrationState['stage'];
+  awaitingSocketRecovery?: boolean;
   anchors: WebPoint[];
   points: CapturedCalibrationPoint[];
   /** Diagnostic 3D residuals, never a substitute for click verification. */
@@ -367,6 +428,8 @@ export interface AssistedCalibrationState {
     gridRmsMm: number;
     holdoutMaxMm: number;
     coverage: number;
+    shortSideMm?: number;
+    warnings?: CalibrationQualityReading[];
   };
   error?: string;
   errorDetails?: {
@@ -394,6 +457,10 @@ export interface AssistedCalibrationState {
   result?: CalibrationProfile;
 }
 export interface AutomaticCaptureHost {
+  preflight?(
+    poses: CartesianPose[],
+    motion?: Pick<MotionOptions, 'speed' | 'acceleration'>,
+  ): Promise<void>;
   signal: AbortSignal;
   check(): void;
   read(): Promise<CartesianPose>;
@@ -442,6 +509,9 @@ export interface ScreenCornerDetection {
   attempt: ScreenDetectionAttempt;
 }
 export type AssistedCalibrationAction =
+  | 'position-boundary'
+  | 'record-boundary'
+  | 'save-teaching'
   | 'auto-repair'
   | 'reprobe'
   | 'apply-reprobe'
@@ -456,6 +526,8 @@ export type AssistedCalibrationAction =
   | 'start-automatic'
   | 'start-fast'
   | 'start-slide'
+  | 'verify-boundary'
+  | 'retry-standard'
   | 'stop-capture'
   | 'cancel'
   | 'verify'
@@ -464,8 +536,11 @@ export type AssistedCalibrationAction =
 
 /** Portable collected-point checkpoint; restoring it never moves the robot. */
 export interface AssistedCalibrationRecording {
+  /** The screen Device that collected these points, when running per Device. */
+  deviceId?: string;
   /** Persisted geometry to preserve the exact plane and compensation on resume. */
   calibrationProfileId?: string;
+  explorationMode?: AutomaticExplorationMode;
   points: CapturedCalibrationPoint[];
   input: AssistedCalibrationInput;
   mapping: WebCalibrationMapping;
@@ -474,4 +549,121 @@ export interface AssistedCalibrationRecording {
   safePosition?: CartesianPose;
   /** Previous failed targets are diagnostics only, never acceptance evidence. */
   failedAttempts?: WebVerificationAttempt[];
+}
+
+export type CalibrationBatchSamplingMode = Extract<
+  AutomaticExplorationMode,
+  'standard' | 'slide'
+>;
+
+export interface CalibrationBatchState {
+  id: string;
+  revision: number;
+  status:
+    | 'running'
+    | 'waiting'
+    | 'stopping'
+    | 'stopped'
+    | 'completed'
+    | 'failed';
+  cameraId?: string;
+  robotProfileId?: string;
+  toolProfileId?: string;
+  samplingMode?: CalibrationBatchSamplingMode;
+  usesSharedSafePosition?: true;
+  sharedSafePosition?: CartesianPose;
+  sharedSafePositionVerified?: boolean;
+  sharedVisibility?: import('./contracts.js').ScreenVisibilityEvidence;
+  sharedParkingOperatorConfirmedAt?: string;
+  acceptance?: 'manual' | 'automatic';
+  error?: string;
+  visibilityMissingScreens?: string[];
+  planVersion?: string;
+  contextVersion?: string;
+  transfer?: CalibrationBatchPlan['transfer'];
+  currentIndex: number;
+  items: Array<{
+    deviceId: string;
+    screenId: string;
+    screenProfileId?: string;
+    name: string;
+    runIds: string[];
+    progress?: {
+      phase: string;
+      message?: string;
+      index: number;
+      total: number;
+    };
+    note?: string;
+    status:
+      | 'pending'
+      | 'preparing'
+      | 'transferring'
+      | 'awaiting-mapping'
+      | 'awaiting-setup'
+      | 'awaiting-phone'
+      | 'awaiting-placement'
+      | 'exploring'
+      | 'awaiting-boundary-review'
+      | 'awaiting-acceptance'
+      | 'completed'
+      | 'failed'
+      | 'skipped'
+      | 'stopped';
+    attempts: number;
+    error?: string;
+    calibrationProfileId?: string;
+  }>;
+}
+
+export interface CalibrationBatchPlan {
+  cameraId: string;
+  version: string;
+  screens: {
+    screenId: string;
+    name: string;
+    calibrated: boolean;
+    startsHere: boolean;
+    expectedCenterMm?: WebPoint;
+    expectedSource?: 'calibration' | 'estimate';
+  }[];
+  transfer?: {
+    travelTipZMm: number;
+    highestObstacleZMm: number;
+    clearanceMm: number;
+    corridor: { minX: number; maxX: number; minY: number; maxY: number };
+    waypoints: WebPoint[];
+    corridorConfirmed: true;
+  };
+}
+export interface WorkstationScreenState {
+  cameraId: string;
+  screenId: string;
+  name: string;
+  screenProfileId?: string;
+  calibrationProfileId?: string;
+  expectedCenterMm?: WebPoint;
+  expectedSource?: 'calibration' | 'estimate';
+  selected: boolean;
+  ready: boolean;
+  status:
+    | 'unconfigured'
+    | 'unavailable'
+    | 'mapping-required'
+    | 'calibration-required'
+    | 'acceptance-required'
+    | 'ready';
+}
+export interface CalibrationBatchCommand {
+  revision: number;
+  action:
+    | 'continue'
+    | 'retry'
+    | 'skip'
+    | 'stop'
+    | 'accept'
+    | 'record-safe-position'
+    | 'confirm-shared-parking'
+    | 'enter-drag'
+    | 'exit-drag';
 }

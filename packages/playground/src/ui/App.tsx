@@ -1,24 +1,36 @@
+import {
+  VoiceSettings,
+  robotVoice,
+  useBrowserVoice,
+  useCalibrationLanguage,
+} from '@midscene/arm-calibration-ui';
 import { armUiTheme } from '@midscene/arm-kit-shared';
 import { App as AntApp, Badge, Button, ConfigProvider } from 'antd';
 import enUS from 'antd/locale/en_US';
 import zhCN from 'antd/locale/zh_CN';
 import { Languages } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import logo from './assets/midscene-logo.png';
 import { ConnectionScreen } from './components/ConnectionScreen';
 import { DeviceWorkspace } from './components/DeviceWorkspace';
 import { useConnection } from './connection';
 import { useSetupStore } from './hooks/useRobotArm';
 import { usePreferences, useT } from './i18n';
+import { useTasks } from './tasks';
 import './App.less';
 import './components/robot-arm/Setup.less';
 
 import { type PlaygroundViews, Views } from './extensions';
 export function App(views: PlaygroundViews) {
+  useBrowserVoice();
   const t = useT();
   const { language, setLanguage } = usePreferences();
   const { phase, check } = useConnection();
   const connected = phase === 'connected';
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  useEffect(() => {
+    if (connected) setWorkspaceOpen(true);
+  }, [connected]);
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -28,29 +40,12 @@ export function App(views: PlaygroundViews) {
         if (disposed) return;
         const store = useSetupStore.getState();
         const connection = useConnection.getState();
-        const runtime = connection.runtime;
-        const state = runtime?.state;
-        if (
-          connection.phase === 'connected' &&
-          connection.recoveryRequired &&
-          !connection.controlPending &&
-          !store.busy &&
-          state?.connected &&
-          !runtime?.aiRun &&
-          runtime?.operation?.status !== 'running' &&
-          !runtime?.softwarePaused &&
-          !state.moving &&
-          !state.dragMode &&
-          !state.paused &&
-          !state.faults.length
-        ) {
-          await connection.recover();
-          if (disposed) return;
-        }
         const session = connection.setupSession;
         if (
           !store.setup ||
           store.serviceStatus === 'offline' ||
+          (store.setup.phase === 'connecting' &&
+            connection.phase !== 'connecting') ||
           (session && session !== store.setup.session)
         )
           await store.refreshConfiguration();
@@ -64,9 +59,31 @@ export function App(views: PlaygroundViews) {
     };
   }, [check]);
   useEffect(() => {
+    useCalibrationLanguage.getState().setLanguage(language);
     document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
-    document.title = t('playground');
   }, [language]);
+  useEffect(
+    () =>
+      useConnection.subscribe((next, previous) => {
+        if (next.setupSession !== previous.setupSession)
+          useTasks.getState().reset();
+        if (
+          !next.runtime ||
+          !previous.runtime ||
+          next.setupSession !== previous.setupSession
+        )
+          return;
+        const current = next.runtime.state;
+        const old = previous.runtime.state;
+        if (current.faults.length && !old.faults.length)
+          robotVoice.notify('fault', 3);
+        else if (current.enabled !== old.enabled)
+          robotVoice.notify(current.enabled ? 'enabled' : 'disabled', 1);
+        if (next.runtime.softwarePaused && !previous.runtime.softwarePaused)
+          robotVoice.notify('paused', 2);
+      }),
+    [],
+  );
   return (
     <ConfigProvider theme={armUiTheme} locale={language === 'zh' ? zhCN : enUS}>
       <Views.Provider value={views}>
@@ -76,9 +93,10 @@ export function App(views: PlaygroundViews) {
               <div className="brand">
                 <img src={logo} alt="Midscene" />
                 <span className="brand-divider" />
-                <span>{t('playground')}</span>
+                <span translate="no">Robot Playground</span>
               </div>
               <div className="header-actions">
+                <VoiceSettings compact />
                 <Badge
                   status={
                     connected
@@ -105,7 +123,11 @@ export function App(views: PlaygroundViews) {
                 </Button>
               </div>
             </header>
-            {connected ? <DeviceWorkspace /> : <ConnectionScreen />}
+            {workspaceOpen || connected ? (
+              <DeviceWorkspace connected={connected} />
+            ) : (
+              <ConnectionScreen onSkip={() => setWorkspaceOpen(true)} />
+            )}
           </div>
         </AntApp>
       </Views.Provider>

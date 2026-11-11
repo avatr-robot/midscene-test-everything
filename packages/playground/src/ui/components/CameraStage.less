@@ -46,8 +46,13 @@
 .camera-stage-actions {
   display: flex;
   align-items: center;
-  .ant-btn-icon-only { width: 32px; padding-inline: 0; }
-  .ant-btn-icon { display: inline-flex; }
+  .ant-btn-icon-only {
+    width: 32px;
+    padding-inline: 0;
+  }
+  .ant-btn-icon {
+    display: inline-flex;
+  }
   flex-wrap: wrap;
   gap: 8px;
 }
@@ -62,6 +67,20 @@
   overflow: hidden;
   border-radius: 12px;
   background: var(--rv-preview-bg);
+}
+
+/* A saved perspective result is framed by the phone screen, not the camera. */
+.camera-stage-preview.is-framed {
+  width: min(100%, calc(64vh * var(--rv-preview-aspect, 16 / 9)));
+  aspect-ratio: var(--rv-preview-aspect, 16 / 9);
+  border: 1px solid var(--rv-border, rgb(0 0 0 / 12%));
+}
+
+.camera-stage-preview.is-framed:fullscreen,
+.camera-stage-preview.is-framed.is-expanded {
+  width: 100vw;
+  height: 100vh;
+  aspect-ratio: auto;
 }
 
 .camera-stage-preview .stream-preview {
@@ -225,4 +244,23 @@
   .rv-segmented.ant-segmented .ant-segmented-thumb {
     transition: none;
   }
+}
+
+.camera-fullscreen {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+}
+.camera-stage-preview:fullscreen,
+.camera-stage-preview.is-expanded {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  border-radius: 0;
+  background: #131517;
+}
+.camera-stage-preview.is-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
 }

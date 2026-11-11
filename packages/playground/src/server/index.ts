@@ -1,14 +1,22 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { networkInterfaces } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ArmController, listCameras } from '@midscene/arm-kit';
+import {
+  ArmController,
+  CameraSessionManager,
+  RobotArmError,
+  listCameras,
+} from '@midscene/arm-kit';
 import type { RobotArmAdapter } from '@midscene/arm-kit';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
+import {
+  discoverWifiInterfaces,
+  phoneAddresses,
+} from '@midscene/arm-kit/internal/network/phone-addresses';
 import type { ProfileStore } from '@midscene/arm-kit/internal/runtime/profile-store';
 import { RobotActionAuditStore } from '@midscene/arm-kit/internal/runtime/robot-action-audit-store';
 import {
@@ -16,10 +24,24 @@ import {
   robotDataRoot,
 } from '@midscene/arm-kit/internal/storage/layout';
 import { PlaygroundArmControls } from './arm-controls.js';
-import { streamCameraPreview } from './camera-preview.js';
+import {
+  type CameraPreviewView,
+  clearStandaloneCorrection,
+  registerClientPreview,
+  saveStandaloneCorrection,
+  streamCameraPreview,
+  streamStandalonePreview,
+} from './camera-preview.js';
 import { CodeSetup } from './code-setup.js';
 import { PlaygroundDevices } from './devices.js';
+import { MarkerPreview } from './marker-preview.js';
 import { PhonePairings } from './phone-pairings.js';
+import {
+  PreviewPerspectives,
+  phoneFingerprint,
+} from './preview-perspectives.js';
+import { screenConnectPage } from './screen-connect-page.js';
+import { ScreenControl } from './screen-control.js';
 import type {
   PlaygroundSession,
   SessionContext,
@@ -29,10 +51,17 @@ import { StatusPanel } from './status-panel.js';
 import { PlaygroundTasks } from './tasks.js';
 
 export interface PlaygroundOptions {
-  createAdapter(): RobotArmAdapter | Promise<RobotArmAdapter>;
+  /** Resolve the controller address on startup and on each reconnect. */
+  discoverHost?(): Promise<string>;
+  createAdapter(host?: string): RobotArmAdapter | Promise<RobotArmAdapter>;
   connection?: { adapter: string; options: Record<string, string | number> };
   connectionDiagram?: 'ethernet';
   installationId?: string;
+  /**
+   * Start the configured connection without waiting for the browser. Defaults
+   * to discovery; a simulator sets it because it has no controller to probe.
+   */
+  autoConnect?: boolean;
   port?: number;
   webRoot?: string;
   /** Additional local frontend origins allowed during development. */
@@ -41,9 +70,11 @@ export interface PlaygroundOptions {
 
 export async function startArmPlayground({
   createAdapter,
+  discoverHost,
   connection,
   connectionDiagram,
   installationId,
+  autoConnect,
   port,
   webRoot,
   developmentOrigins,
@@ -58,7 +89,9 @@ export async function startArmPlayground({
         installationId,
         connection,
         connectionDiagram,
+        discoverHost,
       ),
+    autoConnect: autoConnect ?? Boolean(discoverHost),
     port,
     webRoot,
     developmentOrigins,
@@ -81,6 +114,7 @@ async function readBody(req: IncomingMessage, limit = 8192) {
   return JSON.parse(text || '{}');
 }
 interface HostOptions {
+  autoConnect?: boolean;
   createSetup(context: SessionContext): HostSetup;
   port?: number;
   webRoot?: string;
@@ -96,22 +130,36 @@ interface HostOptions {
 }
 export async function startPlaygroundHost({
   createSetup,
+  autoConnect = false,
   port = 0,
   webRoot = fileURLToPath(new URL('../../dist/ui/', import.meta.url)),
   models = [],
   handleRequest,
   developmentOrigins = [],
 }: HostOptions) {
+  const markerPreviews = new Map<string, MarkerPreview>();
+  const wifiInterfaces = await discoverWifiInterfaces();
+  const phoneLinks = (token: string) =>
+    phoneAddresses({ wifiInterfaces, controllerHost: host }).map(
+      ({ address, name }) => ({
+        name,
+        url: `http://${address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
+      }),
+    );
+  const cameraManager = new CameraSessionManager();
+  const pendingPerspectives = new PreviewPerspectives(cameraManager);
+  const previewScreens = new Map<string, string>();
   let adapterName: string | undefined;
   let devices: PlaygroundDevices | undefined;
   let tasks: PlaygroundTasks | undefined;
+  let screenControl: ScreenControl | undefined;
   let arm: ArmController | undefined;
   let armControls: PlaygroundArmControls | undefined;
   let host: string | undefined;
   let connecting = false;
   let connectionError: string | undefined;
-  async function connectionStatus() {
-    if (connecting)
+  async function connectionStatus(fresh = false) {
+    if (connecting || setup.phase === 'connecting')
       return { phase: 'connecting', host, setupSession: setup.session };
     if (!arm)
       return {
@@ -121,7 +169,9 @@ export async function startPlaygroundHost({
         setupSession: setup.session,
       };
     try {
-      const status = await arm.getStatus();
+      const status = fresh
+        ? await controllerRuntime(arm).state(undefined, { fresh: true })
+        : await arm.getStatus();
       const state = status.state;
       return {
         phase: state.connected ? 'connected' : 'disconnected',
@@ -136,6 +186,7 @@ export async function startPlaygroundHost({
         setupSession: setup.session,
         recoveryRequired: status.recoveryRequired,
         softwarePaused: status.softwarePaused,
+        ...(screenControl ? { control: screenControl.controlState() } : {}),
       };
     } catch (error) {
       return {
@@ -180,22 +231,24 @@ export async function startPlaygroundHost({
         );
         await pairings.load();
         devices = new PlaygroundDevices(arm, {
+          cameras: cameraManager,
           pairings,
-          phoneLinks: (token) =>
-            Object.values(networkInterfaces())
-              .flat()
-              .filter(
-                (entry): entry is NonNullable<typeof entry> =>
-                  !!entry && entry.family === 'IPv4' && !entry.internal,
-              )
-              .map((entry) => ({
-                name: entry.address,
-                url: `http://${entry.address}:${(server.address() as AddressInfo).port}/phone-calibration?token=${token}`,
-              })),
+          phoneLinks,
+          phoneEntryAtRoot: developmentOrigins.length > 0,
         });
         tasks = new PlaygroundTasks(devices);
+        screenControl = new ScreenControl(devices, () => tasks);
         armControls = new PlaygroundArmControls(arm, tasks);
-        await devices.startAll();
+        await devices.startAll(listCameras, [
+          ...cameraManager.activeCameraIds(),
+          ...[...markerPreviews.values()]
+            .filter((p) => p.activePairing)
+            .map((p) => p.cameraId),
+        ]);
+        for (const id of new Set(
+          [...devices.entries.values()].map((entry) => entry.cameraId),
+        ))
+          await restoreMarkerPerspective(devices, id);
       } catch (error) {
         if (arm) await disconnectArm();
         else await candidate.close();
@@ -208,11 +261,35 @@ export async function startPlaygroundHost({
       connecting = false;
     }
   }
+  async function restoreMarkerPerspective(
+    registry: PlaygroundDevices,
+    cameraId: string,
+  ) {
+    const pending = await pendingPerspectives.get(cameraId);
+    if (!pending) return;
+    const screen = registry.markerCalibration.previewTarget(
+      cameraId,
+      pending.phones,
+    );
+    const entry = screen && registry.entries.get(screen);
+    if (!entry || devices !== registry) return;
+    const geometry = await cameraManager.persistedPerspective(
+      cameraId,
+      pending.scope,
+    );
+    if (!geometry?.target) return;
+    await entry.camera.setPerspective(geometry.correction, geometry.target);
+    previewScreens.set(cameraId, screen);
+    await pendingPerspectives.clear(cameraId, pending);
+  }
   async function disconnectArm() {
+    for (const preview of markerPreviews.values()) preview.cancelHandoff();
+    previewScreens.clear();
     const activeTasks = tasks;
     const activeDevices = devices;
     const controller = arm;
     armControls = undefined;
+    screenControl = undefined;
     tasks = undefined;
     devices = undefined;
     arm = undefined;
@@ -244,8 +321,10 @@ export async function startPlaygroundHost({
     getCalibrationSelection(cameraId) {
       if (!cameraId) return;
       const session = devices?.entries.get(cameraId)?.calibration;
-      if (session?.phase === 'running' && !session.abort.signal.aborted)
-        return session.host?.service.setup().selection;
+      if (session?.phase === 'running' && !session.abort.signal.aborted) {
+        const selection = session.host?.service.setup().selection;
+        return selection && { ...selection, cameraId };
+      }
     },
     getArm: () => arm,
     getControls: () => armControls,
@@ -261,20 +340,104 @@ export async function startPlaygroundHost({
       res.end(JSON.stringify(data));
     };
     if (!url) return send(400, { error: 'Invalid URL' });
-    if (url.pathname.startsWith('/phone-calibration')) {
+    const lanPhoneRoot =
+      url.pathname === '/' &&
+      developmentOrigins.length > 0 &&
+      req.headers.host &&
+      !/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(req.headers.host);
+    if (
+      lanPhoneRoot ||
+      url.pathname === '/s' ||
+      url.pathname.startsWith('/phone-calibration')
+    ) {
       try {
+        if (
+          (lanPhoneRoot ||
+            url.pathname === '/s' ||
+            url.pathname === '/phone-calibration/connect') &&
+          req.method === 'GET'
+        ) {
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+          });
+          return res.end(screenConnectPage());
+        }
+        if (
+          url.pathname === '/phone-calibration/register' &&
+          req.method === 'POST'
+        ) {
+          if (
+            req.headers.origin &&
+            ![
+              `http://${req.headers.host}`,
+              `https://${req.headers.host}`,
+            ].includes(req.headers.origin)
+          )
+            return send(403, { error: 'Origin not allowed' });
+          if (!devices) return send(409, { error: 'Connect the arm first' });
+          return send(
+            200,
+            await devices.markerCalibration.register(
+              await readBody(req, 16384),
+              req.headers['user-agent'],
+            ),
+          );
+        }
+        const page = await devices?.markerCalibration.phoneHost(
+          url.searchParams.get('token'),
+        );
+        if (page) return page.handlePhone(req, res);
+        const preview = markerPreviews.get(url.searchParams.get('token') ?? '');
+        if (
+          preview &&
+          req.method === 'GET' &&
+          url.pathname === '/phone-calibration'
+        ) {
+          if (req.headers.accept === 'application/json')
+            return send(200, preview.renewPage());
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+          });
+          return res.end(preview.page());
+        }
         const calibration = await devices?.resolvePhoneHost(
           url.searchParams.get('token'),
         );
+        if (
+          !calibration &&
+          req.method === 'GET' &&
+          ['/phone-calibration', '/phone-calibration/'].includes(
+            url.pathname,
+          ) &&
+          req.headers.accept?.includes('text/html')
+        ) {
+          res.writeHead(302, {
+            Location: '/s',
+            'Cache-Control': 'no-store',
+          });
+          return res.end();
+        }
         if (!calibration)
           return send(503, {
             error: 'Phone session is not ready. Reconnecting…',
           });
         return calibration.handlePhone(req, res);
-      } catch {
-        return send(503, {
-          error: 'Phone session is not ready. Reconnecting…',
-        });
+      } catch (error) {
+        return send(
+          error instanceof Error && 'status' in error
+            ? Number(error.status)
+            : 503,
+          {
+            error:
+              error instanceof Error
+                ? error.message
+                : 'Phone session is not ready. Reconnecting…',
+          },
+        );
       }
     }
     if (
@@ -296,7 +459,10 @@ export async function startPlaygroundHost({
       return send(403, { error: 'Origin not allowed' });
     try {
       if (url.pathname === '/api/arm' && req.method === 'GET')
-        return send(200, await connectionStatus());
+        return send(
+          200,
+          await connectionStatus(url.searchParams.get('fresh') === 'true'),
+        );
       if (url.pathname === '/api/arm/stop' && req.method === 'POST') {
         if (!armControls || connecting)
           return send(409, { error: 'Connect the arm first' });
@@ -306,7 +472,9 @@ export async function startPlaygroundHost({
       if (url.pathname === '/api/arm/recover' && req.method === 'POST') {
         if (!armControls || connecting)
           return send(409, { error: 'Connect the arm first' });
-        if ((await readBody(req)).confirmed !== true)
+        const recovery = await readBody(req);
+        if (recovery.session !== undefined) setup.assertSession(recovery);
+        if (recovery.confirmed !== true)
           return send(400, { error: 'Confirm recovery first' });
         await armControls.recover();
         return send(200, await connectionStatus());
@@ -359,14 +527,19 @@ export async function startPlaygroundHost({
         });
       }
       if (url.pathname === '/api/arm/disconnect' && req.method === 'POST') {
-        if (setup.busy)
+        if (setup.busy || screenControl?.busy)
           return send(409, {
             error: 'Wait for the current robot control to finish',
           });
-        await setup.mutate({ session: setup.session }, async () => {
-          await disconnectArm();
-          setup.phase = 'unconfigured';
-        });
+        const input = await readBody(req);
+        await setup.mutate(
+          { session: input.session ?? setup.session },
+          async () => {
+            await disconnectArm();
+            setup.session = randomUUID();
+            setup.phase = 'unconfigured';
+          },
+        );
         return send(200, await connectionStatus());
       }
       if (
@@ -380,6 +553,7 @@ export async function startPlaygroundHost({
         if (!tasks) return send(409, { error: 'Connect the arm first' });
         if (req.method === 'GET') return send(200, { tasks: tasks.list() });
         if (req.method === 'POST') {
+          screenControl?.assertNoManualAction();
           const input = await readBody(req);
           if (
             typeof input.cameraId !== 'string' ||
@@ -403,8 +577,32 @@ export async function startPlaygroundHost({
           await tasks!.configure(id, (await readBody(req)).aiConfig);
           return send(200, { status: 'ok' });
         }
+        if (
+          screenControl?.busy &&
+          req.method !== 'GET' &&
+          !taskRoute[2]?.startsWith('/cancel')
+        )
+          throw new RobotArmError(
+            'BUSY',
+            'Wait for the manual screen gesture to finish.',
+            409,
+          );
         req.url = `${taskRoute[2] || '/'}${url.search}`;
         return entry.server.app(req, res);
+      }
+      const actionRoute = /^\/api\/devices\/([^/]+)\/actions$/.exec(
+        url.pathname,
+      );
+      if (actionRoute) {
+        if (!devices || !screenControl || connecting)
+          return send(409, { error: 'Connect the arm first' });
+        if (req.method !== 'POST')
+          return send(405, { error: 'Method not allowed' });
+        const id = decodeURIComponent(actionRoute[1]);
+        const input = await readBody(req, 8192);
+        return send(200, {
+          result: await screenControl.perform(id, input.action),
+        });
       }
       if (url.pathname === '/api/audit/actions' && req.method === 'GET') {
         const store = arm && controllerRuntime(arm).auditStore;
@@ -498,81 +696,597 @@ export async function startPlaygroundHost({
         }
         return send(405, { error: 'Method not allowed' });
       }
+      if (
+        url.pathname === '/api/marker-calibrations' ||
+        url.pathname === '/api/screen-pages'
+      ) {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        if (req.method !== 'POST')
+          return send(405, { error: 'Method not allowed' });
+        const input = await readBody(req, 16384);
+        if (!['list', 'displays', 'status'].includes(input.action))
+          devices.assertBatchIdle();
+        return send(
+          200,
+          await (url.pathname === '/api/screen-pages'
+            ? devices.markerCalibration.pageAction(input)
+            : devices.markerCalibration.markerAction(input)),
+        );
+      }
+      if (url.pathname === '/api/calibration-batch') {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        if (req.method === 'GET')
+          return send(200, { batch: devices.batch.read() });
+        if (req.method !== 'POST')
+          return send(405, { error: 'Method not allowed' });
+        const input = await readBody(req, 16384);
+        const stop =
+          input.action === 'stop' ||
+          (input.action === 'command' && input.command === 'stop');
+        if (
+          screenControl?.busy &&
+          !stop &&
+          !['read', 'screens', 'clear', 'delete-calibration'].includes(
+            input.action,
+          )
+        )
+          return send(409, {
+            error: 'Wait for the manual screen gesture to finish',
+          });
+        const batch = devices.batch;
+        const current = batch.read();
+        const otherCamera = current && current.cameraId !== input.cameraId;
+        if (input.action === 'read')
+          return send(200, otherCamera ? null : current);
+        if (input.action === 'plan')
+          return send(200, await batch.plan(input.cameraId));
+        if (input.action === 'screens')
+          return send(200, await batch.screens(input.cameraId));
+        if (input.action === 'start')
+          return send(200, await batch.start(input));
+        if (otherCamera && input.action !== 'delete-calibration')
+          return send(409, { error: 'Batch belongs to a different camera' });
+        if (input.action === 'clear') {
+          await batch.clear();
+          return send(200, {});
+        }
+        if (input.action === 'delete-calibration') {
+          await arm!.configureForDevice('calibration-delete', async () => {
+            await controllerRuntime(arm!).profileStore.retireCalibration(
+              input.calibrationProfileId,
+            );
+          });
+          return send(200, {});
+        }
+        return send(
+          200,
+          await batch.command(
+            input.revision,
+            input.action === 'command' ? input.command : input.action,
+            input.id,
+          ),
+        );
+      }
+      if (url.pathname === '/api/screens') {
+        if (!devices) return send(409, { error: 'Connect the arm first' });
+        if (req.method === 'GET')
+          return send(200, { screens: devices.screens(true) });
+        if (req.method === 'POST') {
+          if (screenControl?.busy)
+            return send(409, {
+              error: 'Wait for the manual screen gesture to finish',
+            });
+          const input = await readBody(req, 16384);
+          if (
+            typeof input.cameraId !== 'string' ||
+            typeof input.name !== 'string' ||
+            !input.name.trim() ||
+            input.name.length > 100
+          )
+            return send(400, { error: 'Select a camera and screen name' });
+          return send(200, await devices.addScreen(input.cameraId, input.name));
+        }
+        return send(405, { error: 'Method not allowed' });
+      }
       const calibrationRoute =
         /^\/api\/devices\/([^/]+)\/calibration(?:\/(.*))?$/.exec(url.pathname);
       if (calibrationRoute) {
         if (!devices) return send(409, { error: 'Connect the arm first' });
         const id = decodeURIComponent(calibrationRoute[1]);
         const action = calibrationRoute[2];
-        if (action === 'start' && req.method === 'POST')
-          return send(200, await devices.startCalibration(id));
-        if (action === 'status' && req.method === 'GET')
-          return send(200, devices.status(id));
+        if (screenControl?.busy && req.method === 'POST' && action !== 'cancel')
+          throw new RobotArmError(
+            'BUSY',
+            'Wait for the manual screen gesture to finish.',
+            409,
+          );
+        if (action === 'open' && req.method === 'POST') {
+          const registry = devices;
+          const host = await registry.ensureHost(id);
+          const preview = [...markerPreviews.values()].find(
+            (p) => p.cameraId === host.cameraId,
+          );
+          const pairing = preview?.activePairing;
+          if (preview?.lastPairing && !preview.lastPairing.handoffToken) {
+            const { newToken, savedToken } = preview.lastPairing;
+            const target = registry.markerCalibration.previewTarget(
+              host.cameraId,
+              [newToken, ...(savedToken ? [savedToken] : [])].map(
+                phoneFingerprint,
+              ),
+            );
+            if (!target && id === host.cameraId)
+              return send(200, { phase: 'prepared', pairingConflict: true });
+            if (target === id) {
+              if (!pairing)
+                return send(200, {
+                  phase: 'prepared',
+                  awaitingPreview:
+                    Date.now() - preview.lastViewed < 5 * 60_000 &&
+                    host.service.phoneStatus().state !== 'connected',
+                });
+              const token = await registry.markerCalibration.adoptPreview(
+                host.cameraId,
+                id,
+                pairing,
+              );
+              if (
+                token &&
+                devices === registry &&
+                preview.activePairing === pairing
+              )
+                pairing.handoffToken = token;
+            }
+          }
+          await registry.markerCalibration.resumeBoundPage(host);
+          return send(200, { phase: 'prepared' });
+        }
         if (action === 'cancel' && req.method === 'POST') {
-          await devices.cancelCalibration(id);
+          const { attemptId } = await readBody(req);
+          if (typeof attemptId !== 'string' || !attemptId)
+            return send(400, { error: 'Calibration attempt ID is required' });
+          await devices.cancelCalibration(id, attemptId);
           return send(200, devices.status(id));
         }
+        if (req.method === 'POST') devices.assertBatchIdle();
+        if (action === 'start' && req.method === 'POST') {
+          return send(200, await devices.startCalibration(id));
+        }
+        if (action === 'status' && req.method === 'GET')
+          return send(200, devices.status(id));
         const session = devices.entries.get(id)?.calibration;
-        if (!session?.host)
+        const host =
+          action === 'camera/validity' && req.method === 'GET'
+            ? await devices.ensureHost(id, true)
+            : (devices.entries.get(id)?.host ?? session?.host);
+        if (!host)
           return send(409, {
             error: 'Calibration is not ready',
             phase: session?.phase,
           });
-        if (req.method !== 'GET' && session.phase !== 'running')
-          return send(409, { error: 'Calibration has ended' });
-        if (await session.host.handle(req, res)) return;
+        const registry = devices;
+        if (
+          url.pathname.endsWith('/calibration/camera/preview') &&
+          req.method === 'GET'
+        )
+          registerClientPreview(
+            url.searchParams.get('client') ?? undefined,
+            `host:${id}:${url.searchParams.get('viewer') ?? 'preview'}`,
+            res,
+          );
+        if (
+          await host.handle(req, res, () => {
+            if (registry !== devices || registry.entries.get(id)?.host !== host)
+              throw new RobotArmError(
+                'STALE_CONTEXT',
+                'Device connection changed',
+                409,
+              );
+            registry.assertBatchIdle();
+            if (
+              ![
+                'assisted-calibration/setup',
+                'assisted-calibration/setup/mapping',
+              ].includes(action ?? '')
+            ) {
+              const attemptId = req.headers['x-calibration-attempt'];
+              registry.assertCalibrationRunning(
+                id,
+                typeof attemptId === 'string' ? attemptId : '',
+              );
+            }
+          })
+        )
+          return;
+      }
+      if (url.pathname === '/api/cameras/markers') {
+        const id = url.searchParams.get('id');
+        const token = url.searchParams.get('token');
+        // Reclaim abandoned browser sessions on the next request.
+        for (const [key, item] of markerPreviews) {
+          if (Date.now() - item.lastViewed > 5 * 60_000) {
+            item.close();
+            markerPreviews.delete(key);
+          }
+        }
+        if (!token && id && req.method === 'POST') {
+          if (url.searchParams.has('screen'))
+            return send(400, {
+              error: 'Only camera-level markers are supported',
+            });
+          if (
+            !(await listCameras({ includeBuiltIn: true })).some(
+              (camera) => camera.id === id,
+            )
+          )
+            return send(404, { error: 'Camera not found' });
+          const paired = [...markerPreviews.values()].find(
+            (page) => page.cameraId === id,
+          );
+          if (paired) {
+            paired.showMarkers();
+            return send(200, {
+              token: paired.token,
+              links: phoneLinks(paired.token),
+            });
+          }
+          const slot = Array.from({ length: 8 }, (_, i) => i + 1).find(
+            (slot) =>
+              ![...markerPreviews.values()].some((p) => p.slot === slot),
+          );
+          if (!slot)
+            return send(409, { error: 'Close another marker preview first' });
+          const preview = new MarkerPreview(id, slot);
+          markerPreviews.set(preview.token, preview);
+          return send(200, {
+            token: preview.token,
+            links: phoneLinks(preview.token),
+          });
+        }
+        const preview = markerPreviews.get(token ?? '');
+        if (!preview)
+          return send(404, {
+            error: 'Marker preview expired. Reopen it from the camera.',
+          });
+        preview.lastViewed = Date.now();
+        if (req.method === 'GET') return send(200, preview.status());
+        if (req.method === 'POST' && url.searchParams.has('showMarkers')) {
+          preview.showMarkers();
+          return send(200, preview.status());
+        }
+        if (req.method === 'POST') {
+          const abort = new AbortController();
+          const cancel = () => abort.abort();
+          res.once('close', cancel);
+          try {
+            return send(
+              200,
+              await preview.capture(
+                cameraManager,
+                url.searchParams.get('pageKey'),
+                abort.signal,
+              ),
+            );
+          } finally {
+            res.off('close', cancel);
+          }
+        }
+        return send(405, { error: 'Method not allowed' });
       }
       if (url.pathname === '/api/cameras' && req.method === 'GET') {
+        const registry = devices;
+        const refresh = url.searchParams.get('refresh') === 'true';
+        // Automatic workspace refreshes must not probe the devices while a
+        // capture process is running; only an explicit refresh may.
         const cameras = await listCameras({
-          refresh: url.searchParams.get('refresh') === 'true',
+          refresh,
+          cachedOnly: !refresh,
+          includeBuiltIn: true,
         });
+        const deviceSession = registry ? setup.session : null;
+        const screens = registry?.screens(true);
+        const controlScreens = screenControl?.screens();
+        const entries = await Promise.all(
+          cameras.map(async (camera) => {
+            const entry = registry?.entries.get(camera.id);
+            // Camera-only mode has no Device, so read the same persisted
+            // correction the Device will restore once the arm is connected.
+            const stored = entry
+              ? undefined
+              : await cameraManager.persistedPerspective(
+                  camera.id,
+                  (await pendingPerspectives.get(camera.id))?.scope,
+                );
+            const correction =
+              entry?.camera.getCorrection() ?? stored?.correction;
+            return {
+              ...camera,
+              previewScreenId: registry
+                ? previewScreens.get(camera.id)
+                : undefined,
+              screens: screens
+                ?.filter((s) => s.cameraId === camera.id)
+                .map((screen) => ({
+                  ...screen,
+                  control: controlScreens?.get(screen.id),
+                })),
+              hasCorrection: Boolean(correction),
+              correction,
+              perspectiveTarget: entry
+                ? entry.camera.getPerspectiveTarget()
+                : stored?.target,
+              error: registry?.cameraErrors.get(camera.id),
+              stream: entry?.camera.stream.getInfo(),
+            };
+          }),
+        );
         return send(200, {
-          error: devices?.discoveryError,
-          cameras: cameras.map((camera) => ({
-            ...camera,
-            hasCorrection: Boolean(
-              devices?.entries.get(camera.id)?.camera.getCorrection(),
-            ),
-            error: devices?.cameraErrors.get(camera.id),
-            stream: devices?.entries.get(camera.id)?.camera.stream.getInfo(),
-          })),
+          error: registry?.discoveryError,
+          cameras: entries,
+          deviceSession,
         });
+      }
+      // A tab keeps the source warm across raw/corrected image swaps. Tying the
+      // owner to the response also releases it on navigation or a crashed tab.
+      if (url.pathname === '/api/cameras/lease' && req.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return send(400, { error: 'Camera id is required' });
+        if (devices)
+          return send(409, { error: 'The connected arm owns the camera' });
+        if (req.headers['sec-fetch-site'] === 'cross-site')
+          return send(403, { error: 'Open camera previews in Playground' });
+        const owner = randomUUID();
+        await cameraManager.acquire(id, owner);
+        try {
+          if (!res.destroyed) {
+            res.writeHead(200, {
+              'Content-Type': 'application/octet-stream',
+              'Cache-Control': 'no-store',
+            });
+            res.flushHeaders();
+            await new Promise<void>((done) => res.once('close', done));
+          }
+        } finally {
+          await cameraManager.release(id, owner);
+        }
+        return;
       }
       if (url.pathname === '/api/cameras/start' && req.method === 'POST') {
         const input = await readBody(req);
-        const cameras = await listCameras();
+        const cameras = await listCameras({
+          includeBuiltIn: true,
+          cachedOnly: true,
+        });
         const camera = cameras.find((entry) => entry.id === input.id);
         if (!camera) return send(404, { error: 'Camera not found' });
-        if (!devices) return send(409, { error: 'Connect the arm first' });
-        const { camera: session } = await devices.open(camera.id, true);
-        const stream = session.stream;
-        return send(200, { stream: stream.getInfo() });
+        const activeDevices = devices;
+        if (!activeDevices)
+          return send(409, { error: 'Connect the arm first' });
+        const { camera: session } = await activeDevices.open(camera.id, true);
+        await Promise.allSettled(
+          activeDevices
+            .screens()
+            .filter(
+              (screen) =>
+                screen.cameraId === camera.id && screen.id !== camera.id,
+            )
+            .map((screen) => activeDevices.open(screen.id, true)),
+        );
+        if (await pendingPerspectives.get(camera.id))
+          await setup.mutate({ session: setup.session }, () =>
+            restoreMarkerPerspective(activeDevices, camera.id),
+          );
+        return send(200, { stream: session.stream.getInfo() });
+      }
+      if (
+        url.pathname === '/api/cameras/correction' &&
+        req.method === 'DELETE'
+      ) {
+        if (screenControl?.busy)
+          return send(409, {
+            error: 'Wait for the manual screen gesture to finish',
+          });
+        const id = url.searchParams.get('id');
+        if (!id) return send(400, { error: 'Camera id is required' });
+        if (devices || url.searchParams.has('session')) {
+          setup.assertSession({
+            session: url.searchParams.get('session') ?? '',
+          });
+          const screen = url.searchParams.get('screen') ?? id;
+          if (!devices || devices.entries.get(screen)?.cameraId !== id)
+            return send(409, {
+              error: 'The selected screen is no longer running',
+            });
+          const registry = devices;
+          await setup.mutate(
+            { session: url.searchParams.get('session')! },
+            async () => {
+              await setup.stationary();
+              registry.assertBatchIdle();
+              await (
+                await registry.ensureHost(screen, true)
+              ).clearAppliedCorrection();
+            },
+          );
+          return send(200, { ok: true });
+        }
+        if (url.searchParams.has('screen') || url.searchParams.has('all'))
+          return send(400, {
+            error: 'Only camera-level correction is supported',
+          });
+        await setup.mutate({ session: setup.session }, async () => {
+          for (const [token, preview] of markerPreviews) {
+            if (preview.cameraId !== id) continue;
+            preview.close();
+            markerPreviews.delete(token);
+          }
+          const pending = await pendingPerspectives.get(id);
+          if (pending) await pendingPerspectives.clear(id, pending);
+          else await clearStandaloneCorrection(cameraManager, id);
+        });
+        return send(200, { ok: true });
+      }
+      if (url.pathname === '/api/cameras/correction' && req.method === 'POST') {
+        if (screenControl?.busy)
+          return send(409, {
+            error: 'Wait for the manual screen gesture to finish',
+          });
+        const input = await readBody(req, 65536);
+        if (typeof input.id !== 'string' || !input.correction)
+          return send(400, { error: 'Camera id and correction are required' });
+        if (devices || input.session !== undefined) {
+          setup.assertSession(input);
+          if (input.evidence !== undefined)
+            return send(409, {
+              error: 'Reopen the marker capture for the connected screen.',
+            });
+          const screen = input.screen ?? input.id;
+          if (!devices || devices.entries.get(screen)?.cameraId !== input.id)
+            return send(409, {
+              error: 'The selected screen is no longer running',
+            });
+          const registry = devices;
+          const mappingError = await setup.mutate(input, async () => {
+            await setup.stationary();
+            registry.assertBatchIdle();
+            const host = await registry.ensureHost(screen, true);
+            return host.applyMarkerCorrection(
+              input.correction,
+              false,
+              input.perspectiveTarget,
+            );
+          });
+          return send(200, { ok: true, mappingError });
+        }
+        if (input.screen !== undefined)
+          return send(400, {
+            error: 'Only camera-level correction is supported',
+          });
+        const evidence = input.evidence;
+        const check = () => {
+          if (evidence === undefined) return;
+          const preview = markerPreviews.get(evidence?.token);
+          if (!preview || preview.cameraId !== input.id)
+            throw Object.assign(
+              new Error(
+                'The marker capture belongs to another camera or has expired.',
+              ),
+              { status: 409 },
+            );
+          preview.assertCaptured(evidence.pageKey);
+        };
+        const validity = await setup.mutate(
+          { session: setup.session },
+          async () => {
+            check();
+            const pairing = markerPreviews.get(evidence?.token)?.activePairing;
+            const phones = pairing
+              ? [
+                  pairing.newToken,
+                  ...(pairing.savedToken ? [pairing.savedToken] : []),
+                ].map(phoneFingerprint)
+              : (await pendingPerspectives.get(input.id))?.phones;
+            if (phones) {
+              if (!input.perspectiveTarget)
+                throw Object.assign(
+                  new Error('A marker perspective requires an output size.'),
+                  { status: 400 },
+                );
+              return pendingPerspectives.save(
+                input.id,
+                input.correction,
+                input.perspectiveTarget,
+                phones,
+                check,
+                true,
+              );
+            }
+            return saveStandaloneCorrection(
+              cameraManager,
+              input.id,
+              input.correction,
+              input.perspectiveTarget,
+              undefined,
+              undefined,
+              true,
+            );
+          },
+        );
+        return send(200, { ok: true, validity });
       }
       if (url.pathname === '/api/cameras/stop' && req.method === 'POST') {
+        if (screenControl?.busy)
+          return send(409, {
+            error: 'Wait for the manual screen gesture to finish',
+          });
         const input = await readBody(req);
         await tasks?.closeCamera(input.id);
         await devices?.stop(input.id);
         return send(200, {});
       }
       if (url.pathname === '/api/cameras/preview' && req.method === 'GET') {
-        const entry = devices?.entries.get(url.searchParams.get('id') ?? '');
-        if (!entry) return send(404, { error: 'Camera is not running' });
-        const view = url.searchParams.get('view');
-        if (view && !['raw', 'corrected'].includes(view))
+        const id = url.searchParams.get('id') ?? '';
+        const view = (url.searchParams.get('view') ??
+          'raw') as CameraPreviewView;
+        if (view !== 'raw' && view !== 'corrected')
           return send(400, { error: 'Unknown camera view' });
-        await streamCameraPreview(res, entry, view === 'corrected');
+        const client = url.searchParams.get('client') ?? undefined;
+        const viewer = url.searchParams.get('viewer') ?? undefined;
+        if (!devices && id) {
+          if (url.searchParams.has('screen'))
+            return send(400, {
+              error: 'Only camera-level preview is supported',
+            });
+          if (req.headers['sec-fetch-site'] === 'cross-site')
+            return send(403, { error: 'Open camera previews in Playground' });
+          await streamStandalonePreview(
+            res,
+            cameraManager,
+            id,
+            view,
+            view === 'corrected'
+              ? (await pendingPerspectives.get(id))?.scope
+              : undefined,
+            client,
+            viewer,
+          );
+          return;
+        }
+        const entry = devices?.entries.get(id);
+        if (!entry) return send(404, { error: 'Camera is not running' });
+        await streamCameraPreview(
+          res,
+          entry,
+          view === 'corrected',
+          client,
+          viewer,
+        );
         return;
       }
       if (url.pathname === '/api/cameras/frame' && req.method === 'GET') {
-        const stream = devices?.entries.get(url.searchParams.get('id') ?? '')
-          ?.camera.stream;
-        if (!stream) return send(404, { error: 'Camera is not running' });
-        const frame = await stream.getFrame();
+        const id = url.searchParams.get('id');
+        if (!id) return send(400, { error: 'Camera id is required' });
+        let jpeg: Buffer;
+        if (devices) {
+          const entry = devices.entries.get(id);
+          if (!entry) return send(404, { error: 'Camera is not running' });
+          jpeg = await entry.camera.rawFrame();
+        } else {
+          if (req.headers['sec-fetch-site'] === 'cross-site')
+            return send(403, { error: 'Open camera previews in Playground' });
+          const owner = randomUUID();
+          const camera = await cameraManager.acquire(id, owner);
+          try {
+            jpeg = await camera.rawFrame();
+          } finally {
+            await cameraManager.release(id, owner);
+          }
+        }
         res.writeHead(200, {
           'Content-Type': 'image/jpeg',
           'Cache-Control': 'no-store',
         });
-        return res.end(frame.jpeg);
+        return res.end(jpeg);
       }
       if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
         const root = resolve(webRoot);
@@ -631,12 +1345,20 @@ export async function startPlaygroundHost({
       else res.destroy();
     }
   });
-  server.on('upgrade', (req, socket, head) => {
-    const url = URL.parse(req.url ?? '/', 'http://localhost');
-    if (!url) return socket.destroy();
-    const calibration = devices?.phoneHost(url.searchParams.get('token'));
-    if (!calibration) return socket.destroy();
-    calibration.phoneSocket.upgrade(req, socket, head);
+  server.on('upgrade', async (req, socket, head) => {
+    try {
+      const url = URL.parse(req.url ?? '/', 'http://localhost');
+      if (!url) return socket.destroy();
+      const token = url.searchParams.get('token');
+      const calibration =
+        markerPreviews.get(token ?? '') ??
+        (await devices?.markerCalibration.phoneHost(token)) ??
+        (await devices?.resolvePhoneHost(token));
+      if (!calibration) return socket.destroy();
+      calibration.phoneSocket.upgrade(req, socket, head);
+    } catch {
+      socket.destroy();
+    }
   });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
@@ -645,6 +1367,10 @@ export async function startPlaygroundHost({
       accept();
     });
   });
+  if (autoConnect)
+    void setup.reconnect({ session: setup.session }).catch(() => {
+      // The connection page exposes the error and lets the operator retry.
+    });
   let closing: Promise<void> | undefined;
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
@@ -654,6 +1380,9 @@ export async function startPlaygroundHost({
         server.closeAllConnections();
         await setup.pending?.catch(() => {});
         await disconnectArm();
+        for (const preview of markerPreviews.values()) preview.close();
+        markerPreviews.clear();
+        await cameraManager.close();
         await drained;
       })();
       return closing;

@@ -15,7 +15,7 @@ it('streams the initial snapshot, page handoff and disconnect over the real tran
   const arm = new ArmController({ adapter: f.adapter, profileStore: f.store });
   const host = new CalibrationHost({
     arm,
-    camera: {} as CameraSession,
+    camera: { getPerspectiveValidity: () => undefined } as CameraSession,
     deviceId: 'cam',
   });
   const server = createServer((req, res) => void host.handle(req, res));
@@ -39,6 +39,8 @@ it('streams the initial snapshot, page handoff and disconnect over the real tran
       JSON.stringify({
         pageId,
         sequence: 1,
+        platform: 'android',
+        displayMode: 'fullscreen',
         visible: true,
         layout: {
           revision: 1,
@@ -61,6 +63,13 @@ it('streams the initial snapshot, page handoff and disconnect over the real tran
         new TextDecoder().decode(value).trim().slice('data: '.length),
       );
     };
+    const paused = await fetch(
+      `http://${address}/api/calibration/camera/validity`,
+    );
+    expect(paused.status).toBe(200);
+    expect(await paused.json()).toEqual({
+      skipped: 'reference-page-unavailable',
+    });
     const reader = await events();
     expect((await snapshot(reader)).phone.state).toBe('waiting');
     const first = await open();
@@ -70,6 +79,74 @@ it('streams the initial snapshot, page handoff and disconnect over the real tran
       'markers',
     );
     expect((await snapshot(reader)).phone.state).toBe('connected');
+    const request = host.service.requestMarkerDisplay();
+    expect(
+      JSON.parse(String((await once(first, 'message'))[0])).markerRequest,
+    ).toBe(request);
+    const report = JSON.parse(update(oldPage));
+    first.send(
+      JSON.stringify({
+        ...report,
+        sequence: 2,
+        markersPainted: true,
+        markerRequest: 'previous',
+      }),
+    );
+    await rstest.waitFor(() =>
+      expect(host.service.phoneStatus().diagnostics?.updateSequence).toBe(2),
+    );
+    expect(host.service.markerObservation(request)).toBeUndefined();
+    // A repeated or superseded update must not replace the last observation or close the socket.
+    const receivedAt = host.service.phoneStatus().diagnostics?.receivedAt;
+    first.send(JSON.stringify({ ...report, sequence: 2, visible: false }));
+    first.send(JSON.stringify({ ...report, sequence: 1, visible: false }));
+    first.send('ping');
+    expect(String((await once(first, 'message'))[0])).toBe('pong');
+    expect(host.service.phoneStatus().diagnostics?.updateSequence).toBe(2);
+    expect(host.service.phoneStatus().diagnostics?.receivedAt).toBe(receivedAt);
+    expect(host.service.phoneStatus().state).toBe('connected');
+    first.send(
+      JSON.stringify({
+        ...report,
+        sequence: 3,
+        markersPainted: true,
+        markerRequest: request,
+      }),
+    );
+    await rstest.waitFor(() =>
+      expect(host.service.markerObservation(request)?.pageId).toBe(oldPage),
+    );
+    for (const [index, mode] of [
+      { platform: 'android', displayMode: 'browser' },
+      { platform: 'harmonyos', displayMode: 'standalone' },
+      { platform: 'ios', displayMode: 'fullscreen' },
+      { platform: 'ios', displayMode: 'standalone' },
+    ].entries()) {
+      const sequence = 4 + index;
+      first.send(
+        JSON.stringify({
+          ...report,
+          sequence,
+          ...mode,
+          markersPainted: true,
+          markerRequest: request,
+        }),
+      );
+      await rstest.waitFor(() =>
+        expect(host.service.phoneStatus().diagnostics?.updateSequence).toBe(
+          sequence,
+        ),
+      );
+      const eligible =
+        mode.platform === 'ios' && mode.displayMode === 'standalone';
+      expect(host.service.setup().phoneConnected).toBe(eligible);
+      expect(Boolean(host.service.markerObservation(request))).toBe(eligible);
+      expect(host.service.phoneStatus().state).toBe('connected');
+    }
+    host.service.finishMarkerDisplay(request, true);
+    expect(JSON.parse(String((await once(first, 'message'))[0])).view).toBe(
+      'touch-preview',
+    );
     const resumed = await events();
     expect((await snapshot(resumed)).phone.state).toBe('connected');
     const next = await open();

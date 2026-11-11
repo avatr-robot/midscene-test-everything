@@ -8,13 +8,23 @@ import type {
   CalibrationSession,
 } from '../src/calibration/exploration/types.js';
 
-import type { CartesianPose } from '../src/contracts.js';
+import type {
+  CartesianPose,
+  MotionAcceleration,
+  MotionSpeed,
+} from '../src/contracts.js';
 import { contactPoint } from '../src/domain.js';
+import {
+  scaleAcceleration,
+  scaleSpeed,
+} from '../src/screen-interaction/motion-policy.js';
 import { fixture, pose } from './fixtures.js';
 
 describe('first-time automatic exploration', () => {
   it.each([
     'standard',
+    'standard-tilt',
+    'fast-tilt',
     'fast-tap',
     'fast-slide',
     'fast-adaptive-tap',
@@ -84,7 +94,8 @@ describe('first-time automatic exploration', () => {
       const finishedSampling = false;
       let reacquisitionLift = false;
       let lowestZ = Number.POSITIVE_INFINITY;
-      const isFast = mode !== 'standard' && mode !== 'safety-floor';
+      const isFast = !mode.startsWith('standard') && mode !== 'safety-floor';
+      const tilted = mode.endsWith('-tilt');
       const pagePixel = () =>
         contact && touching
           ? {
@@ -206,6 +217,8 @@ describe('first-time automatic exploration', () => {
           joints: { min: 0.01, max: 360 },
         },
       };
+      let finalPress = false;
+      let finalPressCount = 0;
       const host = {
         adapter: {
           ...f.adapter,
@@ -222,14 +235,24 @@ describe('first-time automatic exploration', () => {
         ready: async () => undefined,
         drag: async () => undefined,
         target: () => undefined,
-        preflight: async () => undefined,
+        preflight: async ([step]: Parameters<
+          AutoExplorationHost['preflight']
+        >[0]) => {
+          finalPress = step.name.endsWith(' press');
+        },
         move: async (
           target: CartesianPose,
           _ctx: unknown,
-          speed: { kind: string; value?: number },
+          speed: MotionSpeed,
+          acceleration: MotionAcceleration,
         ) => {
-          if (finishedSampling && speed.kind === 'ratio')
-            expect(speed.value).toBeCloseTo(0.1, 8);
+          const factor = isFast || finalPress ? 0.25 : 0.1;
+          expect(speed).toEqual(scaleSpeed(ctx.screen.actionSpeed, factor));
+          expect(acceleration).toEqual(
+            scaleAcceleration(ctx.screen.actionAcceleration, factor),
+          );
+          if (finalPress) finalPressCount++;
+          finalPress = false;
           const point = contactPoint(target, f.tool.offsetMm);
           const previous = contactPoint(actualPose, f.tool.offsetMm);
           if (
@@ -251,8 +274,14 @@ describe('first-time automatic exploration', () => {
           previousHeld = touching;
           const inside =
             point.x >= 0 && point.x <= 200 && point.y <= 0 && point.y >= -100;
+          const tiltOffset = tilted
+            ? 0.015 * (point.x - 100) - 0.005 * (point.y + 50)
+            : 0;
           touching =
-            inside && (touching ? point.z < releaseZ : point.z <= activationZ);
+            inside &&
+            (touching
+              ? point.z < releaseZ + tiltOffset
+              : point.z <= activationZ + tiltOffset);
           if (mode === 'release-missing' && releaseProbeStarted)
             touching = true;
           if (mode === 'repress-missing' && repressing) touching = false;
@@ -279,7 +308,6 @@ describe('first-time automatic exploration', () => {
         },
         stable: async () => undefined,
         stationaryPose: async () => pose(100, -50, startZ),
-        hold: async () => undefined,
         contactAction: async () => {
           throw new Error('unused');
         },
@@ -329,8 +357,8 @@ describe('first-time automatic exploration', () => {
         const expected: Record<string, string> = {
           'release-missing': 'No confirmed release',
           'repress-missing': 'refined press',
-          'snapshot-missing': 'confirm the current touch state',
-          'snapshot-stale': 'confirm the current touch state',
+          'snapshot-missing': 'Phone step acknowledgement timed out',
+          'snapshot-stale': 'Phone step acknowledgement timed out',
           'safety-floor': 'safety floor',
           'fast-no-touch': 'fast local height-search budget',
           'fast-deep-recovery': 'Deep recovery collected',
@@ -340,13 +368,16 @@ describe('first-time automatic exploration', () => {
           if (mode.startsWith('snapshot-')) expect(motions).toHaveLength(0);
           if (mode === 'safety-floor')
             expect(lowestZ).toBeGreaterThanOrEqual(27.625);
-          if (mode === 'fast-no-touch')
+          if (mode === 'fast-no-touch') {
             expect(session.auto?.fastAdaptation?.searchSteps).toBe(6);
+            expect(session.auto?.collectedSamples).toHaveLength(3);
+          }
           return;
         }
         const collection = await job;
         expect(collection.probes).toHaveLength(3);
         expect(collection.grid).toHaveLength(isFast ? 6 : 9);
+        if (mode === 'standard') expect(finalPressCount).toBe(12);
         const fit = () =>
           fitExploration(
             collection,
@@ -362,22 +393,38 @@ describe('first-time automatic exploration', () => {
             isFast,
           );
         if (mode === 'bad-validation') {
-          expect(fit).toThrow('Validation residual');
+          const result = fit();
+          expect(result.evidence.validationMaxPx).toBeCloseTo(20);
+          expect(result.warnings).toContainEqual(
+            expect.objectContaining({ label: 'Holdout maximum' }),
+          );
+          expect(result.candidate.acceptanceStatus).toBe('pending');
           return;
         }
-        if (mode === 'fast-adaptive-tap') {
-          expect(fit).toThrow('Insufficient plane inliers');
+        if (mode === 'fast-adaptive-tap' || mode === 'fast-tilt') {
+          const result = fit();
+          expect(result.evidence.planeSource).toBe('assumed-horizontal');
+          expect(result.quality.inliers).toBeLessThan(result.quality.total);
+          expect(result.candidate.acceptanceStatus).toBe('pending');
           return;
         }
         const result = fit();
+        if (tilted) {
+          const { normal } = result.candidate.plane;
+          expect(-normal.x / normal.z).toBeCloseTo(0.015, 3);
+          expect(-normal.y / normal.z).toBeCloseTo(-0.005, 3);
+        }
         expect(result.candidate.acceptanceStatus).toBe('pending');
+        // The simulated screen maps pixels in XY; the measured axes follow its surface.
+        const sizePrecision =
+          tilted || mode.startsWith('fast-adaptive') ? 1 : 4;
         expect(result.measuredSize.physicalWidthMm).toBeCloseTo(
-          200,
-          mode.startsWith('fast-adaptive') ? 1 : 4,
+          tilted ? Math.hypot(200, 3) : 200,
+          sizePrecision,
         );
         expect(result.measuredSize.physicalHeightMm).toBeCloseTo(
-          100,
-          mode.startsWith('fast-adaptive') ? 1 : 4,
+          tilted ? Math.hypot(100, 0.5) : 100,
+          sizePrecision,
         );
         expect(result.coverage).toBeGreaterThan(0.6);
         expect(result.gridRmsMm).toBeLessThan(0.75);

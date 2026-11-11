@@ -32,3 +32,5 @@ export function SetupNotice({
     </div>
   );
 }
+
+export const selectSetupNotice = (notice?: SetupNoticeData) => notice;

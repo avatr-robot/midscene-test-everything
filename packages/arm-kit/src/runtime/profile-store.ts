@@ -9,6 +9,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { assertSurface } from '../calibration/surface.js';
+import { assertSafeObservation } from '../calibration/verification/safe-position.js';
 import {
   calibrationSessionStatus,
   verificationContextKey,
@@ -16,6 +17,7 @@ import {
 import {
   type CalibrationProfile,
   type CalibrationSession,
+  type CartesianPose,
   type DeviceBinding,
   type ProfileBinding,
   type ProfileData,
@@ -23,6 +25,7 @@ import {
   RobotArmError,
   type RobotArmProfile,
   type ScreenProfile,
+  type SharedParkingEvidence,
   type ToolProfile,
   type VersionedProfile,
   type VisionBinding,
@@ -36,6 +39,7 @@ import {
   assertPose,
   assertVector,
   assertWorkspace,
+  contactPoint,
   cross,
   dot,
   length,
@@ -44,6 +48,42 @@ import {
 import { invertMapping } from '../domain/homography.js';
 import { validateScreenMotionSettings } from '../screen-interaction/motion-policy.js';
 import { backupPreviousFile, robotDataRoot } from '../storage/layout.js';
+
+export function sharedCalibrationTool(
+  profiles: Pick<ProfileData, 'calibrationSetups' | 'robots' | 'screenTargets'>,
+  adapterId: string,
+  connectionIdentity: string,
+): Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'> | undefined {
+  const matching = (profiles.calibrationSetups ?? []).filter((setup) =>
+    profiles.robots.some(
+      (robot) =>
+        robot.id === setup.robotProfileId &&
+        robot.adapterId === adapterId &&
+        robot.connectionIdentity === connectionIdentity,
+    ),
+  );
+  const active = matching.filter(
+    (setup) =>
+      !profiles.screenTargets?.some(
+        (target) => target.id === setup.deviceId && target.archived,
+      ),
+  );
+  // Retiring a screen does not retire the physical tool on the arm.
+  const candidates = active.length ? active : matching;
+  const first = candidates[0];
+  if (
+    first &&
+    candidates.every(
+      (setup) =>
+        setup.robotProfileId === first.robotProfileId &&
+        setup.toolProfileId === first.toolProfileId,
+    )
+  )
+    return {
+      robotProfileId: first.robotProfileId,
+      toolProfileId: first.toolProfileId,
+    };
+}
 
 export function validateScreen(s: ProfileInput<ScreenProfile>): void {
   if (!s.id || !s.name || !s.direction)
@@ -209,6 +249,51 @@ export class ProfileStore {
     parsed.robots.forEach(validateRobot);
     parsed.tools.forEach(validateTool);
     parsed.screens.forEach(validateScreen);
+    if (
+      parsed.screenTargets !== undefined &&
+      (!Array.isArray(parsed.screenTargets) ||
+        new Set(parsed.screenTargets.map((t: { id: string }) => t.id)).size !==
+          parsed.screenTargets.length ||
+        parsed.screenTargets.some(
+          (t: { id: string; cameraId: string; name: string }) =>
+            !t ||
+            typeof t.id !== 'string' ||
+            !t.id ||
+            typeof t.cameraId !== 'string' ||
+            !t.cameraId ||
+            typeof t.name !== 'string' ||
+            !t.name.trim(),
+        ))
+    )
+      throw new RobotArmError('INVALID_PROFILE_FILE', 'Invalid screen targets');
+    if (
+      parsed.installationTeachings !== undefined &&
+      !Array.isArray(parsed.installationTeachings)
+    )
+      throw new RobotArmError(
+        'INVALID_PROFILE_FILE',
+        'Invalid installation teaching list',
+      );
+    for (const t of parsed.installationTeachings ?? []) {
+      assertPose(t.referencePose);
+      assertPose(t.poses?.reference);
+      assertPose(t.poses?.cameraBoundary);
+      const n = t.cameraBoundary?.normal;
+      const p = t.cameraBoundary?.point;
+      if (
+        !t.id ||
+        !t.cameraId ||
+        t.corridorConfirmed !== true ||
+        !n ||
+        !p ||
+        ![n.x, n.y, p.x, p.y].every(Number.isFinite) ||
+        Math.abs(Math.hypot(n.x, n.y) - 1) > 1e-6
+      )
+        throw new RobotArmError(
+          'INVALID_PROFILE_FILE',
+          'Invalid installation teaching',
+        );
+    }
     for (const p of [...parsed.robots, ...parsed.tools, ...parsed.screens])
       if (!Number.isInteger(p.geometryRevision) || p.geometryRevision < 1)
         throw new RobotArmError(
@@ -239,7 +324,10 @@ export class ProfileStore {
     for (const c of parsed.calibrations) {
       if (
         c.acceptanceStatus === 'accepted' &&
-        !calibrationAccepted({ ...c, geometryStatus: 'valid' })
+        !calibrationAccepted(
+          { ...c, geometryStatus: 'valid' },
+          c.pendingParkingBatchId,
+        )
       )
         throw new RobotArmError(
           'INVALID_PROFILE_FILE',
@@ -501,6 +589,218 @@ export class ProfileStore {
       )
       .digest('hex');
   }
+  saveScreenPage(page: NonNullable<ProfileData['screenPages']>[number]) {
+    return this.transaction((draft) => {
+      if (
+        draft.screenPages?.some(
+          (p) =>
+            p.id !== page.id &&
+            (p.pageKey === page.pageKey ||
+              p.token === page.token ||
+              (page.targetId && p.targetId === page.targetId)),
+        )
+      )
+        throw new RobotArmError(
+          'PAGE_ALREADY_BOUND',
+          'One page can only belong to one screen',
+          409,
+        );
+      for (const target of draft.screenTargets ?? [])
+        if (target.pageKey === page.pageKey && target.id !== page.targetId)
+          target.pageKey = undefined;
+      draft.screenPages = [
+        ...(draft.screenPages ?? []).filter((p) => p.id !== page.id),
+        structuredClone(page),
+      ];
+    });
+  }
+  /**
+   * Forgets a saved page. Used for a browser identity that is gone for good —
+   * clearing site data or switching browsers leaves a page record that no phone
+   * can ever come back as, and it would keep showing up as an offline device.
+   */
+  removeScreenPage(id: string) {
+    return this.transaction((draft) => {
+      const page = draft.screenPages?.find((p) => p.id === id);
+      if (page)
+        for (const target of draft.screenTargets ?? [])
+          if (target.pageKey === page.pageKey) target.pageKey = undefined;
+      draft.screenPages = (draft.screenPages ?? []).filter((p) => p.id !== id);
+    });
+  }
+  archiveScreenTarget(id: string) {
+    return this.transaction((draft) => {
+      const target = draft.screenTargets?.find((screen) => screen.id === id);
+      if (!target)
+        throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
+      target.archived = true;
+      target.pageKey = undefined;
+      for (const page of draft.screenPages ?? [])
+        if (page.targetId === id) page.targetId = undefined;
+    });
+  }
+  saveInstallationTeachingDraft(
+    input: import('../contracts.js').InstallationTeachingDraft,
+    guard?: () => void,
+  ) {
+    return this.transaction((draft) => {
+      draft.installationTeachingDrafts = [
+        ...(draft.installationTeachingDrafts ?? []).filter(
+          (t) =>
+            t.cameraId !== input.cameraId ||
+            t.robotProfileId !== input.robotProfileId ||
+            t.toolProfileId !== input.toolProfileId,
+        ),
+        structuredClone(input),
+      ];
+    }, guard);
+  }
+  updateScreenTarget(
+    id: string,
+    input: {
+      name?: string;
+      pageKey?: string;
+      markerSlot?: number;
+      archived?: boolean;
+    },
+  ) {
+    return this.transaction((draft) => {
+      const target = draft.screenTargets?.find((t) => t.id === id);
+      if (!target)
+        throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
+      if (
+        input.name !== undefined &&
+        (!input.name.trim() ||
+          input.name.length > 40 ||
+          draft.screenTargets?.some(
+            (t) =>
+              !t.archived &&
+              t.id !== id &&
+              t.cameraId === target.cameraId &&
+              t.name.toLocaleLowerCase() ===
+                input.name!.trim().toLocaleLowerCase(),
+          ))
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Screen names must be unique.',
+        );
+      Object.assign(
+        target,
+        input,
+        input.name ? { name: input.name.trim() } : {},
+      );
+      if (input.pageKey)
+        for (const other of draft.screenTargets ?? []) {
+          if (other.id !== id && other.pageKey === input.pageKey)
+            other.pageKey = undefined;
+        }
+    });
+  }
+  clearCalibrationBatch() {
+    return this.transaction((draft) => {
+      draft.calibrationBatch = undefined;
+    });
+  }
+  retireCalibration(id: string) {
+    return this.transaction((draft) => {
+      const c = draft.calibrations.find((c) => c.id === id);
+      if (!c)
+        throw new RobotArmError('INVALID_ARGUMENT', 'Calibration not found');
+      c.acceptanceStatus = 'pending';
+      draft.devices = draft.devices?.filter(
+        (d) => d.calibrationProfileId !== id,
+      );
+    });
+  }
+  saveCalibrationBatch(
+    state: import('../assisted-contracts.js').CalibrationBatchState,
+  ) {
+    return this.transaction((draft) => {
+      draft.calibrationBatch = structuredClone(state);
+    });
+  }
+  saveScreenTarget(input: { id: string; cameraId: string; name: string }) {
+    if (
+      !input.id ||
+      !input.cameraId ||
+      !input.name.trim() ||
+      input.name.trim().length > 40
+    )
+      throw new RobotArmError(
+        'INVALID_ARGUMENT',
+        'Screen name and camera are required',
+      );
+    return this.transaction((draft) => {
+      if (draft.screenTargets?.some((t) => t.id === input.id))
+        throw new RobotArmError('INVALID_ARGUMENT', 'Screen already exists');
+      if (
+        draft.screenTargets?.some(
+          (t) =>
+            !t.archived &&
+            t.cameraId === input.cameraId &&
+            t.name.toLocaleLowerCase() ===
+              input.name.trim().toLocaleLowerCase(),
+        )
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Screen names must be unique.',
+        );
+      draft.screenTargets = [
+        ...(draft.screenTargets ?? []),
+        // Persist identity only. Callers may pass a full screen DTO (with a
+        // live correction snapshot); that snapshot must never outlive the
+        // camera's applied perspective.
+        { id: input.id, cameraId: input.cameraId, name: input.name.trim() },
+      ];
+    });
+  }
+  installationTeaching(input: {
+    robotProfileId: string;
+    toolProfileId: string;
+    cameraId: string;
+  }) {
+    const robot = this.getRobot(input.robotProfileId);
+    const tool = this.getTool(input.toolProfileId);
+    return this.list().installationTeachings?.find(
+      (t) =>
+        t.robotProfileId === robot.id &&
+        t.toolProfileId === tool.id &&
+        t.cameraId === input.cameraId &&
+        t.robotGeometryRevision === robot.geometryRevision &&
+        t.toolGeometryRevision === tool.geometryRevision &&
+        t.corridorConfirmed === true,
+    );
+  }
+  saveInstallationTeaching(
+    teaching: import('../contracts.js').InstallationTeaching,
+  ) {
+    assertPose(teaching.referencePose);
+    assertPose(teaching.poses.cameraBoundary);
+    return this.transaction((draft) => {
+      if (
+        this.getRobot(teaching.robotProfileId).geometryRevision !==
+          teaching.robotGeometryRevision ||
+        this.getTool(teaching.toolProfileId).geometryRevision !==
+          teaching.toolGeometryRevision
+      )
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'Teaching geometry changed',
+          409,
+        );
+      draft.installationTeachings = [
+        ...(draft.installationTeachings ?? []).filter(
+          (t) =>
+            t.robotProfileId !== teaching.robotProfileId ||
+            t.toolProfileId !== teaching.toolProfileId ||
+            t.cameraId !== teaching.cameraId,
+        ),
+        structuredClone(teaching),
+      ];
+    });
+  }
   calibrationSetup(deviceId: string) {
     const setup = this.data.calibrationSetups?.find(
       (entry) => entry.deviceId === deviceId,
@@ -535,6 +835,26 @@ export class ProfileStore {
       ];
     });
   }
+  calibrationMapping(deviceId: string) {
+    const entry = this.data.calibrationMappings?.[deviceId];
+    return entry && structuredClone(entry);
+  }
+  saveCalibrationMapping(
+    deviceId: string,
+    entry?: NonNullable<ProfileData['calibrationMappings']>[string],
+  ) {
+    if (!entry && !this.calibrationMapping(deviceId)) return Promise.resolve();
+    return this.transaction((draft) => {
+      draft.calibrationMappings ??= {};
+      if (entry) draft.calibrationMappings[deviceId] = structuredClone(entry);
+      else
+        draft.calibrationMappings = Object.fromEntries(
+          Object.entries(draft.calibrationMappings).filter(
+            ([id]) => id !== deviceId,
+          ),
+        );
+    });
+  }
   deviceBinding(deviceId: string): DeviceBinding | undefined {
     const binding = this.data.devices?.find(
       (entry) => entry.deviceId === deviceId,
@@ -544,69 +864,76 @@ export class ProfileStore {
   /** Publish only an accepted candidate; pending/failed calibration never replaces a Device. */
   acceptDeviceBinding(input: DeviceBinding): Promise<DeviceBinding> {
     const candidate = structuredClone(input);
-    return this.transaction((draft) => {
-      if (!candidate.deviceId?.trim())
-        throw new RobotArmError('INVALID_DEVICE', 'Device ID is required');
-      const current = draft.devices?.find(
-        (entry) => entry.deviceId === candidate.deviceId,
+    return this.transaction((draft) =>
+      this.bindAcceptedDevice(draft, candidate),
+    );
+  }
+  private bindAcceptedDevice(
+    draft: ProfileData,
+    candidate: DeviceBinding,
+    parkingBatchId?: string,
+  ) {
+    if (!candidate.deviceId?.trim())
+      throw new RobotArmError('INVALID_DEVICE', 'Device ID is required');
+    const current = draft.devices?.find(
+      (entry) => entry.deviceId === candidate.deviceId,
+    );
+    if (candidate.revision !== (current?.revision ?? 0))
+      throw new RobotArmError(
+        'STALE_DEVICE',
+        'Device calibration changed before saving',
+        409,
       );
-      if (candidate.revision !== (current?.revision ?? 0))
-        throw new RobotArmError(
-          'STALE_DEVICE',
-          'Device calibration changed before saving',
-          409,
-        );
-      const calibration = draft.calibrations.find(
-        (entry) => entry.id === candidate.calibrationProfileId,
+    const calibration = draft.calibrations.find(
+      (entry) => entry.id === candidate.calibrationProfileId,
+    );
+    const robot = draft.robots.find(
+      (entry) => entry.id === candidate.robotProfileId,
+    );
+    const tool = draft.tools.find(
+      (entry) => entry.id === candidate.toolProfileId,
+    );
+    const screen = draft.screens.find(
+      (entry) => entry.id === candidate.screenProfileId,
+    );
+    if (
+      !calibration ||
+      !calibrationAccepted(calibration, parkingBatchId) ||
+      !robot ||
+      !tool ||
+      !screen ||
+      calibration.robotProfileId !== robot.id ||
+      calibration.toolProfileId !== tool.id ||
+      calibration.screenProfileId !== screen.id ||
+      calibration.robotGeometryRevision !== robot.geometryRevision ||
+      calibration.toolGeometryRevision !== tool.geometryRevision ||
+      calibration.screenGeometryRevision !== screen.geometryRevision
+    )
+      throw new RobotArmError(
+        'CALIBRATION_INVALID',
+        'Only an accepted calibration matching current geometry can be saved for a Device',
       );
-      const robot = draft.robots.find(
-        (entry) => entry.id === candidate.robotProfileId,
+    if (
+      !candidate.vision ||
+      candidate.cameraId !== candidate.vision.cameraId ||
+      !candidate.cameraId ||
+      !Number.isFinite(Date.parse(candidate.vision.confirmedAt)) ||
+      candidate.vision.width !== screen.pixelWidth ||
+      candidate.vision.height !== screen.pixelHeight ||
+      candidate.vision.fingerprint !== screen.phoneMapping?.visionFingerprint
+    )
+      throw new RobotArmError(
+        'VISION_BINDING_CHANGED',
+        'Camera confirmation does not match the calibrated screen',
       );
-      const tool = draft.tools.find(
-        (entry) => entry.id === candidate.toolProfileId,
-      );
-      const screen = draft.screens.find(
-        (entry) => entry.id === candidate.screenProfileId,
-      );
-      if (
-        !calibration ||
-        !calibrationAccepted(calibration) ||
-        !robot ||
-        !tool ||
-        !screen ||
-        calibration.robotProfileId !== robot.id ||
-        calibration.toolProfileId !== tool.id ||
-        calibration.screenProfileId !== screen.id ||
-        calibration.robotGeometryRevision !== robot.geometryRevision ||
-        calibration.toolGeometryRevision !== tool.geometryRevision ||
-        calibration.screenGeometryRevision !== screen.geometryRevision
-      )
-        throw new RobotArmError(
-          'CALIBRATION_INVALID',
-          'Only an accepted calibration matching current geometry can be saved for a Device',
-        );
-      if (
-        !candidate.vision ||
-        candidate.cameraId !== candidate.vision.cameraId ||
-        !candidate.cameraId ||
-        !Number.isFinite(Date.parse(candidate.vision.confirmedAt)) ||
-        candidate.vision.width !== screen.pixelWidth ||
-        candidate.vision.height !== screen.pixelHeight ||
-        candidate.vision.fingerprint !== screen.phoneMapping?.visionFingerprint
-      )
-        throw new RobotArmError(
-          'VISION_BINDING_CHANGED',
-          'Camera confirmation does not match the calibrated screen',
-        );
-      const value = { ...candidate, revision: (current?.revision ?? 0) + 1 };
-      draft.devices ??= [];
-      const index = draft.devices.findIndex(
-        (entry) => entry.deviceId === candidate.deviceId,
-      );
-      if (index < 0) draft.devices.push(value);
-      else draft.devices[index] = value;
-      return structuredClone(value);
-    });
+    const value = { ...candidate, revision: (current?.revision ?? 0) + 1 };
+    draft.devices ??= [];
+    const index = draft.devices.findIndex(
+      (entry) => entry.deviceId === candidate.deviceId,
+    );
+    if (index < 0) draft.devices.push(value);
+    else draft.devices[index] = value;
+    return structuredClone(value);
   }
   putWorkstation(input: WorkstationBinding): Promise<WorkstationBinding> {
     return this.transaction((draft) => {
@@ -894,6 +1221,81 @@ export class ProfileStore {
       return c;
     }, guard);
   }
+  saveBatchParking(
+    batchId: string,
+    profiles: ReadonlyArray<{ id: string; revision: number }>,
+    pose: CartesianPose,
+    evidence: SharedParkingEvidence,
+    guard: () => void,
+  ) {
+    assertPose(pose);
+    return this.transaction((data) => {
+      const batch = data.calibrationBatch;
+      const manual = 'operatorConfirmedAt' in evidence;
+      if (
+        !batch ||
+        batch.id !== batchId ||
+        !profiles.length ||
+        (!manual &&
+          (!evidence.clear ||
+            batch.items.some(
+              (item) =>
+                !evidence.screens.some((screen) => screen.id === item.deviceId),
+            )))
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'The batch changed before the shared Safe Position was saved.',
+          409,
+        );
+      const now = new Date().toISOString();
+      for (const expected of profiles) {
+        const calibration = data.calibrations.find(
+          (profile) => profile.id === expected.id,
+        );
+        if (
+          !calibration ||
+          calibration.revision !== expected.revision ||
+          !calibrationAccepted(calibration, batchId) ||
+          calibration.robotProfileId !== batch.robotProfileId ||
+          calibration.toolProfileId !== batch.toolProfileId
+        )
+          throw new RobotArmError(
+            'STALE_CONTEXT',
+            'A screen calibration changed before the shared Safe Position was saved.',
+            409,
+          );
+        const screen = data.screens.find(
+          (profile) => profile.id === calibration.screenProfileId,
+        )!;
+        const tool = data.tools.find(
+          (profile) => profile.id === calibration.toolProfileId,
+        )!;
+        assertSafeObservation(
+          calibration,
+          pose,
+          tool.offsetMm,
+          screen.safeHeightMm,
+        );
+        if (
+          calibration.pendingParkingBatchId ||
+          semanticJson(calibration.observationPose) !== semanticJson(pose)
+        ) {
+          calibration.observationPose = structuredClone(pose);
+          calibration.pendingParkingBatchId = undefined;
+          calibration.revision++;
+          calibration.updatedAt = now;
+        }
+      }
+      batch.sharedSafePosition = structuredClone(pose);
+      batch.sharedVisibility = manual ? undefined : structuredClone(evidence);
+      batch.sharedParkingOperatorConfirmedAt = manual
+        ? evidence.operatorConfirmedAt
+        : undefined;
+      batch.sharedSafePositionVerified = true;
+    }, guard);
+  }
+
   saveSession(
     s: CalibrationSession,
     releaseOperation = false,
@@ -929,16 +1331,34 @@ export class ProfileStore {
       d.sessions.push(structuredClone(s));
     }, guard);
   }
-  commitCalibration(s: CalibrationSession, guard?: () => void): Promise<void> {
+  commitCalibration(
+    s: CalibrationSession,
+    guard?: () => void,
+    binding?: DeviceBinding,
+  ): Promise<void> {
     const c = s.candidate;
     const context = s.context;
-    if (!c || !context || !calibrationAccepted(c) || s.status !== 'completed')
+    if (
+      !c ||
+      !context ||
+      !calibrationAccepted(c, s.auto?.deferParkingBatchId) ||
+      s.status !== 'completed'
+    )
       throw new RobotArmError(
         'NOT_VERIFIED',
         'Complete both verification groups and human confirmations first',
         409,
       );
     return this.transaction((d) => {
+      if (
+        c.pendingParkingBatchId &&
+        d.calibrationBatch?.id !== c.pendingParkingBatchId
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'The calibration batch changed before saving this screen.',
+          409,
+        );
       const current = d.workstation;
       if (
         (current?.revision ?? 0) !== s.context?.workstationRevision ||
@@ -964,8 +1384,25 @@ export class ProfileStore {
             409,
           );
       }
+      const teaching =
+        current?.cameraId &&
+        d.installationTeachings?.find(
+          (t) =>
+            t.cameraId === current.cameraId &&
+            t.robotProfileId === s.robotProfileId &&
+            t.toolProfileId === s.toolProfileId &&
+            t.robotGeometryRevision === c.robotGeometryRevision &&
+            t.toolGeometryRevision === c.toolGeometryRevision,
+        );
       if (
         verificationContextKey({
+          installationTeaching: teaching || undefined,
+          minimumTravelTipZMm: teaching
+            ? contactPoint(
+                teaching.referencePose,
+                d.tools.find((p) => p.id === s.toolProfileId)!.offsetMm,
+              ).z
+            : undefined,
           robot: d.robots.find((p) => p.id === s.robotProfileId)!,
           tool: d.tools.find((p) => p.id === s.toolProfileId)!,
           screen: d.screens.find((p) => p.id === s.screenProfileId)!,
@@ -988,6 +1425,18 @@ export class ProfileStore {
         calibrationProfileId: c.id,
         revision: (current?.revision ?? 0) + 1,
       };
+      if (binding) {
+        if (
+          binding.calibrationProfileId !== c.id ||
+          binding.cameraId !== current?.cameraId
+        )
+          throw new RobotArmError(
+            'PROFILE_MISMATCH',
+            'Device does not match this calibration',
+            409,
+          );
+        this.bindAcceptedDevice(d, binding, s.auto?.deferParkingBatchId);
+      }
       d.sessions ??= [];
       const j = d.sessions.findIndex((p) => p.id === s.id);
       if (j < 0) d.sessions.push(structuredClone(s));

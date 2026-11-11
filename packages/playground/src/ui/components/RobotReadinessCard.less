@@ -46,4 +46,19 @@
   .ant-btn {
     justify-self: start;
   }
+  .robot-readiness-hint {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+}
+
+@media (max-width: 900px) {
+  .task-panel:has(> .robot-readiness-card) {
+    min-height: 0;
+  }
+  .robot-readiness-card {
+    flex: 0 0 auto;
+    align-content: start;
+  }
 }

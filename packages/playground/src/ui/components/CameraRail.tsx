@@ -1,8 +1,9 @@
 import { Tag } from 'antd';
-import { VideoOff } from 'lucide-react';
+import { Video, VideoOff } from 'lucide-react';
 import { cameraPreviewUrl } from '../camera-preview';
 import { type CameraEntry, cameraStateLabel } from '../cameras';
 import { useT } from '../i18n';
+import { LiveCameraImage } from './LiveCameraImage';
 
 export function CameraRail({
   entries,
@@ -26,8 +27,18 @@ export function CameraRail({
           type="button"
         >
           <span className="camera-rail-thumb">
-            {camera.stream?.state === 'running' ? (
-              <img src={cameraPreviewUrl(camera.id)} alt={camera.name} />
+            {camera.id === selectedId ? (
+              camera.stream?.state === 'running' ? (
+                <Video size={18} />
+              ) : (
+                <VideoOff size={18} />
+              )
+            ) : camera.stream?.state === 'running' ? (
+              // The stage already owns the selected camera's preview stream.
+              <LiveCameraImage
+                src={cameraPreviewUrl(camera.id, 'raw', 'rail')}
+                alt={camera.name}
+              />
             ) : (
               <VideoOff size={18} />
             )}
