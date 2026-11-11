@@ -242,7 +242,7 @@ export const CalibrationBatchPanel = forwardRef<
       )
         speakCalibration('autoVerifying', 2);
       else if (
-        action === 'retry' ||
+        (action === 'retry' && !parkingOnly) ||
         action === 'skip' ||
         (action === 'continue' &&
           batch.items[batch.currentIndex]?.status === 'awaiting-placement')

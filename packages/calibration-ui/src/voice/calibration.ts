@@ -31,8 +31,11 @@ function sessionPrompt(
   }
   if (!entered) return;
   if (s.stage === 'returning') return ['autoVerifying', 2];
+  if (s.stage === 'avoiding-camera') return ['autoAvoiding', 2];
   if (mode === 'batch') return;
   switch (s.stage) {
+    case 'review':
+      return ['autoReview'];
     case 'interrupted':
     case 'capture-failed':
     case 'verification-failed':
@@ -67,8 +70,21 @@ function batchPrompt(batch: CalibrationBatchState): Prompt | undefined {
   if (batch.status === 'stopping' || batch.status === 'stopped')
     return ['batchStopping', 2];
   if (batch.status === 'failed') return ['autoFailed', 2];
+  if (
+    batch.status === 'completed' &&
+    batch.items.some((item) => item.status === 'completed')
+  )
+    return ['batchCompleted'];
+  if (batch.status === 'running' && batch.automaticSharedParking)
+    return ['autoAvoiding', 2];
   const row = batch.items[batch.currentIndex];
   if (!row) return;
+  if (
+    batch.status === 'waiting' &&
+    row.status === 'awaiting-acceptance' &&
+    row.progress?.phase === 'awaiting-acceptance'
+  )
+    return ['autoReview'];
   if (
     batch.status === 'running' &&
     (row.status === 'transferring' ||
@@ -96,7 +112,12 @@ export function batchAnnouncements() {
         batchPrompt(old)?.[0] !== prompt[0])
     )
       speakCalibration(...prompt);
-    else if (screenChanged && next.status === 'running' && !prompt)
+    else if (
+      screenChanged &&
+      next.status === 'running' &&
+      next.items[next.currentIndex] &&
+      !prompt
+    )
       speakCalibration('batchNext', 2);
   };
 }

@@ -17,7 +17,6 @@ describe('voice queue', () => {
       'markersCountdown',
       'hover',
       'mappingDone',
-      'autoReview',
       'autoCompleted',
       'payloadDone',
     ] as const)

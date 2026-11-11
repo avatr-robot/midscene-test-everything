@@ -201,8 +201,8 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
       }),
     [activeScreen?.id, availableScreens],
   );
-  const activeWizard =
-    robotReady && wizard?.session === setupSession ? wizard : undefined;
+  // A missed status poll during motion must not unmount the current attempt.
+  const activeWizard = wizard?.session === setupSession ? wizard : undefined;
   const openCalibration = (step: 0 | 1 = 0) => {
     if (!deviceId || !selectedId || !setupSession) return;
     setWizardScreen(deviceId);

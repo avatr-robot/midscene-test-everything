@@ -49,18 +49,6 @@ async function setup() {
     corridorConfirmed: true,
   });
   const sessions = new Map<string, AssistedCalibrationState | null>();
-  rstest.spyOn(f.runtime, 'parkScreenGroup').mockResolvedValue({
-    pose: f.calibration.observationPose,
-    visibility: {
-      clear: true,
-      checkedAt: new Date().toISOString(),
-      screens: ['one', 'two'].map((id) => ({
-        id,
-        visibleFraction: 1,
-        minimumTileFraction: 1,
-      })),
-    },
-  });
   const starts: string[] = [];
   const stops: string[] = [];
   const entries = new Map();
@@ -124,6 +112,21 @@ async function setup() {
     ensureHost: async (id: string) => entries.get(id).host,
   } as unknown as PlaygroundDevices;
   const batch = new CalibrationBatch(devices);
+  rstest.spyOn(f.runtime, 'parkScreenGroup').mockImplementation(async () => {
+    expect(batch.read()?.automaticSharedParking).toBe(true);
+    return {
+      pose: f.calibration.observationPose,
+      visibility: {
+        clear: true,
+        checkedAt: new Date().toISOString(),
+        screens: ['one', 'two'].map((id) => ({
+          id,
+          visibleFraction: 1,
+          minimumTileFraction: 1,
+        })),
+      },
+    };
+  });
   cleanups.push(async () => {
     await batch.close();
     await queue.close();
@@ -335,6 +338,7 @@ it('runs a fast batch with automatic acceptance and parks after both screens', a
     samplingMode: 'slide',
   });
   await rstest.waitFor(() => expect(f.batch.read()?.status).toBe('completed'));
+  expect(f.batch.read()?.automaticSharedParking).toBeUndefined();
   expect(f.batch.read()?.sharedSafePosition).toEqual(
     f.calibration.observationPose,
   );

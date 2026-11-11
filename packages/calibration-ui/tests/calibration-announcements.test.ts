@@ -151,15 +151,58 @@ it('announces travel and boundary checks without narrating routine sampling phas
       send('safety', { calibration: boundary(group, index) });
   }
   send('avoiding-camera');
+  send('avoiding-camera');
+  send('review');
   send('review');
   send('completed');
   expect(events()).toEqual([
     'approachStart',
     'referenceReturn',
     'autoVerifying',
+    'autoAvoiding',
+    'autoReview',
   ]);
   expect(click.mock.calls).toEqual([['click']]);
   expect(voice).toHaveBeenCalledWith('referenceReturn', 2, 'calibration');
+});
+
+it('announces automatic shared parking once, including a retry after interruption', () => {
+  const { events } = listen();
+  const announce = batchAnnouncements();
+  const batch: CalibrationBatchState = {
+    id: 'batch',
+    revision: 1,
+    status: 'running',
+    currentIndex: 0,
+    items: [
+      {
+        deviceId: 'phone',
+        screenId: 'phone',
+        name: 'Phone',
+        attempts: 1,
+        runIds: [],
+        status: 'completed',
+      },
+    ],
+  };
+  announce(batch);
+  const parking = {
+    ...batch,
+    currentIndex: 1,
+    automaticSharedParking: true as const,
+  };
+  announce({ ...parking, revision: 2 });
+  announce({ ...parking, revision: 3 });
+  announce({ ...batch, currentIndex: 1, status: 'failed', revision: 4 });
+  announce({ ...parking, revision: 5 });
+  announce({ ...batch, status: 'completed', revision: 6 });
+  announce({ ...batch, status: 'completed', revision: 7 });
+  expect(events()).toEqual([
+    'autoAvoiding',
+    'autoFailed',
+    'autoAvoiding',
+    'batchCompleted',
+  ]);
 });
 
 it('distinguishes the three taught positions, operator waits and a confirmed retry', () => {
@@ -245,9 +288,10 @@ it('leaves batch acceptance to the coordinator and ignores polling repeats and s
   update(2, 'waiting', 'awaiting-mapping');
   update(4, 'waiting', 'awaiting-boundary-review');
   update(5, 'waiting', 'awaiting-acceptance', 'awaiting-safe-position');
+  expect(events()).toEqual(['autoStarted']);
   update(6, 'waiting', 'awaiting-acceptance', 'awaiting-acceptance');
-  update(7, 'stopping', 'exploring');
-  update(8, 'stopped', 'stopped');
-  update(9, 'completed', 'completed');
-  expect(events()).toEqual(['autoStarted', 'batchStopping']);
+  update(7, 'waiting', 'awaiting-acceptance', 'awaiting-acceptance');
+  update(8, 'stopping', 'exploring');
+  update(9, 'stopped', 'stopped');
+  expect(events()).toEqual(['autoStarted', 'autoReview', 'batchStopping']);
 });

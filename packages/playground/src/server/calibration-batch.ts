@@ -42,6 +42,7 @@ export class CalibrationBatch {
   private busy = false;
   private starting = false;
   private ownsQueue = false;
+  private automaticSharedParking = false;
   private safetyStop?: Promise<void>;
   private stopFailed = false;
   private stopping?: Promise<CalibrationBatchState | null>;
@@ -71,7 +72,10 @@ export class CalibrationBatch {
         if (row && !terminal(row.status)) row.status = 'stopped';
       }
     }
-    return structuredClone(this.state);
+    const snapshot = structuredClone(this.state);
+    if (snapshot.status === 'running' && this.automaticSharedParking)
+      snapshot.automaticSharedParking = true;
+    return snapshot;
   }
   private update(work: () => void) {
     work();
@@ -1054,6 +1058,11 @@ export class CalibrationBatch {
               409,
             );
         };
+        await this.update(() => {
+          state.status = 'running';
+          this.automaticSharedParking = !operatorConfirmedParking;
+        });
+        guard();
         const parked = await this.runtime.parkScreenGroup(
           source,
           source.id,
@@ -1138,6 +1147,7 @@ export class CalibrationBatch {
         await this.devices.entries.get(row.deviceId)?.host?.service.stop();
       return undefined;
     } finally {
+      this.automaticSharedParking = false;
       for (const item of state.items) {
         const service = this.devices.entries.get(item.deviceId)?.host?.service;
         service?.setBatchTravelHeight();

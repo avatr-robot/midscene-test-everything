@@ -571,6 +571,8 @@ export interface CalibrationBatchState {
   toolProfileId?: string;
   samplingMode?: CalibrationBatchSamplingMode;
   usesSharedSafePosition?: true;
+  /** Live while the batch searches for the shared Safe Position automatically. */
+  automaticSharedParking?: true;
   sharedSafePosition?: CartesianPose;
   sharedSafePositionVerified?: boolean;
   sharedVisibility?: import('./contracts.js').ScreenVisibilityEvidence;
