@@ -34,6 +34,11 @@ it('uses payload synchronization for an enabled arm and recovery before enabling
     disabled: false,
   });
   state.recoveryRequired = true;
+  state.requiresOperatorRecovery = false;
+  expect(calibrationPowerControl(state, capabilities, true).disabled).toBe(
+    true,
+  );
+  state.requiresOperatorRecovery = true;
   expect(calibrationPowerControl(state, capabilities, true)).toEqual({
     action: 'recover',
     disabled: false,

@@ -190,11 +190,10 @@ describe('MG400 channel recovery', () => {
           return false;
         }
       }, 8000);
-      // The interrupted control session still requires the explicit safe-stop
-      // check; it must be reachable without reconnecting or restarting first.
-      expect((await runtime.state()).recoveryRequired).toBe(true);
-      await runtime.recover();
       expect((await runtime.state()).recoveryRequired).toBe(false);
+      expect(
+        f.controller.commands.some((command) => command.startsWith('Mov')),
+      ).toBe(false);
     } finally {
       await f.adapter.disconnect();
       await rm(directory, { recursive: true, force: true });

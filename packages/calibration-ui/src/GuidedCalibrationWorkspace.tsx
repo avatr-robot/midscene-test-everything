@@ -1081,13 +1081,15 @@ function GuidedContent({
     'manual-stop':
       'The robot was stopped manually. Confirm recovery before sampling.',
     'emergency-stop':
-      'Emergency stop was triggered. Confirm recovery before sampling.',
+      config?.armState?.requiresOperatorRecovery === false
+        ? 'Release the emergency stop. Recovery is checked automatically.'
+        : 'Emergency stop was triggered. Confirm recovery before sampling.',
     'socket-disconnect': controller.session?.awaitingSocketRecovery
       ? 'Connection interrupted. Checking readiness before returning to sampling setup.'
-      : 'Check controller recovery before collecting points.',
-    fault: 'Resolve the controller fault and confirm recovery before sampling.',
+      : 'Waiting for the controller to confirm it is ready.',
+    fault: 'Clear the controller fault. Recovery is checked automatically.',
     pause: 'Resume the robot to continue calibration.',
-    interruption: 'Check controller recovery before collecting points.',
+    interruption: 'Waiting for the controller to confirm it is ready.',
   };
   const powerControl = config && !config.ready && (
     <CalibrationPowerButton

@@ -460,14 +460,17 @@ export function RobotStatusBar({
               {zh ? '继续' : 'Resume'}
             </Button>
           )}
-          {(data?.state.recoveryRequired || controlError) && !paused && (
-            <Button
-              disabled={locked || Boolean(faults.length)}
-              onClick={() => choose('recover')}
-            >
-              {t('Check Recovery')}
-            </Button>
-          )}
+          {((data?.state.recoveryRequired &&
+            data.state.requiresOperatorRecovery !== false) ||
+            controlError) &&
+            !paused && (
+              <Button
+                disabled={locked || Boolean(faults.length)}
+                onClick={() => choose('recover')}
+              >
+                {t('Check Recovery')}
+              </Button>
+            )}
           {settings}
           <Badge count={faults.length}>
             <Button

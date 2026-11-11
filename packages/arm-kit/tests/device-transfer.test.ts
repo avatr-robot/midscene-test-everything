@@ -249,7 +249,7 @@ it('stops a cancelled transfer without lifting against destination geometry, and
     expect(f.adapter.movements.slice(before)).toEqual([
       f.calibration.observationPose,
     ]);
-    await f.arm.recover();
+    expect((await f.arm.getStatus()).recoveryRequired).toBe(false);
     await expect(f.tap(f.a)).rejects.toMatchObject({
       code: 'POSITION_UNKNOWN',
     });

@@ -651,6 +651,7 @@ export interface ProfileData {
   format: 'midscene.robot-arm.profiles';
   schemaVersion: 1;
   softwarePaused?: boolean;
+  operatorStop?: 'manual-stop' | 'emergency-stop';
   pendingOperation?: { requestId: string; kind: string; startedAt: string };
   robots: RobotArmProfile[];
   tools: ToolProfile[];
@@ -881,6 +882,7 @@ export interface RuntimeState {
   operation?: CurrentOperation;
   recoveryRequired: boolean;
   recoveryReason?: RecoveryReason;
+  requiresOperatorRecovery?: boolean;
   softwarePaused: boolean;
 }
 /** Controller initialization diagnostics; HTTP service availability is separate. */

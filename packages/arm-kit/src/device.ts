@@ -612,7 +612,7 @@ export class RobotArmDevice extends AbstractInterface {
         const runtime = controllerRuntime(this.options.arm);
         let stopping: Promise<void> | undefined;
         const cancel = () => {
-          stopping = this.options.arm.stop();
+          stopping = this.options.arm.stopInterruptedWork();
           void stopping.catch(() => undefined);
         };
         abort.addEventListener('abort', cancel, { once: true });

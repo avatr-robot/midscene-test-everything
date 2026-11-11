@@ -20,7 +20,10 @@ export function calibrationPowerControl(
       runtime?.operation?.status !== 'running',
   );
   if (runtime?.recoveryRequired)
-    return { action: 'recover' as const, disabled: !stationary };
+    return {
+      action: 'recover' as const,
+      disabled: !stationary || runtime.requiresOperatorRecovery === false,
+    };
   const action = state?.enabled ? ('payload' as const) : ('enable' as const);
   const supported =
     capabilities.controls.includes(

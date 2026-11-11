@@ -12,16 +12,19 @@ export const assistedCalibrationZh: Record<string, string> = {
     '开始标定前需要重新检查相机映射。',
   'The robot was stopped manually. Confirm recovery before sampling.':
     '机械臂已手动停止。恢复采样前，请确认恢复。',
+  'Waiting for controller recovery': '正在等待控制器恢复',
+  'Release the emergency stop. Recovery is checked automatically.':
+    '请解除急停，系统会自动检查恢复状态。',
   'Emergency stop was triggered. Confirm recovery before sampling.':
     '急停已触发。解除急停后，请确认恢复。',
-  'Resolve the controller fault and confirm recovery before sampling.':
-    '请处理控制器报警，再确认恢复。',
+  'Clear the controller fault. Recovery is checked automatically.':
+    '请处理控制器报警，系统会自动检查恢复状态。',
   'Connection interrupted. Checking readiness before returning to sampling setup.':
     '连接中断，重连并检查机械臂状态后将返回采样准备。',
   'Resume the robot to continue calibration.':
     '请在顶部恢复机械臂运行，再继续标定。',
-  'Check controller recovery before collecting points.':
-    '采样前，请先检查并恢复控制器。',
+  'Waiting for the controller to confirm it is ready.':
+    '正在等待控制器确认就绪状态。',
   'Prepare the robot and tool payload before collecting points.':
     '采样前，请确认机械臂已使能并已应用工具负载。',
   'No measurement recorded for this step.': '本次标定未保存这一步的测量记录。',

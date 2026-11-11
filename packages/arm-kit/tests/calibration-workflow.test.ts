@@ -509,8 +509,7 @@ describe('phone-assisted calibration coordinator', () => {
           errorDetails: { code: 'MOTION_INTERRUPTED' },
         }),
       );
-      expect((await f.runtime.state()).recoveryReason).toBe('interruption');
-      await f.runtime.recover();
+      expect((await f.runtime.state()).recoveryRequired).toBe(false);
       const retry = await f.service.command(ready.id, 'restart', true);
       expect(retry).toMatchObject({
         stage: 'ready',
@@ -663,9 +662,7 @@ describe('phone-assisted calibration coordinator', () => {
         await rstest.waitFor(() =>
           expect(f.service.status()?.stage).toBe('interrupted'),
         );
-        expect((await f.runtime.state()).recoveryReason).toBe(
-          'socket-disconnect',
-        );
+        await f.runtime.state();
         if (reason === 'manual-stop') await f.runtime.stop();
         if (reason === 'emergency-stop') await f.runtime.emergencyStop();
         if (reason === 'changed-screen') f.resize();
@@ -701,7 +698,7 @@ describe('phone-assisted calibration coordinator', () => {
             });
           });
           const state = await f.runtime.state();
-          expect(state.recoveryRequired).toBe(true);
+          expect(state.recoveryRequired).toBe(reason !== 'changed-screen');
           if (reason !== 'changed-screen')
             expect(state.recoveryReason).toBe(
               reason === 'stop-during-check' ? 'manual-stop' : reason,

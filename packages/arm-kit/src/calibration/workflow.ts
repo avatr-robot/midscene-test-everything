@@ -470,7 +470,7 @@ export class CalibrationWorkflow {
       awaitingSocketRecovery:
         this.socketRecovery?.session === s &&
         this.socketRecovery.stopRevision === this.runtime.stopRevision &&
-        this.runtime.recoveryReason === 'socket-disconnect',
+        this.runtime.canRecoverSamplingSocket(this.socketRecovery.operationId),
       phoneConnected: this.phone?.connected() ?? false,
       layout: s.mapping?.layout ?? this.phone?.update?.layout,
     });
@@ -2256,7 +2256,7 @@ export class CalibrationWorkflow {
     if (!s.result) s.stage = 'cancelled';
   }
   private async stopPendingWork() {
-    if (this.ownsOperation()) await this.runtime.stop();
+    if (this.ownsOperation()) await this.runtime.stopCalibrationOperation();
     await this.capture;
     await this.verification;
   }

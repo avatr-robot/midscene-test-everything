@@ -512,6 +512,14 @@ export class ProfileStore {
       }
     });
   }
+  setOperatorStop(
+    reason: ProfileData['operatorStop'],
+    guard?: () => void,
+  ): Promise<void> {
+    return this.transaction((d) => {
+      d.operatorStop = reason;
+    }, guard);
+  }
   setSoftwarePaused(paused: boolean): Promise<void> {
     return this.transaction((d) => {
       d.softwarePaused = paused;
@@ -526,7 +534,7 @@ export class ProfileStore {
       };
     });
   }
-  clearOperation(requestId?: string): Promise<void> {
+  clearOperation(requestId?: string, guard?: () => void): Promise<void> {
     return this.transaction((d) => {
       if (!requestId)
         for (const session of d.sessions ?? [])
@@ -534,7 +542,7 @@ export class ProfileStore {
             session.recoveryAcknowledged = true;
       if (!requestId || d.pendingOperation?.requestId === requestId)
         d.pendingOperation = undefined;
-    });
+    }, guard);
   }
   list(): ProfileData {
     return structuredClone(this.data);

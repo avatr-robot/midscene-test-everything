@@ -1155,7 +1155,7 @@ export class CalibrationBatch {
       }
     }
   }
-  private stopActive() {
+  private stopActive(operatorStop: boolean) {
     if (this.stopping) return this.stopping;
     const task = this.task;
     if (!task) return Promise.resolve(this.read());
@@ -1163,7 +1163,8 @@ export class CalibrationBatch {
     this.safetyStop =
       this.ownsQueue && this.runtime.current()
         ? (async () => {
-            await this.runtime.stop();
+            if (operatorStop) await this.runtime.stop();
+            else await this.runtime.stopCalibrationOperation();
             if (
               (await this.runtime.state(undefined, { fresh: true })).state
                 .dragMode
@@ -1211,7 +1212,7 @@ export class CalibrationBatch {
         409,
       );
     // Stop must preempt ordinary commands and stale UI revisions, as in the original flow.
-    if (action === 'stop') return this.stopActive();
+    if (action === 'stop') return this.stopActive(true);
     if (this.busy || this.stopping || state.revision !== revision)
       throw new RobotArmError(
         'STALE_CONTEXT',
@@ -1356,7 +1357,7 @@ export class CalibrationBatch {
     await this.runtime.profileStore.clearCalibrationBatch();
   }
   async close() {
-    await this.stopActive();
+    await this.stopActive(false);
     await this.writes;
   }
 }
