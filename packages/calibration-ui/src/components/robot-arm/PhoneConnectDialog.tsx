@@ -135,7 +135,7 @@ export function PhoneConnectDialog({
   const [savingScreenId, setSavingScreenId] = useState<string>();
   const [screenRenameError, setScreenRenameError] = useState<string>();
   const [restoringPageId, setRestoringPageId] = useState<string>();
-  const [restoreError, setRestoreError] = useState<string>();
+  const [pageActionError, setPageActionError] = useState<string>();
   const openedRef = useRef(false);
   useEffect(() => {
     if (!open) {
@@ -151,7 +151,7 @@ export function PhoneConnectDialog({
     setPageRenameError(undefined);
     setScreenNames({});
     setScreenRenameError(undefined);
-    setRestoreError(undefined);
+    setPageActionError(undefined);
   }, [open]);
   /** The bound screen's current name; the stage and mapping use this name. */
   const boundScreenName = (device: InstallationConnection['devices'][number]) =>
@@ -227,18 +227,24 @@ export function PhoneConnectDialog({
       setSavingScreenId(undefined);
     }
   };
+  const runPageAction = async (action: () => void | Promise<void>) => {
+    setPageActionError(undefined);
+    try {
+      await action();
+    } catch (error) {
+      setPageActionError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
   const restoreHome = async (deviceId: string) => {
     if (!onRestoreHome) return;
     setRestoringPageId(deviceId);
-    setRestoreError(undefined);
-    try {
+    await runPageAction(async () => {
       await onRestoreHome(deviceId);
       message.success(t('Restored the page to its home view.'));
-    } catch (error) {
-      setRestoreError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRestoringPageId(undefined);
-    }
+    });
+    setRestoringPageId(undefined);
   };
   /*
    * A page belongs to the selected camera when it is bound to it. A page that is
@@ -480,7 +486,9 @@ export function PhoneConnectDialog({
                             <Button
                               aria-label={t('Reconnect {0}', [device.label])}
                               loading={device.id === connectingDeviceId}
-                              onClick={() => onWake(device.id)}
+                              onClick={() =>
+                                void runPageAction(() => onWake(device.id))
+                              }
                               size="small"
                             >
                               {t('Reconnect page')}
@@ -492,7 +500,9 @@ export function PhoneConnectDialog({
                                 'Remove this offline page with its screen and perspective? This cannot be undone.',
                               )}
                               okText={t('Remove page')}
-                              onConfirm={() => onForget(device.id)}
+                              onConfirm={() =>
+                                runPageAction(() => onForget(device.id))
+                              }
                             >
                               <Button
                                 aria-label={t('Remove page {0}', [
@@ -627,8 +637,8 @@ export function PhoneConnectDialog({
         {pageRenameError ? (
           <Typography.Text type="danger">{pageRenameError}</Typography.Text>
         ) : null}
-        {restoreError ? (
-          <Typography.Text type="danger">{restoreError}</Typography.Text>
+        {pageActionError ? (
+          <Typography.Text type="danger">{pageActionError}</Typography.Text>
         ) : null}
         {screenRenameError ? (
           <Typography.Text type="danger">{screenRenameError}</Typography.Text>
@@ -726,7 +736,7 @@ export function PhoneConnectDialog({
             onClick={() => {
               if (continuing) return;
               setContinuing(true);
-              void Promise.resolve(onContinue()).finally(() =>
+              void runPageAction(onContinue).finally(() =>
                 setContinuing(false),
               );
             }}

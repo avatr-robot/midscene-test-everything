@@ -486,3 +486,42 @@ it('skips drift checks on every screen without changing mapping fingerprints', a
   expect(left.isBindingCurrent(before)).toBe(true);
   expect(right.isBindingCurrent(await right.binding(options))).toBe(true);
 });
+
+it('requires a live frame at the mapped resolution before calibration even when drift detection is off', async () => {
+  const { manager, backend } = await fixture();
+  const camera = await manager.acquire('camera', 'preflight');
+  const { renderFrame, SCREEN } = await import(
+    './fixtures/perspective-frame.js'
+  );
+  const frame = await renderFrame({ screen: SCREEN });
+  const correction = {
+    points: frame.points,
+    rotation: 0 as const,
+    sourceWidth: frame.sourceWidth,
+    sourceHeight: frame.sourceHeight,
+  };
+  await camera.setCorrection(correction);
+  await expect(camera.assertPerspectiveCurrent()).rejects.toMatchObject({
+    code: 'VISION_UNAVAILABLE',
+  });
+  const source = await (backend.openStream as ReturnType<typeof rstest.fn>).mock
+    .results[0].value;
+  const clock = rstest.spyOn(Date, 'now').mockReturnValue(Date.now() - 3000);
+  try {
+    source.emit('frame', frame.jpeg);
+  } finally {
+    clock.mockRestore();
+  }
+  await expect(camera.assertPerspectiveCurrent()).rejects.toMatchObject({
+    code: 'VISION_UNAVAILABLE',
+  });
+  source.emit('frame', frame.jpeg);
+  await camera.assertPerspectiveCurrent();
+  await camera.setCorrection({
+    ...correction,
+    sourceWidth: frame.sourceWidth + 1,
+  });
+  await expect(camera.assertPerspectiveCurrent()).rejects.toMatchObject({
+    code: 'VISION_BINDING_CHANGED',
+  });
+});

@@ -1,4 +1,5 @@
 // Measured tool geometry helpers migrated from robot-vision.
+import { supportsFlangeContact } from '@midscene/arm-kit-shared/setup-contracts';
 import { t } from '../../i18n';
 import type { EffectiveCapabilities } from '../../robot-arm-api';
 export type SetupProfile = Record<string, any>;
@@ -19,10 +20,20 @@ export function axisVector(axis: ToolAxis) {
     axis[0] === '+' ? 1 : -1;
   return vector;
 }
-export function axialTool(axis: ToolAxis, length: number) {
-  if (!Number.isFinite(length) || length < 0)
-    throw new Error(t('Enter a nonnegative measured length.'));
+export function axialTool(
+  axis: ToolAxis,
+  length: number | null,
+  capabilities?: EffectiveCapabilities,
+) {
   const direction = axisVector(axis);
+  if (length === null && axis === '-Z' && supportsFlangeContact(capabilities))
+    return {
+      contactFrame: 'flange' as const,
+      contactDirection: direction,
+      offsetMm: { x: 0, y: 0, z: 0 },
+    };
+  if (length === null || !Number.isFinite(length) || length < 0)
+    throw new Error(t('Enter a nonnegative measured length.'));
   return {
     contactDirection: direction,
     offsetMm: {

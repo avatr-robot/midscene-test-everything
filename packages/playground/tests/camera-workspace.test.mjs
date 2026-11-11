@@ -368,6 +368,34 @@ test('marker capture follows its phone from preview into only the matching scree
       const secondToken = new URL(second.url, server.url).searchParams.get(
         'token',
       );
+      const siblingPhone = await phone(server, secondToken);
+      try {
+        const original = await siblingPhone.receive(
+          () => siblingPhone.update(),
+          (reply) => Boolean(reply.view),
+        );
+        const identify = (targetId) =>
+          post('/api/screen-pages', {
+            action: 'identify',
+            cameraId: id,
+            targetId,
+          }).then(checked);
+        const hint = (client, selected) =>
+          client.receive(
+            () => {},
+            (reply) => reply.view && Boolean(reply.selectionHint) === selected,
+          );
+        await Promise.all([hint(mapped, true), identify(id)]);
+        const [, highlighted] = await Promise.all([
+          hint(mapped, false),
+          hint(siblingPhone, true),
+          identify(sibling.id),
+        ]);
+        assert.deepEqual(highlighted, { ...original, selectionHint: true });
+        assert.deepEqual(await hint(siblingPhone, false), original);
+      } finally {
+        siblingPhone.socket.close();
+      }
       mapped.socket.close();
       await checked(
         await post('/api/arm/disconnect', {

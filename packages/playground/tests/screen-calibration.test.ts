@@ -245,6 +245,67 @@ it('binds each phone once, gives it distinct markers and applies all passing per
   );
   expect(f.adapter.movements).toHaveLength(0);
 });
+it('waits for the iPhone origin before projecting its full display from the markers', async () => {
+  const f = await fixture();
+  const { page, targetHost, targetId } = await f.connect();
+  const initial = targetHost.service.phoneObservation()!;
+  const layout = {
+    ...initial.layout,
+    screen: { ...initial.layout.screen, height: 839 },
+    insetDiagnostics: {
+      version: 1 as const,
+      userAgent: 'iPhone',
+      viewportMeta: null,
+      measurementMatchesViewport: false,
+      reason: 'awaiting-origin-tap',
+    },
+  };
+  const update = {
+    ...initial,
+    platform: 'ios' as const,
+    displayMode: 'standalone' as const,
+    layout,
+    sequence: 2,
+    markersPainted: false,
+  };
+  targetHost.service.receivePhone(update);
+  expect(page.summary()).toMatchObject({
+    awaitingOriginTap: true,
+    markersReady: false,
+  });
+  targetHost.service.receivePhone({
+    ...update,
+    sequence: 3,
+    markersPainted: true,
+    layout: {
+      ...layout,
+      revision: 2,
+      topInset: 0,
+      insetDiagnostics: {
+        ...layout.insetDiagnostics,
+        reason: 'touch-origin',
+        measurementMatchesViewport: true,
+      },
+    },
+  });
+  expect(page.summary()).toMatchObject({
+    awaitingOriginTap: false,
+    markersReady: true,
+  });
+  await f.render();
+  const detection = (await f.service.markerAction({
+    action: 'detect',
+    cameraId: 'cam',
+    id: f.session.id,
+    token: f.session.token,
+    targetIds: [targetId],
+  })) as MarkerCalibrationDetectionResponse;
+  const result = detection.session.targets.find(
+    (target) => target.id === targetId,
+  )?.result;
+  expect(result?.points.topLeft.y).toBeCloseTo(50, -1);
+  expect(result?.points.bottomLeft.y).toBeCloseTo(889, -1);
+});
 it('applies a screen mapping when only its four outer markers remain visible', async () => {
   const f = await fixture();
   const first = await f.connect();

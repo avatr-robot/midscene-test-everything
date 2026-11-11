@@ -6,7 +6,7 @@ import {
   RobotKernel,
   validateMotionOptions,
 } from '../src/kernel.js';
-import { RobotArmRuntime } from '../src/runtime.js';
+import { ProfileStore, RobotArmRuntime } from '../src/runtime.js';
 import {
   stageOptions,
   validateContactPolicy,
@@ -305,6 +305,29 @@ describe('SDK motion and application share one lease', () => {
 });
 
 describe('restart and human verification gates', () => {
+  it.each(['stop', 'emergencyStop'] as const)(
+    'preserves the saved installation when %s precedes initialization',
+    async (control) => {
+      const f = await fixture();
+      try {
+        const restarted = new RobotArmRuntime({
+          adapter: f.adapter,
+          profileStore: new ProfileStore(f.store.filePath),
+        });
+        await restarted[control]();
+        await restarted.initialize();
+        expect(restarted.profileStore.getCalibration(f.calibration.id)).toEqual(
+          f.calibration,
+        );
+        expect(restarted.profileStore.list().operatorStop).toBe(
+          control === 'stop' ? 'manual-stop' : 'emergency-stop',
+        );
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+
   it('checks a persisted unfinished operation before admitting new SDK motion', async () => {
     const f = await fixture();
     try {
@@ -366,6 +389,32 @@ describe('restart and human verification gates', () => {
       expect(f.store.list().operatorStop).toBeUndefined();
       expect((await restarted.state()).recoveryRequired).toBe(false);
       expect(f.adapter.movements).toHaveLength(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it('requires explicit recovery after observing a hardware emergency stop, even across restart', async () => {
+    const f = await fixture();
+    try {
+      const persist = rstest.spyOn(f.store, 'setOperatorStop');
+      await f.adapter.emergencyStop();
+      expect((await f.runtime.state()).requiresOperatorRecovery).toBe(true);
+      await f.runtime.state();
+      expect(persist).toHaveBeenCalledTimes(1);
+      await f.adapter.clearFaults();
+      expect((await f.runtime.state()).recoveryReason).toBe('emergency-stop');
+      const restarted = new RobotArmRuntime({
+        adapter: f.adapter,
+        profileStore: new ProfileStore(f.store.filePath),
+      });
+      await restarted.initialize();
+      await expect(restarted.enterDragMode()).rejects.toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+      });
+      expect((await restarted.state()).requiresOperatorRecovery).toBe(true);
+      await restarted.recover();
+      expect((await restarted.state()).recoveryRequired).toBe(false);
     } finally {
       await f.cleanup();
     }

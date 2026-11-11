@@ -231,6 +231,8 @@ export interface RobotArmProfile extends VersionedProfile {
   jointBounds?: { min: number; max: number }[];
 }
 export interface ToolProfile extends VersionedProfile {
+  /** Unknown vertical stylus length. Contact geometry is fitted in flange coordinates. */
+  contactFrame?: 'flange';
   offsetMm: Vector3;
   contactDirection: Vector3;
   payload?: ToolPayload;
@@ -675,6 +677,8 @@ export interface ProfileData {
     string,
     {
       geometryKey: string;
+      /** Older cached errors were scored on the same markers used to fit them. */
+      accuracyBasis?: 'outer-markers';
       mapping: import('./assisted-contracts.js').WebCalibrationMapping;
     }
   >;

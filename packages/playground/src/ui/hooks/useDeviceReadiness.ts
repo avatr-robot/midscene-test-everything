@@ -21,7 +21,7 @@ export function useDeviceReadiness(id: string | undefined, revision: string) {
       });
     return () => abort.abort();
   }, [id, revision]);
-  return result && result.id === id && result.revision === revision
-    ? result
-    : undefined;
+  // Keep the last verified panel on screen during a same-camera switch.
+  // The caller binds it to result.id and disables it until the new check completes.
+  return id && result?.revision === revision ? result : undefined;
 }

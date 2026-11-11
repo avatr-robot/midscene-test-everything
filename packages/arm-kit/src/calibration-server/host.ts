@@ -249,7 +249,10 @@ export class CalibrationHost {
   async configure(input: {
     width?: number;
     height?: number;
-    tool: Pick<ToolProfile, 'offsetMm' | 'contactDirection' | 'payload'>;
+    tool: Pick<
+      ToolProfile,
+      'offsetMm' | 'contactDirection' | 'payload' | 'contactFrame'
+    >;
     motion?: AssistedCalibrationInput['motion'];
   }) {
     this.editable();
@@ -287,8 +290,17 @@ export class CalibrationHost {
     // Devices on this arm share a physical tool. Reuse an identical accepted
     // tool; changed measured geometry creates a draft and never mutates it.
     const geometryKey = (
-      tool: Pick<ToolProfile, 'offsetMm' | 'contactDirection' | 'payload'>,
-    ) => semanticJson([tool.offsetMm, tool.contactDirection, tool.payload]);
+      tool: Pick<
+        ToolProfile,
+        'offsetMm' | 'contactDirection' | 'payload' | 'contactFrame'
+      >,
+    ) =>
+      semanticJson([
+        tool.offsetMm,
+        tool.contactDirection,
+        tool.payload,
+        tool.contactFrame,
+      ]);
     const remembered = arm.profileStore.calibrationSetup(this.options.deviceId);
     const rememberedTool =
       remembered?.robotProfileId === robot.id

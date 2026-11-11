@@ -19,7 +19,10 @@ import { explorationTargets } from '../src/calibration/exploration/targets.js';
 import { CalibrationWorkflow } from '../src/calibration/workflow.js';
 import { RobotVisionError } from '../src/camera/errors.js';
 import { RobotArmError } from '../src/contracts.js';
+import type { AppliedToolPayload, ToolPayload } from '../src/contracts.js';
 import { contactPoint } from '../src/domain.js';
+import { robotSetupDefaults } from '../src/setup-contracts.js';
+import { TestRobotAdapter } from '../src/testkit/test-adapter.js';
 import { fixture, pose } from './fixtures.js';
 const layout: CalibrationPageLayout = {
   revision: 1,
@@ -32,8 +35,11 @@ afterEach(() => {
   rstest.unstubAllGlobals();
   rstest.restoreAllMocks();
 });
-async function setup(deviceId = 'cam') {
-  const f = await fixture();
+async function setup(
+  deviceId = 'cam',
+  provided?: Awaited<ReturnType<typeof fixture>>,
+) {
+  const f = provided ?? (await fixture());
   const originalBinding = f.store.list().workstation!;
   await f.store.acceptDeviceBinding({
     ...originalBinding,
@@ -840,6 +846,38 @@ describe('phone-assisted calibration coordinator', () => {
       const updated = await f.service.mapSetup();
       expect(updated.mapping?.vision.fingerprint).toBe('changed');
       expect(f.detectMarkers).toHaveBeenCalledTimes(before + 2);
+    } finally {
+      await f.dispose();
+    }
+  });
+  it('remeasures cached marker errors from older installs once before reusing them', async () => {
+    const f = await setup();
+    try {
+      const saved = f.store.calibrationMapping('cam')!;
+      await f.store.saveCalibrationMapping('cam', {
+        geometryKey: saved.geometryKey,
+        mapping: saved.mapping,
+      });
+      const reopen = async () => {
+        const service = f.forScreen('cam');
+        await service.prepare({
+          ...f.beforeTask.setup.selection!,
+          motion: f.screen,
+        });
+        service.receivePhone({
+          pageId: service.openPhonePage(),
+          sequence: 1,
+          platform: 'android',
+          displayMode: 'fullscreen',
+          visible: true,
+          layout,
+        });
+        return service.mapSetup();
+      };
+      expect((await reopen()).mapping).toBeDefined();
+      expect(f.detectMarkers).toHaveBeenCalledTimes(2);
+      expect((await reopen()).mapping).toBeDefined();
+      expect(f.detectMarkers).toHaveBeenCalledTimes(2);
     } finally {
       await f.dispose();
     }
@@ -1729,3 +1767,113 @@ it('interrupts active collection when a later outline check detects drift, befor
     await f.dispose();
   }
 });
+
+it('calibrates a vertical MG400 stylus in flange coordinates through automatic acceptance', async () => {
+  const adapter = Object.assign(
+    new TestRobotAdapter({ motionDurationMs: 10 }),
+    {
+      setupDefaults: robotSetupDefaults('mg400'),
+      payloadLimits: { massKg: { min: 0, max: 0.5 } },
+    },
+  );
+  let applied: AppliedToolPayload | undefined;
+  adapter.driver.enableWithPayload = async (payload: ToolPayload) => {
+    await adapter.enable();
+    applied = { payload, confirmedAt: new Date().toISOString() };
+  };
+  adapter.driver.appliedPayload = () => applied;
+  const base = await fixture(4, 10, adapter, { massKg: 0.1 });
+  const tool = await base.runtime.putTool({
+    ...base.tool,
+    id: 'unknown-length',
+    contactFrame: 'flange',
+  });
+  await base.runtime.lifecycle('disable');
+  await base.runtime.lifecycle('enable', {
+    robotProfileId: base.robot.id,
+    toolProfileId: tool.id,
+    toolRevision: tool.revision,
+  });
+  const f = await setup('cam', { ...base, tool });
+  const timer = setInterval(async () => {
+    const { positionMm: p } = await f.adapter.getPose();
+    // Only the simulated phone knows the physical pen is 40 mm long and
+    // the screen lies at Z=-10. Neither value enters the SDK configuration.
+    const touching =
+      p.z - 40 <= -10 && p.x >= 0 && p.x <= 200 && p.y >= -100 && p.y <= 0;
+    const point = touching ? { x: p.x * 2, y: -p.y * 8 } : undefined;
+    const capture = f.service.phoneView().capture;
+    const step = capture?.step;
+    await f.send({
+      targetReady: capture?.target.id,
+      contact: point ? { id: 'tip', point, motionRevision: 0 } : undefined,
+      stepFeedback: step
+        ? {
+            ...step,
+            outcome: point
+              ? 'touched'
+              : step.phase === 'prepare'
+                ? 'ready'
+                : 'no_touch',
+            point,
+          }
+        : undefined,
+    });
+  }, 25);
+  try {
+    expect((await f.runtime.state(tool.id)).payloadApplication?.status).toBe(
+      'applied',
+    );
+    f.adapter.setPoseForTesting(pose(100, -50, 60));
+    await f.recordReference();
+    await expect(
+      f.service.command(f.state.id, 'start-automatic', true),
+    ).rejects.toMatchObject({ code: 'INSTALLATION_TEACHING_REQUIRED' });
+    expect(adapter.movements).toHaveLength(0);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(pose(100, 50, 60));
+    await f.service.command(f.state.id, 'record-boundary', true);
+    await f.service.command(f.state.id, 'save-teaching', true);
+    // The previous saved boundary cannot authorize an unconfirmed replacement.
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    await f.service.command(f.state.id, 'record-boundary', true);
+    await expect(
+      f.service.command(f.state.id, 'start-automatic', true),
+    ).rejects.toMatchObject({ code: 'INSTALLATION_TEACHING_REQUIRED' });
+    expect(adapter.movements).toHaveLength(0);
+    await f.service.command(f.state.id, 'save-teaching', true);
+    await f.service.command(f.state.id, 'start-automatic', true);
+    await rstest.waitFor(
+      () => {
+        const state = f.service.status()!;
+        expect(state.error).toBeUndefined();
+        expect(state.stage).toBe('review');
+      },
+      { timeout: 120000, interval: 250 },
+    );
+    const reviewed = f.service.status()!;
+    expect(reviewed.samples).toBe(9);
+    expect(reviewed.safePosition).toBeDefined();
+    expect(reviewed.calibration?.boundary).toMatchObject({
+      hoverEdges: true,
+      contactCorners: true,
+      contactEdges: true,
+    });
+    expect((await f.service.acceptAutomatically()).accepted).toBe(true);
+    const saved = f.service.status()!;
+    expect(saved.stage).toBe('completed');
+    expect(saved.result?.origin.z).toBeCloseTo(30, 0);
+    expect(f.store.deviceBinding('cam')?.calibrationProfileId).toBe(
+      saved.result?.id,
+    );
+  } finally {
+    clearInterval(timer);
+    await f.dispose();
+  }
+}, 145000);

@@ -93,6 +93,7 @@ class ScreenPage {
   targetDisplayId?: string;
   last?: CalibrationPageUpdate;
   private listeners = new Set<() => void>();
+  private selectionTimer?: ReturnType<typeof setTimeout>;
   private unsubscribe?: () => void;
   private browserInstance?: { id: string; visible: boolean; lastSeen: number };
   constructor(
@@ -146,9 +147,33 @@ class ScreenPage {
     });
   }
   private view(): CalibrationPageReply {
-    return this.mode !== 'waiting' && this.host
-      ? this.host.service.phoneView()
-      : { view: 'waiting', anchors: [] };
+    const view: CalibrationPageReply =
+      this.mode !== 'waiting' && this.host
+        ? this.host.service.phoneView()
+        : { view: 'waiting', anchors: [] };
+    return this.selectionTimer &&
+      !view.visibilityProbe &&
+      !view.boundaryGuide &&
+      [
+        'waiting',
+        'markers',
+        'touch-preview',
+        'positioning',
+        'reference-required',
+        'completed',
+        'review',
+        'interrupted',
+      ].includes(view.view)
+      ? { ...view, selectionHint: true }
+      : view;
+  }
+  identify(selected: boolean) {
+    if (!selected && !this.selectionTimer) return;
+    clearTimeout(this.selectionTimer);
+    this.selectionTimer = selected
+      ? setTimeout(() => this.identify(false), 1600)
+      : undefined;
+    this.changed();
   }
   assign(
     host: CalibrationHost | undefined,
@@ -203,6 +228,8 @@ class ScreenPage {
           (update?.displayMode === 'fullscreen' ||
             update?.displayMode === 'standalone'),
       ),
+      awaitingOriginTap:
+        update?.layout.insetDiagnostics?.reason === 'awaiting-origin-tap',
       markersReady: Boolean(
         connected &&
           update?.markersPainted &&
@@ -260,6 +287,7 @@ class ScreenPage {
     }
   }
   close() {
+    clearTimeout(this.selectionTimer);
     this.unsubscribe?.();
     this.phoneSocket.close();
   }
@@ -1386,6 +1414,23 @@ export class ScreenCalibration {
         };
       });
     if (input.action === 'displays') return [...this.displays.values()];
+    if (input.action === 'identify') {
+      const screen = this.screen(input.targetId!);
+      if (screen.cameraId !== input.cameraId)
+        throw new RobotArmError(
+          'PROFILE_MISMATCH',
+          'Screen belongs to another camera',
+          409,
+        );
+      for (const page of this.pages.values()) {
+        if (page.saved.cameraId === screen.cameraId)
+          page.identify(
+            page.saved.targetId === screen.id &&
+              page.saved.pageKey === screen.pageKey,
+          );
+      }
+      return {};
+    }
     return this.serialize(() => this.updatePage(input));
   }
   private async updatePage(

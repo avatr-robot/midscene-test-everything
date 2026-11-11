@@ -437,8 +437,11 @@
   flex-direction: column;
   gap: 16px;
 
+  > .guided-screen-controls {
+    display: contents;
+  }
   > .ant-select,
-  > .ant-btn {
+  > .guided-screen-controls > .ant-btn {
     align-self: flex-start;
     max-width: 100%;
   }

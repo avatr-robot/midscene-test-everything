@@ -44,7 +44,10 @@ export class RobotDriverBoundary {
   readonly id: string;
   readonly name: string;
   readonly connectionIdentity: string;
-  constructor(readonly adapter: RobotArmAdapter) {
+  constructor(
+    readonly adapter: RobotArmAdapter,
+    private readonly onEmergencyStop?: () => void | Promise<void>,
+  ) {
     this.resolver = new DriverSupport(adapter);
     this.id = adapter.id;
     this.name = adapter.name;
@@ -313,6 +316,7 @@ export class RobotDriverBoundary {
       this.appliedPayload()
     )
       this.invalidatePayload('disabled');
+    if (current && s.emergencyStop === 'active') await this.onEmergencyStop?.();
     return s;
   }
   async getState(fresh = true): Promise<RobotState> {

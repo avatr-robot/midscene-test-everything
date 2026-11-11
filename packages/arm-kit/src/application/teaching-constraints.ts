@@ -6,6 +6,9 @@ import {
 } from '../contracts.js';
 import { contactPoint } from '../domain.js';
 import type { ApplicationContext } from './context.js';
+
+export const CAMERA_BOUNDARY_EPSILON_MM = 1e-6;
+
 export function cameraBoundaryExcessMm(
   tip: Vector3,
   teaching: InstallationTeaching,
@@ -21,7 +24,7 @@ export function assertCameraBoundary(
 ) {
   const tip = contactPoint(pose, ctx.tool.offsetMm);
   const excess = cameraBoundaryExcessMm(tip, teaching);
-  if (!Number.isFinite(excess) || excess > 1e-6)
+  if (!Number.isFinite(excess) || excess > CAMERA_BOUNDARY_EPSILON_MM)
     throw new RobotArmError(
       'CAMERA_BOUNDARY_EXCEEDED',
       'Target crosses the taught camera-side boundary',

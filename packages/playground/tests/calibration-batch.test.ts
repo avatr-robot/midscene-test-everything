@@ -7,6 +7,7 @@ import { fixture, pose } from '@midscene/arm-kit/internal/testkit/fixtures';
 import { afterEach, expect, it, rstest } from '@rstest/core';
 import { CalibrationBatch } from '../src/server/calibration-batch.js';
 import type { PlaygroundDevices } from '../src/server/devices.js';
+import { ScreenControl } from '../src/server/screen-control.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -180,6 +181,43 @@ it('reads saved screen status without opening a calibration host', async () => {
   }
 });
 
+it('uses the active screen tool after the camera default screen is archived', async () => {
+  const f = await setup();
+  const oldTool = await f.store.putTool({ ...f.tool, id: 'old-tool' });
+  await f.store.saveScreenTarget({
+    id: 'cam',
+    cameraId: 'cam',
+    name: 'Old screen',
+  });
+  await f.store.saveCalibrationSetup({
+    ...f.store.calibrationSetup('one')!,
+    deviceId: 'cam',
+    toolProfileId: oldTool.id,
+  });
+  await f.store.archiveScreenTarget('cam');
+  await f.store.acceptDeviceBinding({
+    deviceId: 'one',
+    cameraId: 'cam',
+    ...f.binding,
+    calibrationProfileId: f.calibration.id,
+    revision: 0,
+    vision: f.store.list().workstation!.vision!,
+  });
+  expect(f.batch.screens('cam')).toMatchObject([
+    {
+      screenId: 'one',
+      status: 'ready',
+      calibrationProfileId: f.calibration.id,
+    },
+    { screenId: 'two', status: 'calibration-required' },
+  ]);
+  expect((await f.batch.plan('cam')).screens).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ screenId: 'one', calibrated: true }),
+    ]),
+  );
+});
+
 it('rejects an unconfirmed tool payload before creating a batch or starting sampling', async () => {
   const f = await setup();
   const check = rstest
@@ -249,6 +287,12 @@ it('rejects stale commands, retries only the failed screen and stops its current
   await expect(f.batch.command(0, 'retry')).rejects.toMatchObject({
     code: 'STALE_CONTEXT',
   });
+  Object.assign(f.devices, { hasActiveScreenCalibration: true });
+  await expect(
+    f.batch.command(f.batch.read()!.revision, 'retry'),
+  ).rejects.toMatchObject({ code: 'BUSY' });
+  expect(f.batch.read()?.status).toBe('failed');
+  Object.assign(f.devices, { hasActiveScreenCalibration: false });
   await f.batch.command(f.batch.read()!.revision, 'retry');
   await rstest.waitFor(() => expect(f.starts).toEqual(['one', 'two', 'two']));
   await f.batch.command(f.batch.read()!.revision, 'stop');
@@ -418,6 +462,37 @@ it('rejects retry after geometry changes and releases the per-batch travel floor
   expect(f.starts).toEqual(['one']);
   expect(f.adapter.movements).toHaveLength(0);
 });
+it('honours Stop while a retry is waiting for motion readiness', async () => {
+  const f = await setup();
+  await f.start();
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
+  );
+  const stopped = (await f.batch.command(f.batch.read()!.revision, 'stop'))!;
+  let resumeCheck!: () => void;
+  const pausedCheck = new Promise<void>((resolve) => {
+    resumeCheck = resolve;
+  });
+  const readiness = rstest
+    .spyOn(f.runtime, 'assertCalibrationMotionReady')
+    .mockImplementationOnce(async () => {
+      await pausedCheck;
+      return f.calibration.observationPose;
+    });
+  const retry = f.batch.command(stopped.revision, 'retry');
+  try {
+    await rstest.waitFor(() => expect(readiness).toHaveBeenCalled());
+    expect(f.batch.active).toBe(true);
+    await f.batch.command(stopped.revision, 'stop', stopped.id);
+    resumeCheck();
+    await expect(retry).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
+    expect(f.batch.read()?.status).toBe('stopped');
+    expect(f.starts).toEqual(['one']);
+  } finally {
+    resumeCheck();
+    readiness.mockRestore();
+  }
+});
 it('restores the confirmed travel height after a stopped batch is loaded again', async () => {
   const f = await setup();
   const secondScreen = await f.store.putScreen({
@@ -534,11 +609,30 @@ it('does not estimate a new screen from an accepted calibration whose camera evi
     (await f.batch.plan('cam')).screens.find((s) => s.screenId === 'one')
       ?.calibrated,
   ).toBe(true);
+  const screens = f.devices.screens().map((screen) => ({
+    ...screen,
+    correction: f.entries.get(screen.id).camera.getCorrection(),
+    perspectiveTarget: { width: 1000, height: 500, rotation: 0 as const },
+  }));
+  rstest.spyOn(f.devices, 'screens').mockReturnValue(screens);
+  const control = new ScreenControl(f.devices, () => undefined);
+  expect(control.screens().get('one')?.ready).toBe(true);
   f.entries.get('one').camera.isBindingCurrent = () => false;
+  expect(control.screens().get('one')).toMatchObject({
+    ready: false,
+    reason: 'MAPPING_REQUIRED',
+  });
+  expect(
+    f.batch.screens('cam').find((s) => s.screenId === 'one'),
+  ).toMatchObject({
+    ready: false,
+    status: 'camera-mapping-changed',
+  });
   const plan = await f.batch.plan('cam');
-  expect(plan.screens.find((s) => s.screenId === 'one')?.calibrated).toBe(
-    false,
-  );
+  expect(plan.screens.find((s) => s.screenId === 'one')).toMatchObject({
+    calibrated: false,
+    cameraMappingChanged: true,
+  });
   expect(
     plan.screens.find((s) => s.screenId === 'two')?.expectedCenterMm,
   ).toBeUndefined();

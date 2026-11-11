@@ -1655,6 +1655,19 @@ export class CalibrationWorkflow {
         409,
       );
     await this.assertMechanicalFrame(true);
+    const input = this.input!;
+    if (
+      this.runtime.profileStore.getTool(input.toolProfileId).contactFrame ===
+        'flange' &&
+      (!s.teachingId ||
+        this.runtime.profileStore.installationTeaching(input)?.id !==
+          s.teachingId)
+    )
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'Save installation teaching before flange contact calibration',
+        409,
+      );
     this.captureStopRevision = this.runtime.stopRevision;
     s.automaticWorkflow = automaticWorkflow;
     s.explorationMode = mode;

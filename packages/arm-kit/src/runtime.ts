@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { supportsFlangeContact } from '@midscene/arm-kit-shared/setup-contracts';
 import type { MotionTarget } from './application/context.js';
 import {
   assertCameraBoundary,
@@ -1014,8 +1015,16 @@ export class RobotArmRuntime extends RobotKernel {
       }
     }
   }
+  private profileLoad?: Promise<void>;
+  private loadProfiles() {
+    this.profileLoad ??= this.profileStore.load().catch((error) => {
+      this.profileLoad = undefined;
+      throw error;
+    });
+    return this.profileLoad;
+  }
   async initialize(): Promise<void> {
-    await this.profileStore.load();
+    await this.loadProfiles();
     const saved = this.profileStore.list();
     this.softwarePaused = saved.softwarePaused === true;
     this.operatorStop ??= saved.operatorStop;
@@ -1127,9 +1136,7 @@ export class RobotArmRuntime extends RobotKernel {
     // needs the channel to clear.
     await this.refreshRecovery();
     const state = await this.adapter.getState(options.fresh === true);
-    if (state.status?.emergencyStop === 'active')
-      this.requireRecovery('emergency-stop');
-    else if (state.faults.length || state.status?.protectiveStop === 'active')
+    if (state.faults.length || state.status?.protectiveStop === 'active')
       this.requireRecovery('fault');
     if (state.connected) this.connectionEstablished = true;
     this.recordPayloadEvidence();
@@ -2489,14 +2496,28 @@ export class RobotArmRuntime extends RobotKernel {
     }
   }
   async stop(): Promise<void> {
-    this.operatorStop = 'manual-stop';
+    this.operatorStop ??= 'manual-stop';
     await Promise.all([
       this.stopCalibrationOperation(),
-      this.profileStore.setOperatorStop(this.operatorStop),
+      this.persistOperatorStop(this.operatorStop),
     ]);
+  }
+  private async persistOperatorStop(reason: 'manual-stop' | 'emergency-stop') {
+    // Safety controls can arrive before connect(). Dispatch immediately, but
+    // load the saved installation before updating its recovery state.
+    await this.loadProfiles();
+    await this.profileStore.setOperatorStop(reason);
   }
   protected stopAfterInterruption() {
     return this.stopCalibrationOperation();
+  }
+  protected observeEmergencyStop() {
+    const newlyObserved = this.operatorStop !== 'emergency-stop';
+    super.observeEmergencyStop();
+    if (newlyObserved) {
+      this.stopGeneration++;
+      return this.persistOperatorStop('emergency-stop');
+    }
   }
   /** Internal stop initiated by a calibration interlock, not an operator command. */
   async stopCalibrationOperation(socketDisconnected = false): Promise<void> {
@@ -2592,7 +2613,7 @@ export class RobotArmRuntime extends RobotKernel {
     this.operatorStop = 'emergency-stop';
     await Promise.all([
       this.sendEmergencyStop(),
-      this.profileStore.setOperatorStop(this.operatorStop),
+      this.persistOperatorStop(this.operatorStop),
     ]);
   }
   private async sendEmergencyStop(): Promise<void> {
@@ -2846,16 +2867,7 @@ export class RobotArmRuntime extends RobotKernel {
     };
     await this.audited('control', detail, () =>
       this.exclusive(async () => {
-        const revision = this.recoveryRevision;
-        const guard = () => {
-          this.check();
-          if (this.recoveryRevision !== revision)
-            throw new RobotArmError(
-              'RECOVERY_REQUIRED',
-              'Recovery was interrupted',
-              409,
-            );
-        };
+        const guard = this.recoveryGuard();
         await checkRecovery(this.adapter, this.softwarePaused, guard);
         this.connectionEstablished = true;
         await this.profileStore.clearOperation(undefined, guard);
@@ -2999,6 +3011,14 @@ export class RobotArmRuntime extends RobotKernel {
       { control: 'put-tool-profile', id: input.id },
       () =>
         this.exclusive(() => {
+          if (
+            input.contactFrame === 'flange' &&
+            !supportsFlangeContact(this.describeCapabilities())
+          )
+            throw new RobotArmError(
+              'INVALID_PROFILE',
+              'This adapter does not support flange contact calibration',
+            );
           if (input.payload !== undefined)
             assertToolPayload(
               input.payload,

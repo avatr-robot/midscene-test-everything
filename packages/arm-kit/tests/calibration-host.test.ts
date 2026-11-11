@@ -34,6 +34,33 @@ it('prepares first-time measured setup without inventing tool geometry or replac
     await expect(host.enable()).rejects.toMatchObject({
       code: 'SETUP_REQUIRED',
     });
+    // Measured zero and omitted length have different calibration frames.
+    const geometry = {
+      offsetMm: f.tool.offsetMm,
+      contactDirection: f.tool.contactDirection,
+    };
+    const unknown = await host.configure({
+      tool: { ...geometry, contactFrame: 'flange' },
+      motion: f.screen,
+    });
+    expect(unknown.input?.toolProfileId).not.toBe(f.tool.id);
+    await f.store.load();
+    expect((await host.configuration()).measuredSetup?.tool.contactFrame).toBe(
+      'flange',
+    );
+    expect(
+      (await host.configure({ tool: geometry, motion: f.screen })).input
+        ?.toolProfileId,
+    ).toBe(f.tool.id);
+    await expect(
+      host.configure({
+        tool: {
+          ...geometry,
+          contactFrame: 'flange',
+          offsetMm: { x: 0, y: 0, z: -10 },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PROFILE' });
     const before = f.store.getTool(f.tool.id);
     const config = await host.configure({
       tool: {

@@ -32,5 +32,6 @@ export {
 export { VoiceSettings } from './voice/VoiceSettings';
 
 export { GuidedCalibrationWorkspace } from './GuidedCalibrationWorkspace';
+export { identifyScreen } from './marker-client';
 export { PerspectiveObservationCard } from './components/PerspectiveObservationCard';
 export { usePerspectiveValidity } from './hooks/usePerspectiveValidity';

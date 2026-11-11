@@ -275,6 +275,8 @@ export interface CalibrationPageUpdate {
   }>;
 }
 export interface CalibrationPageReply {
+  /** Briefly identify the phone selected in Playground. */
+  selectionHint?: true;
   visibilityProbe?: { id: string; phase: 0 | 1 };
   /** Same-camera transition from camera-only preview to a paired Device. */
   pairingToken?: string;
@@ -627,6 +629,7 @@ export interface CalibrationBatchPlan {
     screenId: string;
     name: string;
     calibrated: boolean;
+    cameraMappingChanged?: boolean;
     startsHere: boolean;
     expectedCenterMm?: WebPoint;
     expectedSource?: 'calibration' | 'estimate';
@@ -654,6 +657,7 @@ export interface WorkstationScreenState {
     | 'unconfigured'
     | 'unavailable'
     | 'mapping-required'
+    | 'camera-mapping-changed'
     | 'calibration-required'
     | 'acceptance-required'
     | 'ready';

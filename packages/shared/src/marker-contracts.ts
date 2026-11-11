@@ -143,6 +143,7 @@ export interface MarkerCalibrationDetectionResponse {
 }
 
 export interface ScreenDeviceSummary {
+  awaitingOriginTap?: boolean;
   markersReady?: boolean;
   pageInstanceId?: string;
   /** Robot Vision camera that observes this page, when the console bound it. */

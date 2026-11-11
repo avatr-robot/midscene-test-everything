@@ -22,7 +22,10 @@ import {
 import type { CameraStream } from './camera-stream.js';
 import { cameraBackend } from './index.js';
 import { jpegSize } from './jpeg-size.js';
-import { PerspectiveMonitor } from './perspective-monitor.js';
+import {
+  PerspectiveMonitor,
+  validatePerspectiveFrame,
+} from './perspective-monitor.js';
 import { PerspectiveTransformer } from './perspective-transformer.js';
 import { checkPerspectiveValidity } from './perspective-validity.js';
 import type {
@@ -341,10 +344,18 @@ export class CameraSession implements CalibrationVision {
       ? this.perspective.check(options)
       : Promise.resolve(undefined);
   }
-  assertPerspectiveCurrent() {
-    return SCREEN_DRIFT_DETECTION_ENABLED
-      ? this.perspective.assertCurrent()
-      : Promise.resolve();
+  async assertPerspectiveCurrent() {
+    if (SCREEN_DRIFT_DETECTION_ENABLED) return this.perspective.assertCurrent();
+    if (!this.correction)
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Correct the camera image before calibration',
+        409,
+      );
+    const frame = this.stream.currentFrame;
+    if (!frame)
+      throw new RobotArmError('VISION_UNAVAILABLE', 'No current camera frame');
+    validatePerspectiveFrame(frame, this.correction);
   }
   async checkCorrection(
     correction: CameraCorrection,
@@ -464,7 +475,8 @@ export class CameraSession implements CalibrationVision {
     });
   }
   async snapshot(options: CalibrationVisionOptions): Promise<VisionSnapshot> {
-    await this.assertPerspectiveCurrent();
+    // correctedFrame already requests a fresh frame and verifies its dimensions.
+    if (SCREEN_DRIFT_DETECTION_ENABLED) await this.assertPerspectiveCurrent();
     const before = await this.binding(options);
     const correction = this.getCorrection()!;
     const image = await this.correctedFrame(correction, options);

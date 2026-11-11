@@ -1,4 +1,5 @@
 import type {
+  EffectiveCapabilities,
   MotionAcceleration,
   MotionSpeed,
   ScreenProfile,
@@ -10,7 +11,17 @@ export const ROBOT_SETUP_REFERENCE = {
   baseRatio: 0.8,
 } as const;
 
+export function supportsFlangeContact(
+  capabilities?: Pick<EffectiveCapabilities, 'orientation' | 'setupDefaults'>,
+): boolean {
+  return (
+    capabilities?.orientation === 'yaw' &&
+    capabilities.setupDefaults?.verticalFlangeContact === true
+  );
+}
+
 export interface RobotSetupDefaults {
+  verticalFlangeContact?: boolean;
   actionSpeed: MotionSpeed;
   actionAcceleration: MotionAcceleration;
   /**
@@ -39,6 +50,7 @@ export function robotSetupDefaults(
     // Motion parameters from the current bench setup. They describe how the
     // arm moves and touches, not what it is installed with.
     return {
+      verticalFlangeContact: true,
       actionSpeed: { kind: 'ratio', value: 1 },
       actionAcceleration: { kind: 'ratio', value: 1 },
       motion: {

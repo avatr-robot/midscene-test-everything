@@ -1,3 +1,4 @@
+import { supportsFlangeContact } from '@midscene/arm-kit-shared/setup-contracts';
 import { Button, InputNumber, Modal, Space, Typography } from 'antd';
 import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -15,7 +16,10 @@ import { speakCalibration } from './voice/calibration';
 export interface MeasuredCalibrationSetup {
   width?: number;
   height?: number;
-  tool: Pick<ToolProfile, 'offsetMm' | 'contactDirection' | 'payload'>;
+  tool: Pick<
+    ToolProfile,
+    'offsetMm' | 'contactDirection' | 'payload' | 'contactFrame'
+  >;
 }
 /** Original tool setup controls, shared by standalone and embedded hosts. */
 export function CalibrationSetup({
@@ -38,7 +42,9 @@ export function CalibrationSetup({
   const id = useId();
   const inferred = initial && inferAxialTool(initial.tool);
   const [axis, setAxis] = useState<ToolAxis>(inferred?.axis ?? '-Z');
-  const [length, setLength] = useState<number | null>(inferred?.length ?? null);
+  const [length, setLength] = useState<number | null>(
+    initial?.tool.contactFrame === 'flange' ? null : (inferred?.length ?? null),
+  );
   const [payload, setPayload] = useState<
     | {
         massKg?: number | null;
@@ -55,18 +61,19 @@ export function CalibrationSetup({
   // InputNumber can emit an out-of-range value while the user is typing.
   // Keep the form renderable; reject invalid measurements on submission.
   const validLength = length !== null && Number.isFinite(length) && length >= 0;
+  const optionalLength =
+    !custom && axis === '-Z' && supportsFlangeContact(capabilities);
   const geometry = custom ?? axialTool(axis, validLength ? length : 0);
   const save = async () => {
     setPending(true);
     setError(undefined);
     try {
-      if (!custom && !validLength)
-        throw new Error(t('Enter a nonnegative measured length.'));
+      const savedGeometry = custom ?? axialTool(axis, length, capabilities);
       if (capabilities?.payload && payload?.massKg == null)
         throw new Error(t('Tool Weight (kg)'));
       await onSave({
         tool: {
-          ...geometry,
+          ...savedGeometry,
           ...(payload?.massKg != null
             ? {
                 payload: {
@@ -106,6 +113,7 @@ export function CalibrationSetup({
           capabilities={capabilities}
           axis={axis}
           length={length}
+          optionalLength={optionalLength}
           disabled={pending}
           onAxisChange={setAxis}
           onLengthChange={setLength}
@@ -129,7 +137,9 @@ export function CalibrationSetup({
           </figure>
           <Typography.Paragraph>
             {t(
-              'Measure from the flange origin to the contact tip, including the holder.',
+              optionalLength
+                ? 'Leave blank to calibrate using the flange pose at contact.'
+                : 'Measure from the flange origin to the contact tip, including the holder.',
             )}
           </Typography.Paragraph>
         </aside>

@@ -1,4 +1,7 @@
-import { cameraBoundaryExcessMm } from '../application/teaching-constraints.js';
+import {
+  CAMERA_BOUNDARY_EPSILON_MM,
+  cameraBoundaryExcessMm,
+} from '../application/teaching-constraints.js';
 import type { AutomaticCaptureHost } from '../assisted-contracts.js';
 import type {
   CartesianPose,
@@ -8,8 +11,8 @@ import type {
 } from '../contracts.js';
 import { contactPoint, flangePose } from '../domain.js';
 
-// Only reconcile a measured start with the plane, never relax a target check.
-const BOUNDARY_READBACK_NOISE_MM = 0.001;
+// Match the 0.5 mm measured arrival tolerance for the start of the route only.
+const BOUNDARY_READBACK_NOISE_MM = 0.5;
 
 export async function moveToTaughtPosition(
   host: Required<Pick<AutomaticCaptureHost, 'read' | 'preflight' | 'move'>>,
@@ -29,7 +32,11 @@ export async function moveToTaughtPosition(
     minimumTipZMm,
   );
   const excess = teaching ? cameraBoundaryExcessMm(from, teaching) : 0;
-  if (teaching && excess > 0 && excess <= BOUNDARY_READBACK_NOISE_MM) {
+  if (
+    teaching &&
+    excess > 0 &&
+    excess <= BOUNDARY_READBACK_NOISE_MM + CAMERA_BOUNDARY_EPSILON_MM
+  ) {
     const { normal } = teaching.cameraBoundary;
     from.x -= excess * normal.x;
     from.y -= excess * normal.y;

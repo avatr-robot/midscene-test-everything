@@ -8,6 +8,7 @@ import type {
   ActionRequest,
   CalibrationProfile,
   CartesianPose,
+  ToolPayload,
 } from '../contracts.js';
 import { RobotKernel } from '../kernel.js';
 import {
@@ -25,6 +26,7 @@ export async function fixture(
   jointCount = 4,
   motionDurationMs = 10,
   adapterOverride?: TestRobotAdapter,
+  payload?: ToolPayload,
 ) {
   const directory = await mkdtemp(
     path.join(os.tmpdir(), 'midscene-robot-arm-fixture-'),
@@ -47,6 +49,7 @@ export async function fixture(
   const tool = await store.putTool({
     id: 'tool',
     name: 'Tool',
+    ...(payload && { payload }),
     offsetMm: { x: 0, y: 0, z: 0 },
     contactDirection: { x: 0, y: 0, z: -1 },
   });
@@ -177,7 +180,10 @@ export async function fixture(
     auditStore,
   });
   await runtime.initialize();
-  await runtime.lifecycle('enable');
+  await runtime.lifecycle(
+    'enable',
+    payload ? { ...binding, toolRevision: tool.revision } : undefined,
+  );
   const request = (action: ActionRequest['action']): ActionRequest => ({
     ...binding,
     action,

@@ -166,7 +166,7 @@ export function MarkerCalibrationDialog({
    * hand on the screen whose detection failed.
    */
   onAdjustManually?: (targetId: string) => void;
-  onClose: () => void;
+  onClose: (reason: 'dismissed' | 'detected') => void;
   onDetected: (
     session: MarkerCalibrationSession,
     response: MarkerCalibrationDetectionResponse,
@@ -698,7 +698,7 @@ export function MarkerCalibrationDialog({
     if (!keepSessionOnClose) clearDisplays(true);
     activeSessionId.current = undefined;
     activeToken.current = undefined;
-    onClose();
+    onClose('dismissed');
   }, [api, clearDisplays, keepSessionOnClose, onClose, onSessionCancelled]);
 
   useEffect(() => {
@@ -1061,7 +1061,7 @@ export function MarkerCalibrationDialog({
         await onDetected(response.session, response, detectionTargetIds, token);
         activeSessionId.current = undefined;
         activeToken.current = undefined;
-        onClose();
+        onClose('detected');
       } catch (cause) {
         if (controller.signal.aborted) return;
         speakCalibration('markerFailed');
@@ -1270,7 +1270,7 @@ export function MarkerCalibrationDialog({
         activeToken.current = undefined;
         setSession(undefined);
         onSessionCancelled?.(current.id);
-        onClose();
+        onClose('dismissed');
         return;
       }
       const removed = displaysRef.current[targetId];

@@ -1,6 +1,7 @@
 import {
   PerspectiveObservationCard,
   type ScreenOutlineEntry,
+  identifyScreen,
   usePerspectiveValidity,
 } from '@midscene/arm-calibration-ui';
 import {
@@ -272,7 +273,12 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
       : selected;
   const readiness = useDeviceReadiness(
     running ? deviceId : undefined,
-    JSON.stringify([setupSession, configurationRevision, previewRevision]),
+    JSON.stringify([
+      setupSession,
+      selectedId,
+      configurationRevision,
+      previewRevision,
+    ]),
   );
   const perspective = usePerspectiveValidity(
     `/api/devices/${encodeURIComponent(deviceId ?? '')}/calibration`,
@@ -280,7 +286,8 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     JSON.stringify([setupSession, configurationRevision, previewRevision]),
   );
   const perspectiveBlocked = perspective.summary?.state === 'invalid';
-  const ready = readiness?.status === 'ready';
+  const switchingSidebar = Boolean(readiness && readiness.id !== deviceId);
+  const ready = !switchingSidebar && readiness?.status === 'ready';
   const runtimeState = arm.state;
   const robotState = runtimeState?.state;
   const activeViewBlocked = cameraView === 'corrected' && perspectiveBlocked;
@@ -461,7 +468,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
               </Space>
             </Tooltip>
           }
-          key={JSON.stringify([controlScreen, setupSession])}
+          key={setupSession}
           cameraId={controlScreen}
           onConfigure={() => {
             if (!activeWizard) openCalibration();
@@ -489,6 +496,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
         />
       ) : camera && selected ? (
         <WorkspaceLayout
+          sidebarBusy={switchingSidebar}
           sidebar={
             (connected && !robotReady) ||
             (!connected &&
@@ -535,8 +543,8 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                 camera={{ ...selected, hasCorrection: false }}
                 onOpenSetup={openCameraCorrection}
               />
-            ) : ready ? (
-              <TaskWorkspace cameraId={deviceId!} />
+            ) : readiness?.status === 'ready' ? (
+              <TaskWorkspace cameraId={readiness.id} />
             ) : readiness?.status === 'required' ? (
               <RobotReadinessCard
                 camera={{
@@ -600,7 +608,11 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                   <Select
                     aria-label={language === 'zh' ? '标定屏幕' : 'Screen'}
                     value={activeScreen.id}
-                    onChange={setPreferredScreenId}
+                    loading={switchingSidebar}
+                    onChange={(id) => {
+                      setPreferredScreenId(id);
+                      identifyScreen(selected.id, id);
+                    }}
                     options={availableScreens.map((s) => ({
                       value: s.id,
                       label: s.name,

@@ -4,7 +4,10 @@ import type {
   CalibrationBatchState,
   WorkstationScreenState,
 } from '@midscene/arm-kit-shared/assisted-contracts';
-import type { CameraCorrection } from '@midscene/arm-kit-shared/contracts';
+import {
+  type CameraCorrection,
+  SCREEN_DRIFT_DETECTION_ENABLED,
+} from '@midscene/arm-kit-shared/contracts';
 import { markerCaptureRecommended } from '@midscene/arm-kit-shared/marker-contracts';
 import type {
   DetectionFrame,
@@ -71,9 +74,10 @@ import {
   RobotVisionApiError,
   RobotVisionClient,
   ScreenCalibClient,
+  identifyScreen,
   markerRequest,
 } from './marker-client';
-import { cameraPreviewUrl } from './preview-url';
+import { rawCameraPreviewUrl } from './preview-url';
 import {
   calibrationTargetsAfterPairing,
   needsPhoneConnectionBeforeAddScreen,
@@ -148,6 +152,15 @@ function GuidedContent({
   useLanguage();
   const { message } = App.useApp();
   const [selectedId, setSelectedId] = useState(id);
+  // Keep the displayed device until the requested device and its attempt are ready.
+  const [requestedId, setRequestedId] = useState(id);
+  const requestedScreen = useRef(id);
+  const displayedScreen = useRef(id);
+  const switching = requestedId !== selectedId;
+  const requestScreen = useCallback((next: string) => {
+    requestedScreen.current = next;
+    setRequestedId(next);
+  }, []);
   const [step, setStep] = useState<number>(initialStep);
   const initialStepPending = useRef(true);
   const resumeCalibration = useRef<string>();
@@ -155,6 +168,11 @@ function GuidedContent({
   const [loadedConfig, setConfig] = useState<Configuration>();
   const config =
     loadedConfig?.deviceId === selectedId ? loadedConfig : undefined;
+  const camera =
+    loadedConfig?.camera.id === cameraId ? loadedConfig.camera : undefined;
+  const flow = useRef<HTMLDivElement>(null);
+  const footerShell = useRef<HTMLElement>(null);
+  const previousHeight = useRef({ flow: 0, footer: 0 });
   const [screens, setScreens] = useState<BoundScreen[]>([]);
   const [states, setStates] = useState<WorkstationScreenState[]>([]);
   const [screenListError, setScreenListError] = useState<string>();
@@ -174,7 +192,9 @@ function GuidedContent({
     firstScreenCalibrationForConnection,
     setFirstScreenCalibrationForConnection,
   ] = useState(false);
-  const [markerOpen, setMarkerOpen] = useState(initialStep === 1);
+  const [markerOpen, setMarkerOpen] = useState<boolean | string>(
+    initialStep === 1,
+  );
   /** Add Screen opened the marker session for explicit target IDs. */
   const [markerAdd, setMarkerAdd] = useState(false);
   /** The manual corner editor, handed over from a failed marker pass. */
@@ -255,7 +275,7 @@ function GuidedContent({
     () => [
       {
         id: cameraId,
-        name: config?.camera.name ?? cameraId,
+        name: camera?.name ?? cameraId,
         online: true,
         screenCount: savedScreens.length,
         screens: savedScreens,
@@ -264,7 +284,7 @@ function GuidedContent({
     ],
     [
       cameraId,
-      config?.camera.name,
+      camera?.name,
       savedScreens.map((s) => `${s.id}:${s.name}:${s.pageKey}`).join('|'),
     ],
   );
@@ -296,6 +316,7 @@ function GuidedContent({
       page.mode !== 'waiting' &&
       isRequiredPhonePage(page, cameraId, [selected]),
   );
+  const awaitingOriginTap = phonePage?.awaitingOriginTap === true;
   const phoneConnected = Boolean(phonePage);
   const phoneFullscreen = Boolean(phonePage?.fullscreen);
   /**
@@ -320,45 +341,55 @@ function GuidedContent({
       })),
     [markerScreensKey],
   );
-  const selectScreen = useCallback((next: string) => {
-    resumeCalibration.current = undefined;
-    restoringMapping.current = undefined;
-    setCheckedScreen(undefined);
-    autoOpened.current = undefined;
-    setSelectedId(next);
-    setSingle(undefined);
-    setReview(undefined);
-    setReviewOpen(false);
-    setReviewing(undefined);
-    setRetryId(undefined);
-    setMarkerSession(undefined);
-    setMarkerOpen(false);
-    setClaimedBeforePairing(undefined);
-    setFirstScreenCalibrationForConnection(false);
-    setMarkerAdd(false);
-    setPerspectiveEditor(false);
-    setApplying(false);
-    setSingleFailure(undefined);
-    setMappingError(undefined);
-    setError(undefined);
-  }, []);
+  const selectScreen = useCallback(
+    (next: string) => {
+      resumeCalibration.current = undefined;
+      restoringMapping.current = undefined;
+      setCheckedScreen(undefined);
+      autoOpened.current = undefined;
+      previousHeight.current = {
+        flow: flow.current?.offsetHeight ?? 0,
+        footer: footerShell.current?.offsetHeight ?? 0,
+      };
+      displayedScreen.current = next;
+      requestScreen(next);
+      setSelectedId(next);
+      setSingle(undefined);
+      setReview(undefined);
+      setReviewOpen(false);
+      setReviewing(undefined);
+      setRetryId(undefined);
+      setMarkerSession(undefined);
+      setMarkerOpen(false);
+      setClaimedBeforePairing(undefined);
+      setFirstScreenCalibrationForConnection(false);
+      setMarkerAdd(false);
+      setPerspectiveEditor(false);
+      setApplying(false);
+      setSingleFailure(undefined);
+      setMappingError(undefined);
+      setError(undefined);
+    },
+    [requestScreen],
+  );
   const currentStep = useRef(step);
   currentStep.current = step;
   const reportedSingleFailure = useRef<string>();
   const refreshSequence = useRef(0);
   const currentBase = useRef(base);
   currentBase.current = base;
-  const refresh = useCallback(
-    async (signal = AbortSignal.timeout(15000)) => {
-      if (currentBase.current !== base || signal.aborted) return;
+  const refreshScreen = useCallback(
+    async (screenId: string, signal: AbortSignal) => {
+      const target = `/api/devices/${encodeURIComponent(screenId)}/calibration`;
+      if (requestedScreen.current !== screenId || signal.aborted) return;
       const sequence = ++refreshSequence.current;
       const stale = () =>
         signal.aborted ||
-        currentBase.current !== base ||
+        requestedScreen.current !== screenId ||
         sequence !== refreshSequence.current;
       const [next, listed] = await Promise.all([
         markerRequest<Configuration>(
-          `${base}/configuration${currentStep.current === 2 ? '?teaching' : ''}`,
+          `${target}/configuration${currentStep.current === 2 ? '?teaching' : ''}`,
           undefined,
           signal,
         ),
@@ -368,7 +399,19 @@ function GuidedContent({
           signal,
         ),
       ]);
+      signal.throwIfAborted();
       if (stale()) return;
+      const [running, status] = await Promise.allSettled([
+        batchClient.calibrationBatch(signal),
+        markerRequest<SingleStatus>(`${target}/status`, undefined, signal),
+      ]);
+      signal.throwIfAborted();
+      if (stale()) return;
+      if (displayedScreen.current !== screenId) {
+        if (status.status === 'rejected') throw status.reason;
+        if (running.status === 'rejected') throw running.reason;
+        selectScreen(screenId);
+      }
       setConfig(next);
       setScreens(listed.screens);
       /*
@@ -379,7 +422,7 @@ function GuidedContent({
       const selectable = listed.screens.filter(
         (screen) => screen.cameraId === cameraId,
       );
-      const fallback = selectable.some((screen) => screen.id === selectedId)
+      const fallback = selectable.some((screen) => screen.id === screenId)
         ? undefined
         : (selectable.find((screen) => screen.id === cameraId) ??
           selectable[0]);
@@ -401,23 +444,18 @@ function GuidedContent({
             next.correction &&
             next.perspectiveValidity?.state !== 'invalid'
           )
-            resumeCalibration.current = selectedId;
+            resumeCalibration.current = screenId;
           setStep(1);
         } else {
           setStep(next.installationTaught ? 3 : 2);
         }
       }
-      const [running, status] = await Promise.allSettled([
-        batchClient.calibrationBatch(signal),
-        markerRequest<SingleStatus>(`${base}/status`, undefined, signal),
-      ]);
-      if (stale()) return;
       if (running.status === 'fulfilled') setBatch(running.value);
       const singleStatus =
         status.status === 'fulfilled' ? status.value : undefined;
       if (!singleStatus || startingSingle.current || cancellingSingle.current)
         return;
-      setCheckedScreen(running.status === 'fulfilled' ? selectedId : undefined);
+      setCheckedScreen(running.status === 'fulfilled' ? screenId : undefined);
       const inBatch =
         running.status === 'fulfilled' &&
         running.value &&
@@ -426,11 +464,7 @@ function GuidedContent({
         !inBatch &&
         ['queued', 'running', 'cancelling'].includes(singleStatus.phase);
       const completed = !inBatch && singleStatus.phase === 'completed';
-      setSingle(
-        busy || completed
-          ? { ...singleStatus, screenId: selectedId }
-          : undefined,
-      );
+      setSingle(busy || completed ? { ...singleStatus, screenId } : undefined);
       if (busy || inBatch || (completed && openingScreen && initialStep !== 1))
         setStep(3);
       else if (
@@ -439,7 +473,7 @@ function GuidedContent({
         currentStep.current === 3
       ) {
         if (next.correction && next.perspectiveValidity?.state !== 'invalid')
-          resumeCalibration.current = selectedId;
+          resumeCalibration.current = screenId;
         setStep(1);
       }
       setSingleFailure(
@@ -449,20 +483,12 @@ function GuidedContent({
           : undefined,
       );
     },
-    [base, batchClient, cameraId, initialStep, selectedId],
+    [batchClient, cameraId, initialStep, selectScreen],
   );
-  /** Seed the next screen's config so a selection change does not blank it. */
-  const preloadConfiguration = useCallback(async (screenId: string) => {
-    try {
-      return await markerRequest<Configuration>(
-        `/api/devices/${encodeURIComponent(screenId)}/calibration/configuration`,
-        undefined,
-        AbortSignal.timeout(15000),
-      );
-    } catch {
-      return undefined;
-    }
-  }, []);
+  const refresh = useCallback(
+    (signal = AbortSignal.timeout(15000)) => refreshScreen(selectedId, signal),
+    [selectedId, refreshScreen],
+  );
   const [connectingPage, setConnectingPage] = useState<string>();
   const connectPage = useCallback(
     async (id: string, camera: string, assignCamera = false) => {
@@ -535,6 +561,9 @@ function GuidedContent({
   }, [base, refresh, selectedId]);
   useEffect(() => {
     const abort = new AbortController();
+    const target = `/api/devices/${encodeURIComponent(requestedId)}/calibration`;
+    const obsolete = () =>
+      abort.signal.aborted || requestedScreen.current !== requestedId;
     let opened = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -542,15 +571,17 @@ function GuidedContent({
         abort.signal,
         AbortSignal.timeout(15000),
       ]);
+      let pairingConflict = false;
       try {
         if (!opened) {
           const { screens: available } = await markerRequest<{
             screens: BoundScreen[];
           }>('/api/screens', undefined, signal);
+          if (obsolete()) return;
           const selectable = available.filter(
             (screen) => screen.cameraId === cameraId,
           );
-          if (!selectable.some((screen) => screen.id === selectedId)) {
+          if (!selectable.some((screen) => screen.id === requestedId)) {
             const fallback =
               selectable.find((screen) => screen.id === cameraId) ??
               selectable[0];
@@ -562,21 +593,30 @@ function GuidedContent({
           const openedScreen = await markerRequest<{
             pairingConflict?: boolean;
             awaitingPreview?: boolean;
-          }>(`${base}/open`, {}, signal);
-          if (openedScreen.pairingConflict && !signal.aborted)
-            setError(
-              t(
-                'The preview phone does not match this screen’s saved binding. Use the bound phone or release the binding first.',
-              ),
-            );
+          }>(`${target}/open`, {}, signal);
+          if (obsolete()) return;
+          pairingConflict = openedScreen.pairingConflict === true;
           opened = !openedScreen.awaitingPreview;
         }
-        await refresh(signal);
-        if (!abort.signal.aborted) setLoadError(undefined);
+        await refreshScreen(requestedId, signal);
+        if (obsolete()) return;
+        if (pairingConflict)
+          setError(
+            t(
+              'The preview phone does not match this screen’s saved binding. Use the bound phone or release the binding first.',
+            ),
+          );
+        setLoadError(undefined);
       } catch (cause) {
         opened = false;
-        if (!abort.signal.aborted)
-          setLoadError(cause instanceof Error ? cause.message : String(cause));
+        if (obsolete()) return;
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (requestedId !== displayedScreen.current) {
+          requestScreen(displayedScreen.current);
+          setError(message);
+        } else {
+          setLoadError(message);
+        }
       } finally {
         if (!abort.signal.aborted) timer = setTimeout(() => void poll(), 1500);
       }
@@ -588,7 +628,7 @@ function GuidedContent({
       abort.abort();
       clearTimeout(timer);
     };
-  }, [base, cameraId, refresh, selectedId]);
+  }, [cameraId, refreshScreen, requestedId, requestScreen, selectScreen]);
   const current = batch?.items[batch.currentIndex];
   const awaitingBatchPhone =
     batch?.status === 'waiting' &&
@@ -684,7 +724,13 @@ function GuidedContent({
     const fresh = config?.deviceId === entry.id ? config.correction : undefined;
     const quad =
       entry.id === activeId ? (fresh ?? entry.correction) : entry.correction;
-    if (!quad) return [];
+    if (
+      !quad ||
+      (step === 1 &&
+        (awaitingOriginTap || markerOpen === selectedId) &&
+        entry.id === selectedId)
+    )
+      return [];
     return [
       {
         id: entry.id,
@@ -931,14 +977,22 @@ function GuidedContent({
     },
     [base, cameraId, markerClient, pageClient],
   );
-  const markerClosed = useCallback(() => {
-    const pending = pendingAddedScreen.current;
-    pendingAddedScreen.current = undefined;
-    if (currentBase.current === base) setMarkerOpen(false);
-    setFirstScreenCalibrationForConnection(false);
-    setMarkerAdd(false);
-    if (pending) void discardPendingAddedScreen(pending);
-  }, [base, discardPendingAddedScreen]);
+  const markerClosed = useCallback(
+    (reason: 'dismissed' | 'detected') => {
+      if (currentBase.current !== base) return;
+      setMarkerOpen(false);
+      setFirstScreenCalibrationForConnection(false);
+      setMarkerAdd(false);
+      setRetryId(undefined);
+      // A completed detection hands the target to review. Cancelling a retry
+      // also leaves that review available to apply the previous result.
+      if (reason === 'detected' || (retryId && review)) return;
+      const pending = pendingAddedScreen.current;
+      pendingAddedScreen.current = undefined;
+      if (pending) void discardPendingAddedScreen(pending);
+    },
+    [base, discardPendingAddedScreen, retryId, review],
+  );
   /**
    * A screen that is connected and bound has its markers on the page already,
    * so the camera step starts the perspective pass by itself: the dialog
@@ -955,7 +1009,8 @@ function GuidedContent({
       closing ||
       config?.deviceId !== selectedId ||
       !config.correction ||
-      perspectiveState !== 'valid' ||
+      awaitingOriginTap ||
+      (SCREEN_DRIFT_DETECTION_ENABLED && perspectiveState !== 'valid') ||
       resumeCalibration.current !== selectedId
     )
       return;
@@ -986,6 +1041,7 @@ function GuidedContent({
     config,
     selectedId,
     perspectiveState,
+    awaitingOriginTap,
     phoneFullscreen,
     base,
     client,
@@ -1003,7 +1059,11 @@ function GuidedContent({
       autoDetectStarted.current = selectedId;
       return;
     }
-    if (config.correction && !outlineBlocked) return;
+    if (
+      perspectiveEditor ||
+      (config.correction && !outlineBlocked && !awaitingOriginTap)
+    )
+      return;
     // Markers are only reported from a fullscreen page; opening the dialog
     // earlier would detect against a viewport the camera cannot trust.
     if (!phoneConnected || !phoneFullscreen) return;
@@ -1011,11 +1071,13 @@ function GuidedContent({
     autoDetectStarted.current = selectedId;
     setFirstScreenCalibrationForConnection(false);
     setMarkerAdd(false);
-    setMarkerOpen(true);
+    setMarkerOpen(awaitingOriginTap ? selectedId : true);
   }, [
     step,
     phonesOpen,
     markerOpen,
+    perspectiveEditor,
+    awaitingOriginTap,
     config?.correction,
     config?.mappingReady,
     outlineBlocked,
@@ -1116,6 +1178,12 @@ function GuidedContent({
     (next < 2 || Boolean(config?.correction && controller.setup.mapping)) &&
     (next < 2 || !outlineBlocked) &&
     (next < 3 || Boolean(controller.setup.teaching));
+  const screenOptions = step === 1 ? knownScreens : savedScreens;
+  const showScreenPicker =
+    !batchActive &&
+    ((step === 1 && !markerOpen && screenOptions.length > 1) ||
+      (step === 2 && screenOptions.length > 0) ||
+      (step === 3 && !soleScreen && screenOptions.length > 0));
   const batchAction = savedScreens.length > 1 && (
     <Button
       disabled={!config?.ready || outlineBlocked || singleBusy}
@@ -1130,7 +1198,10 @@ function GuidedContent({
       <header className="calibration-shell-header">
         <div className="guided-toolbar">
           <h2>{t('Calibration')}</h2>
-          <nav aria-label={t('Calibration')}>
+          <nav
+            aria-label={t('Calibration')}
+            {...(switching ? { inert: '' } : {})}
+          >
             <ol className="guided-steps">
               {titles.map((title, index) => (
                 <li key={title}>
@@ -1155,7 +1226,7 @@ function GuidedContent({
             {/* Step 2 has its own phone-page entry in the checklist; later
                 steps still need this toolbar shortcut. */}
             {step > 1 && (
-              <Button onClick={() => setPhonesOpen(true)}>
+              <Button disabled={switching} onClick={() => setPhonesOpen(true)}>
                 {t('View Phone Page')}
               </Button>
             )}
@@ -1167,12 +1238,20 @@ function GuidedContent({
       </header>
       <div className="calibration-shell-body">
         <div className="guided-calibration-layout">
-          <div className="guided-calibration-flow">
+          <div
+            className="guided-calibration-flow"
+            ref={flow}
+            style={
+              !config && camera
+                ? { minHeight: previousHeight.current.flow }
+                : undefined
+            }
+          >
             <PerspectiveObservationCard
               observation={perspective}
               screenName={activeScreen?.name}
               onRecalibrate={
-                batchActive || singleBusy
+                batchActive || singleBusy || switching
                   ? undefined
                   : () => {
                       setStep(1);
@@ -1207,10 +1286,59 @@ function GuidedContent({
             {screenListError && (
               <Alert type="warning" showIcon message={t(screenListError)} />
             )}
+            {showScreenPicker && (
+              <Select
+                aria-label={t('Calibration Screen')}
+                value={
+                  screenOptions.some((screen) => screen.id === requestedId)
+                    ? requestedId
+                    : undefined
+                }
+                options={screenOptions.map(({ id, name }) => ({
+                  value: id,
+                  label: name,
+                }))}
+                placeholder={t('Select a screen for calibration')}
+                loading={switching || (!config && !loadError)}
+                disabled={
+                  closing ||
+                  singleBusy ||
+                  controller.busy ||
+                  loadedConfig?.armState?.state.moving ||
+                  loadedConfig?.armState?.state.dragMode
+                }
+                style={{ minWidth: 180 }}
+                onChange={(id) => {
+                  requestScreen(id);
+                  identifyScreen(cameraId, id);
+                }}
+              />
+            )}
+            {step === 3 && camera && (!soleScreen || batchActive) && (
+              <div {...(switching ? { inert: '' } : {})}>
+                <CalibrationBatchPanel
+                  ref={batchPanel}
+                  api={batchClient}
+                  cameraId={cameraId}
+                  screens={states}
+                  disabled={
+                    !config?.ready ||
+                    outlineBlocked ||
+                    controller.busy ||
+                    singleBusy
+                  }
+                  onChanged={refresh}
+                />
+              </div>
+            )}
             {!config ? (
               !loadError && <Spin />
             ) : (
-              <>
+              <div
+                className="guided-screen-controls"
+                aria-busy={switching}
+                {...(switching ? { inert: '' } : {})}
+              >
                 {step === 0 && (
                   <CalibrationSetup
                     showIllustration={false}
@@ -1245,7 +1373,15 @@ function GuidedContent({
                       pairWaitingPages={markerAdd}
                       key={selectedId}
                       existingScreens={
-                        markerAdd ? [] : retryId ? undefined : existing
+                        markerOpen === selectedId
+                          ? existing.filter(
+                              (screen) => screen.id === selectedId,
+                            )
+                          : markerAdd
+                            ? []
+                            : retryId
+                              ? undefined
+                              : existing
                       }
                       focusTargetId={markerAdd ? undefined : retryId}
                       resumeSession={
@@ -1260,7 +1396,6 @@ function GuidedContent({
                         if (pendingAddedScreen.current === targetId)
                           pendingAddedScreen.current = undefined;
                         if (targetId !== selectedId) {
-                          setConfig(undefined);
                           selectScreen(targetId);
                         }
                         autoDetectStarted.current = targetId;
@@ -1372,13 +1507,7 @@ function GuidedContent({
                                     (screen) => screen.id !== deletingId,
                                   ),
                                 );
-                                if (fallback) {
-                                  const nextConfig = await preloadConfiguration(
-                                    fallback.id,
-                                  );
-                                  if (nextConfig) setConfig(nextConfig);
-                                  selectScreen(fallback.id);
-                                }
+                                if (fallback) requestScreen(fallback.id);
                                 try {
                                   await pageClient.deleteScreen(
                                     cameraId,
@@ -1406,7 +1535,6 @@ function GuidedContent({
                         </Space>
                       }
                       key={selectedId}
-                      onSelectScreen={selectScreen}
                       onAddScreen={async () => {
                         if (
                           needsPhoneConnectionBeforeAddScreen(
@@ -1466,20 +1594,6 @@ function GuidedContent({
                         </Button>
                       )}
                       {powerControl}
-                      <Select
-                        aria-label={t('Calibration Screen')}
-                        value={selectedId}
-                        options={savedScreens.map((s) => ({
-                          value: s.id,
-                          label: s.name,
-                        }))}
-                        style={{ minWidth: 180 }}
-                        disabled={Boolean(
-                          config.armState?.state.dragMode ||
-                            config.armState?.state.moving,
-                        )}
-                        onChange={selectScreen}
-                      />
                     </Space>
                     <InstallationTeaching
                       illustrationContainer={illustrationContainer}
@@ -1493,7 +1607,14 @@ function GuidedContent({
                       externalPreview
                       onSaved={() => {
                         setStep(3);
-                        void refresh();
+                        void refresh().catch((cause) => {
+                          if (requestedScreen.current === selectedId)
+                            setLoadError(
+                              cause instanceof Error
+                                ? cause.message
+                                : String(cause),
+                            );
+                        });
                       }}
                     />
                   </>
@@ -1523,44 +1644,11 @@ function GuidedContent({
                         }
                       />
                     )}
-                    {!batchActive && !soleScreen && (
-                      <Select
-                        aria-label={t('Calibration Screen')}
-                        value={selectedId}
-                        options={savedScreens.map((screen) => ({
-                          value: screen.id,
-                          label: screen.name,
-                        }))}
-                        disabled={
-                          singleBusy ||
-                          closing ||
-                          config.armState?.state.dragMode ||
-                          config.armState?.state.moving
-                        }
-                        style={{ minWidth: 180 }}
-                        onChange={selectScreen}
-                      />
-                    )}
                     {lease?.phase === 'queued' && (
                       <Alert
                         type="info"
                         showIcon
                         message={t('Waiting for the Controller queue')}
-                      />
-                    )}
-                    {(!soleScreen || batchActive) && (
-                      <CalibrationBatchPanel
-                        ref={batchPanel}
-                        api={batchClient}
-                        cameraId={cameraId}
-                        screens={states}
-                        disabled={
-                          !config.ready ||
-                          outlineBlocked ||
-                          controller.busy ||
-                          singleBusy
-                        }
-                        onChanged={refresh}
                       />
                     )}
                     {batchActive && current && (
@@ -1638,11 +1726,11 @@ function GuidedContent({
                     )}
                   </>
                 )}
-              </>
+              </div>
             )}
           </div>
-          {config && (
-            <aside className="guided-camera" aria-label={config.camera.name}>
+          {camera && (
+            <aside className="guided-camera" aria-label={camera.name}>
               <Tabs
                 size="small"
                 defaultActiveKey="camera"
@@ -1650,9 +1738,9 @@ function GuidedContent({
                   <Typography.Text
                     type="secondary"
                     className="guided-camera-name"
-                    title={config.camera.name}
+                    title={camera.name}
                   >
-                    {config.camera.name}
+                    {camera.name}
                   </Typography.Text>
                 }
                 items={[
@@ -1665,19 +1753,21 @@ function GuidedContent({
                         <div className="guided-preview-frame">
                           <img
                             className="calibration-preview"
-                            src={cameraPreviewUrl(
-                              `/api/devices/${encodeURIComponent(activeId)}/calibration`,
+                            src={rawCameraPreviewUrl(
+                              cameraId,
                               'guided-preview',
                             )}
                             data-testid="calibration-live-camera"
-                            alt={config.camera.name}
+                            alt={camera.name}
                           />
                           <ScreenOutlines outlines={asideOutlines} />
                         </div>
                         {step === 1 && (
                           <Typography.Text type="secondary">
                             {t(
-                              'Keep the entire phone visible in the camera preview.',
+                              awaitingOriginTap
+                                ? 'Tap the iPhone page once so the camera can locate the screen boundary.'
+                                : 'Keep the entire phone visible in the camera preview.',
                             )}
                           </Typography.Text>
                         )}
@@ -1696,7 +1786,7 @@ function GuidedContent({
                     label: t('Setup illustration'),
                     forceRender: true,
                     children:
-                      step === 2 && teaching ? (
+                      step === 2 ? (
                         <div ref={setIllustrationContainer} />
                       ) : step >= 2 ? (
                         <TeachingDiagram stage="reference" />
@@ -1712,7 +1802,16 @@ function GuidedContent({
           )}
         </div>
       </div>
-      <footer className="calibration-shell-footer">
+      <footer
+        className="calibration-shell-footer"
+        ref={footerShell}
+        {...(switching ? { inert: '' } : {})}
+        style={
+          !config && camera && previousHeight.current.footer
+            ? { display: 'block', minHeight: previousHeight.current.footer }
+            : undefined
+        }
+      >
         <div className="arm-calibration-footer" ref={setFooter}>
           {step === 3 && !batchActive && singleBusy && (
             <Button
@@ -1756,7 +1855,19 @@ function GuidedContent({
         }}
         onForget={async (id) => {
           await pageClient.forgetScreenDevice(id);
-          await refresh();
+          // Forget also removes the bound screen. Refresh the list before
+          // asking a calibration host for the selected screen's configuration.
+          const { screens: remaining } = await markerRequest<{
+            screens: BoundScreen[];
+          }>('/api/screens');
+          if (requestedScreen.current !== selectedId) return;
+          setScreens(remaining);
+          const available = remaining.filter(
+            (screen) => screen.cameraId === cameraId,
+          );
+          if (available.some((screen) => screen.id === selectedId))
+            await refresh();
+          else requestScreen(available[0]?.id ?? cameraId);
         }}
         onRenamePage={async (id, name) => {
           await pageClient.renameScreenDevice(id, name);

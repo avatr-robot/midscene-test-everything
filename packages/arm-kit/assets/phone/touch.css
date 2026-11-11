@@ -253,3 +253,23 @@ body[data-verification="true"] .mapping-touch-dot {
     animation: none;
   }
 }
+
+#selection-hint {
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 0 5px #1677ff;
+  pointer-events: none;
+}
+
+#selection-label {
+  position: absolute;
+  top: max(6px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  border-radius: 16px;
+  padding: 4px 12px;
+  background: #145dbf;
+  color: white;
+  font-weight: 600;
+  white-space: nowrap;
+}

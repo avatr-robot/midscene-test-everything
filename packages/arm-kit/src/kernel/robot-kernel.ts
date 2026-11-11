@@ -23,7 +23,9 @@ export class RobotKernel extends OperationCoordinator {
   private readonly executor: MotionExecutor;
   constructor(adapter: RobotArmAdapter) {
     super();
-    this.adapter = new RobotDriverBoundary(adapter);
+    this.adapter = new RobotDriverBoundary(adapter, () =>
+      this.observeEmergencyStop(),
+    );
     this.executor = new MotionExecutor(this.adapter);
   }
   get id() {
@@ -94,6 +96,11 @@ export class RobotKernel extends OperationCoordinator {
   protected automaticRecovery?: Promise<void>;
 
   protected disconnectedByRequest = false;
+
+  protected observeEmergencyStop(): void | Promise<void> {
+    this.operatorStop = 'emergency-stop';
+    this.requireRecovery('emergency-stop');
+  }
 
   private get canAutomaticallyRecover() {
     return (
@@ -242,11 +249,23 @@ export class RobotKernel extends OperationCoordinator {
   clearFaults() {
     return this.control(() => this.adapter.clearFaults(), true);
   }
+  protected recoveryGuard() {
+    const revision = this.recoveryRevision;
+    return () => {
+      this.check();
+      if (this.recoveryRevision !== revision)
+        throw new RobotArmError(
+          'RECOVERY_REQUIRED',
+          'Recovery was interrupted',
+          409,
+        );
+    };
+  }
   async recover() {
     return this.control(async () => {
-      await checkRecovery(this.adapter, this.softwarePaused, () =>
-        this.check(),
-      );
+      const guard = this.recoveryGuard();
+      await checkRecovery(this.adapter, this.softwarePaused, guard);
+      guard();
       this.recoveryRequired = false;
     }, true);
   }
@@ -260,7 +279,7 @@ export class RobotKernel extends OperationCoordinator {
       );
   }
   stop(): Promise<void> {
-    this.operatorStop = 'manual-stop';
+    this.operatorStop ??= 'manual-stop';
     return this.stopAfterInterruption();
   }
   protected stopAfterInterruption(): Promise<void> {
