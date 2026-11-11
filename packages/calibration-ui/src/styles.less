@@ -316,18 +316,30 @@
     flex-wrap: wrap;
   }
 }
+.robot-phone-reconnect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  > div {
+    display: grid;
+    flex: 1 1 240px;
+    gap: 4px;
+  }
+}
 .robot-web-calibration {
+  .robot-setup-notice {
+    margin-bottom: 0;
+  }
   .robot-disclosure-body > .ant-checkbox-wrapper {
     display: flex;
-    margin: 12px 0;
+    margin: 0;
     align-items: flex-start;
   }
   @media (max-width: 800px) {
     .robot-setup-task-layout {
       grid-template-columns: minmax(0, 1fr);
-    }
-    .robot-web-phases {
-      gap: 12px 18px;
     }
   }
 }
@@ -335,10 +347,11 @@
 .robot-web-phases {
   display: flex;
   flex-wrap: wrap;
-  gap: 24px;
-  padding-bottom: 16px;
-  margin-bottom: 24px;
-  border-bottom: 1px solid var(--rv-border);
+  gap: 8px 16px;
+  align-items: baseline;
+  padding-block: 8px;
+  margin-bottom: 12px;
+  box-shadow: inset 0 -1px var(--rv-border);
   color: var(--rv-text-secondary);
   .current {
     color: var(--rv-accent);
@@ -430,16 +443,14 @@
 
 .robot-tool-locked-direction {
   display: flex;
-  gap: 14px;
+  gap: 8px;
+  flex-wrap: wrap;
   align-items: center;
   padding: 12px;
   border: 1px solid var(--rv-border);
   border-radius: 10px;
   .ant-tag {
-    margin-left: 8px;
-  }
-  .ant-typography {
-    margin: 4px 0 0;
+    margin-inline: 0;
   }
 }
 
@@ -757,29 +768,27 @@
 .camera-checklist-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   padding: 0;
   margin: 0;
   list-style: none;
+  container: mapping-checklist / inline-size;
 
   li {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
     align-items: center;
     gap: 6px 10px;
     min-height: 40px;
-    padding: 6px 12px;
+    padding: 8px 12px;
     border: 1px solid var(--rv-border);
     border-radius: 8px;
     background: var(--midscene-surface);
   }
 
   .camera-checklist-text {
-    flex: 1 1 150px;
-    display: flex;
-    flex-flow: row wrap;
-    align-items: baseline;
-    gap: 2px 8px;
+    display: grid;
+    gap: 2px;
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -794,7 +803,22 @@
     justify-content: flex-end;
     gap: 4px;
     min-width: 0;
-    margin-left: auto;
+  }
+  @container mapping-checklist (max-width: 440px) {
+    li {
+      grid-template-columns: 18px minmax(0, 1fr);
+      align-items: start;
+    }
+    .camera-checklist-index {
+      margin-top: 2px;
+    }
+    .camera-checklist-action {
+      grid-column: 2;
+      justify-content: flex-start;
+      &:empty {
+        display: none;
+      }
+    }
   }
 }
 .camera-checklist-index {

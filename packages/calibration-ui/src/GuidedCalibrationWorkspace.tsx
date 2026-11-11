@@ -1459,7 +1459,7 @@ function GuidedContent({
                   ))}
                 {step === 2 && teaching && (
                   <>
-                    <Space className="guided-teaching-toolbar">
+                    <Space wrap>
                       {controller.setup.teaching && (
                         <Button onClick={() => setStep(3)}>
                           {t('Next Step')}
@@ -1579,7 +1579,8 @@ function GuidedContent({
                         onConnectPhone={() => setPhonesOpen(true)}
                         onCheckCamera={checkCameraBeforeCalibration}
                         cameraCheckRequired={outlineBlocked}
-                        prepareFromTeaching={lease?.phase === 'running'}
+                        prepareFromTeaching
+                        screenName={selected?.name}
                         readyToCapture={config.ready && !outlineBlocked}
                         readyToStart={config.ready && !outlineBlocked}
                         onActivated={refresh}

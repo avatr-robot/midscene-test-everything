@@ -262,7 +262,7 @@ it('shows the percent, raw holdout and continuation action for a reviewable fit'
       holdoutMaxMm: 3,
       shortSideMm: 100,
       coverage: 0.64,
-      warnings: [{ label: 'Holdout maximum', percent: 3, targetPercent: 1.5 }],
+      warnings: [{ label: 'Holdout maximum', percent: 3, targetPercent: 2 }],
     },
   };
   const html = renderToStaticMarkup(
@@ -274,13 +274,13 @@ it('shows the percent, raw holdout and continuation action for a reviewable fit'
   );
   expect(html).toContain('3.00 mm');
   expect(html).toContain('3.00%');
-  expect(html).toContain('建议 ≤1.5%');
+  expect(html).toContain('建议 ≤2%');
   expect(html).toContain('10% 的相对容差');
   expect(html).toContain('继续边界验证');
 });
 
 it.each([true, false])(
-  'uses the reference step only if the selected screen needs a reference (has reference: %s)',
+  'opens sampling preparation after teaching (selected screen has a start: %s)',
   (hasReference) => {
     const value = controller();
     value.session = {
@@ -303,18 +303,21 @@ it.each([true, false])(
       createElement(WebCalibrationWorkspace, {
         controller: value,
         prepareFromTeaching: true,
+        screenName: 'iPhone',
         footer: null,
         onActivated: async () => {},
       }),
     );
+    expect(html).not.toContain('设置标定参考位');
+    expect(html).not.toContain('上一步');
+    expect(html).toContain('1 采集标定点');
     if (hasReference) {
-      expect(html).not.toContain('设置标定参考位');
-      expect(html).not.toContain('上一步');
-      expect(html).toContain('1 采集标定点');
       expect(html).toContain('普通');
+      expect(html).not.toContain('记录这块屏幕的采样起点');
     } else {
-      expect(html).toContain('设置标定参考位');
+      expect(html).toContain('「iPhone」中心上方');
       expect(html).toContain('进入拖动模式');
+      expect(html).not.toContain('开始自动标定');
     }
   },
 );

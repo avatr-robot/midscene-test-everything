@@ -235,6 +235,8 @@ export interface CalibrationPageUpdate {
   markersPainted?: boolean;
   markerRequest?: string;
   visibilityProbeAck?: string;
+  /** Painted height in CSS pixels when iOS sizes the first row around system overlays. */
+  visibilityFirstRowHeight?: number;
   touchDiagnosticsVersion?: 2;
   /** Bounded diagnostic history; never used as contact evidence. */
   touchEvents?: PhoneTouchEvent[];

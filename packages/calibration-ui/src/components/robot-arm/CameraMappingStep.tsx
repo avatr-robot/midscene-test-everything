@@ -190,7 +190,9 @@ export function CameraMappingStep({
     {
       title: t('Screen page'),
       detail: !phoneConnected
-        ? t('Keep the phone page visible and fullscreen')
+        ? t(
+            'Open the calibration page on your phone and keep it in the foreground.',
+          )
         : phoneFullscreen
           ? t('Phone connected. You can continue.')
           : t('Keep each screen page visible and in fullscreen.'),

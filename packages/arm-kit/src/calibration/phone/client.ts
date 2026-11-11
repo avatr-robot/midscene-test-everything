@@ -332,6 +332,20 @@ export function mountCalibrationPhonePage(
         ? screenOrigin.y
         : undefined;
     const { top, bottom } = safeArea;
+    // Older Home Screen launches can still reserve an opaque status bar.
+    if (
+      top === 0 &&
+      /iPhone/i.test(navigator.userAgent) &&
+      displayMode() === 'standalone' &&
+      innerHeight > innerWidth &&
+      innerWidth === Math.min(window.screen.width, window.screen.height) &&
+      (visualViewport?.scale ?? 1) === 1 &&
+      (visualViewport?.offsetTop ?? 0) === 0 &&
+      gap <= innerHeight * 0.1
+    ) {
+      insetReason = 'ios-standalone-status-bar';
+      return gap;
+    }
     if (top <= 0 && bottom <= 0 && !(measured !== undefined && measured > 0)) {
       insetReason = 'no-safe-area-or-positive-touch-origin';
       return undefined;
@@ -623,7 +637,12 @@ export function mountCalibrationPhonePage(
       visibilityPainted = undefined;
       const probe = next.visibilityProbe;
       visibilityPattern.style.gridTemplateColumns = `repeat(${policy.visibilityPattern.columns},1fr)`;
-      visibilityPattern.style.gridTemplateRows = `repeat(${policy.visibilityPattern.rows},1fr)`;
+      const { rows } = policy.visibilityPattern;
+      // Keep the checked half of the first row below iOS system overlays.
+      visibilityPattern.style.gridTemplateRows =
+        platform === 'ios'
+          ? `max(calc(100% / ${rows}), calc(2 * env(safe-area-inset-top, 0px))) repeat(${rows - 1},1fr)`
+          : `repeat(${rows},1fr)`;
       if (probe) {
         visibilityTiles.forEach((tile, index) => {
           const column = index % policy.visibilityPattern.columns;
@@ -1065,6 +1084,10 @@ export function mountCalibrationPhonePage(
       markersPainted,
       markerRequest: markersPainted ? state?.markerRequest : undefined,
       visibilityProbeAck: visibilityPainted === probeId ? probeId : undefined,
+      visibilityFirstRowHeight:
+        probeId && visibilityPainted === probeId && platform === 'ios'
+          ? visibilityTiles[0].getBoundingClientRect().height
+          : undefined,
       visible: !document.hidden && (visualViewport?.scale || 1) === 1,
       layout: current,
       targetReady: readyTarget,

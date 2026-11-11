@@ -131,6 +131,9 @@ export const assistedCalibrationZh: Record<string, string> = {
     '请先记录标定参考位，再开始采点。',
 
   'Calibration Reference Position': '标定参考位',
+  'Record sampling start': '记录采样起点',
+  'Installation teaching is saved. Before sampling, place the tip 20–50 mm above the centre of {0}, release the arm and record this screen’s starting position.':
+    '已沿用安装示教。采样前，请将笔尖放在「{0}」中心上方 2–5 cm，松开机械臂，记录这块屏幕的采样起点。',
   'Record Reference Position': '记录参考位',
   'Set a calibration reference position': '设置标定参考位',
   'Reference position recorded': '参考位已记录',
@@ -234,6 +237,8 @@ export const assistedCalibrationZh: Record<string, string> = {
     '请回到手机标定页，并恢复默认缩放。',
   'Scan the QR code again to connect.': '请用手机重新扫码连接。',
   'Phone paused': '手机页面已暂停',
+  'Open the calibration page on your phone and keep it in the foreground.':
+    '请在手机上打开标定网页，并保持页面在前台。',
   'Phone disconnected': '手机连接已断开',
   'Phone screen: {0} × {1} CSS px': '手机整屏：{0} × {1} CSS px',
   'From phone screen · {0} × {1} px': '来自手机整屏比例 · {0} × {1} px',

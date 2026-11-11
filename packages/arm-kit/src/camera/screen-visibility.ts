@@ -17,12 +17,14 @@ export interface VisibilityScreen {
   sourceWidth: number;
   sourceHeight: number;
   layout?: CalibrationPageLayout;
+  firstRowHeight?: number;
 }
 
 function visibilityViewport(
   layout: CalibrationPageLayout | undefined,
   columns: number,
   rows: number,
+  rowPosition: (row: number) => number,
   response: (point: { x: number; y: number }) => number,
 ) {
   const width = layout ? Math.min(1, layout.width / layout.screen.width) : 1;
@@ -58,7 +60,7 @@ function visibilityViewport(
             if (
               response({
                 x: x + ((column + offset) / columns) * width,
-                y: y + ((row + offset) / rows) * height,
+                y: y + rowPosition(row + offset) * height,
               }) === sign
             )
               score++;
@@ -154,7 +156,32 @@ export async function measureScreenVisibility(
       if (first <= -36 && last <= -36) return -1;
       return 0;
     };
-    const viewport = visibilityViewport(screen.layout, columns, rows, response);
+    const viewportHeight = screen.layout?.height;
+    const firstRow =
+      screen.firstRowHeight === undefined
+        ? 1 / rows
+        : screen.firstRowHeight / (viewportHeight ?? 0);
+    // Allow subpixel grid rounding, but reject a collapsed or oversized row.
+    if (
+      !Number.isFinite(firstRow) ||
+      firstRow < 1 / rows - 0.001 ||
+      firstRow > 3 / rows
+    )
+      throw new RobotArmError(
+        'VISIBILITY_UNAVAILABLE',
+        'Invalid visibility pattern row height.',
+      );
+    const rowPosition = (row: number) =>
+      row <= 1
+        ? row * firstRow
+        : firstRow + ((row - 1) / (rows - 1)) * (1 - firstRow);
+    const viewport = visibilityViewport(
+      screen.layout,
+      columns,
+      rows,
+      rowPosition,
+      response,
+    );
     let visible = 0;
     let interiorVisible = 0;
     let interiorSamples = 0;
@@ -169,9 +196,10 @@ export async function measureScreenVisibility(
         const sign = (row + column) % 2 === 0 ? 1 : -1;
         for (let y = 0; y < samplesPerSide; y++) {
           for (let x = 0; x < samplesPerSide; x++) {
+            const sampleRow = row + (y + 0.5) / samplesPerSide;
             const sample = {
               x: (column + (x + 0.5) / samplesPerSide) / columns,
-              y: (row + (y + 0.5) / samplesPerSide) / rows,
+              y: sampleRow / rows,
             };
             // The fitted outline can include bezel and rounded corners.
             const interior =
@@ -182,7 +210,7 @@ export async function measureScreenVisibility(
             if (interior) tileInteriorSamples++;
             const polarity = response({
               x: viewport.x + sample.x * viewport.width,
-              y: viewport.y + sample.y * viewport.height,
+              y: viewport.y + rowPosition(sampleRow) * viewport.height,
             });
             // A small outline error can put a sample near a tile boundary
             // into the neighboring tile. Still require the expected checkerboard

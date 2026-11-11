@@ -400,6 +400,31 @@ export function PhoneConnectDialog({
                 : 'Open the screen page on the phone. It appears here automatically.',
           )}
         </Typography.Paragraph>
+        {publicUrl && (
+          <details
+            className="robot-device-pairing"
+            open={!pages.some((page) => page.visible)}
+          >
+            <summary>{t('Phone page address')}</summary>
+            <div className="robot-device-phone-link">
+              <QRCode value={publicUrl} size={120} type="svg" />
+              <div className="robot-device-phone-address">
+                <Typography.Text>
+                  {t('Scan the QR code to open the calibration page.')}
+                </Typography.Text>
+                <Typography.Paragraph copyable={{ text: publicUrl }}>
+                  <Typography.Link
+                    href={publicUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {publicUrl}
+                  </Typography.Link>
+                </Typography.Paragraph>
+              </div>
+            </div>
+          </details>
+        )}
         {pages.length ? (
           <>
             <ul className="phone-connect-pages">
@@ -709,30 +734,6 @@ export function PhoneConnectDialog({
           >
             {t('Continue to Calibration')}
           </Button>
-        )}
-        {publicUrl && (
-          <details className="robot-device-pairing">
-            <summary>{t('Phone page address')}</summary>
-            {publicUrl && (
-              <div className="robot-device-phone-link">
-                <QRCode value={publicUrl} size={120} type="svg" />
-                <div className="robot-device-phone-address">
-                  <Typography.Text type="secondary">
-                    {t('Phone page address')}
-                  </Typography.Text>
-                  <Typography.Paragraph copyable={{ text: publicUrl }}>
-                    <Typography.Link
-                      href={publicUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {publicUrl}
-                    </Typography.Link>
-                  </Typography.Paragraph>
-                </div>
-              </div>
-            )}
-          </details>
         )}
       </Space>
     </Modal>

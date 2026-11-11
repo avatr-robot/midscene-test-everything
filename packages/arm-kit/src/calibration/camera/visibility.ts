@@ -68,6 +68,8 @@ export async function verifyScreenVisibility(
         (original &&
           (update.pageId !== original.pageId ||
             update.browserInstanceId !== original.browserInstanceId ||
+            update.visibilityFirstRowHeight !==
+              original.visibilityFirstRowHeight ||
             !sameLayout(update.layout, original.layout)))
       )
         throw new RobotArmError(
@@ -112,6 +114,7 @@ export async function verifyScreenVisibility(
       phones.map((phone) => ({
         ...phone,
         layout: identities.get(phone)!.layout,
+        firstRowHeight: identities.get(phone)!.visibilityFirstRowHeight,
       })),
     );
     assertCurrent();

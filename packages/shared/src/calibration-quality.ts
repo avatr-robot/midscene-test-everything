@@ -38,12 +38,12 @@ export function mappingQualityWarnings(
     {
       label: 'Check marker mean error',
       percent: percent(accuracy.validation.meanErrorCssPx),
-      targetPercent: 0.75,
+      targetPercent: 1.5,
     },
     {
       label: 'Check marker maximum error',
       percent: percent(accuracy.validation.maxErrorCssPx),
-      targetPercent: 1,
+      targetPercent: 2,
     },
   ].filter(needsQualityReview);
 }

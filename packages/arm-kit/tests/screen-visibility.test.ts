@@ -21,22 +21,37 @@ const screens = [
 
 async function pattern(
   phase: number,
-  blocked?: 'center' | 'edge' | 'speckled',
+  blocked?: 'center' | 'edge' | 'speckled' | 'top-tile',
   gridOffset = 0,
   leftInset = 0,
+  iosFirstRow?: number,
 ) {
   const pixels = Buffer.alloc(width * height * 3);
   const { columns, rows, colors } = CALIBRATION_PHONE_POLICY.visibilityPattern;
   const viewportWidth = width - leftInset;
+  const firstRowHeight = iosFirstRow ?? height / rows;
   for (let y = 0; y < height; y++) {
+    const viewportY = (y + gridOffset) % height;
+    const row =
+      viewportY < firstRowHeight
+        ? 0
+        : 1 +
+          Math.floor(
+            ((viewportY - firstRowHeight) * (rows - 1)) /
+              (height - firstRowHeight),
+          );
     for (let x = 0; x < width; x++) {
       const viewportX =
         (Math.max(0, x - leftInset) + gridOffset) % viewportWidth;
       const column = Math.floor((viewportX * columns) / viewportWidth);
-      const row = Math.floor((((y + gridOffset) % height) * rows) / height);
       const color = colors[(column + row + phase) % 2];
       const covered =
         x < leftInset ||
+        (iosFirstRow !== undefined &&
+          y > 4 &&
+          y < 20 &&
+          Math.abs(x - width / 2) < 36) ||
+        (blocked === 'top-tile' && x >= 30 && x < 60 && y < 48) ||
         (blocked === 'edge' && x < 12) ||
         (blocked === 'speckled' &&
           x % 30 >= 11 &&
@@ -127,4 +142,27 @@ it('excludes a browser status strip while checking the drawable viewport', async
   expect((await measureScreenVisibility(blocked, [viewportScreen])).clear).toBe(
     false,
   );
+});
+
+it('checks the full iPhone grid around a camera cutout and detects an obstruction in its first row', async () => {
+  const firstRowHeight = 48;
+  const screen = {
+    ...screens[0],
+    firstRowHeight,
+    layout: {
+      revision: 1,
+      width,
+      height,
+      screen: { width, height, devicePixelRatio: 1 },
+      markers: [],
+    },
+  };
+  for (const blocked of [undefined, 'top-tile'] as const) {
+    const frames = await Promise.all(
+      [0, 1, 0].map((phase) => pattern(phase, blocked, 0, 0, firstRowHeight)),
+    );
+    expect((await measureScreenVisibility(frames, [screen])).clear).toBe(
+      !blocked,
+    );
+  }
 });

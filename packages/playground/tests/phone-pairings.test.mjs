@@ -4,6 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from '@rstest/core';
 import { PhonePairings } from '../src/server/phone-pairings.ts';
+import { screenConnectPage } from '../src/server/screen-connect-page.ts';
+
+test('the Home Screen pairing entry requests edge-to-edge display on iOS', () => {
+  const html = screenConnectPage();
+  assert.match(html, /viewport-fit=cover/);
+  assert.match(
+    html,
+    /name="apple-mobile-web-app-status-bar-style" content="black-translucent"/,
+  );
+});
 
 test('camera pairing survives a new server instance and concurrent creation', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'phone-pairings-'));

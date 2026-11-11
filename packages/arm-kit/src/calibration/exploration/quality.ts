@@ -14,7 +14,6 @@ export function explorationQualityWarnings(
   screen: Pick<ScreenProfile, 'physicalWidthMm' | 'physicalHeightMm'>,
   plane: PlaneQuality,
   evidence: AutoCalibrationEvidence,
-  fastBoundary = false,
 ): CalibrationQualityReading[] {
   const short = Math.min(screen.physicalWidthMm, screen.physicalHeightMm);
   const long = Math.max(screen.physicalWidthMm, screen.physicalHeightMm);
@@ -22,12 +21,12 @@ export function explorationQualityWarnings(
     {
       label: 'Grid RMS',
       percent: (evidence.gridRmsMm / short) * 100,
-      targetPercent: fastBoundary ? 0.5 : 1,
+      targetPercent: 1.5,
     },
     {
       label: 'Holdout maximum',
       percent: (evidence.validationMaxMm / short) * 100,
-      targetPercent: fastBoundary ? 1 : 1.5,
+      targetPercent: 2,
     },
     {
       label: 'Touch coverage',

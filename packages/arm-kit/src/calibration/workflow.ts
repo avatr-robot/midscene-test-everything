@@ -1353,9 +1353,13 @@ export class CalibrationWorkflow {
         await this.assertMechanicalFrame();
         this.recordPositionRequested = false;
         s.error = undefined;
+        // Replacing an existing reference starts a new teaching draft. A new
+        // screen only needs a sampling start within the shared installation.
+        if (s.referencePosition || !s.teachingId) {
+          s.cameraBoundaryPosition = undefined;
+          s.teachingId = undefined;
+        }
         s.referencePosition = undefined;
-        s.cameraBoundaryPosition = undefined;
-        s.teachingId = undefined;
         s.stage = 'positioning';
         this.capture = this.recordPosition()
           .catch((e) => {
@@ -2358,12 +2362,7 @@ export class CalibrationWorkflow {
       const screen = this.runtime.profileStore.getScreen(
         c.candidate!.screenProfileId,
       );
-      const warnings = explorationQualityWarnings(
-        screen,
-        quality,
-        evidence,
-        fast,
-      );
+      const warnings = explorationQualityWarnings(screen, quality, evidence);
       if (state?.mapping)
         warnings.push(
           ...mappingQualityWarnings(

@@ -18,6 +18,7 @@ export function WebCalibrationWorkspace({
   readyToStart = true,
   cameraCheckRequired = false,
   prepareFromTeaching = false,
+  screenName,
   showSessionCancel = true,
   footer,
   preview,
@@ -39,6 +40,7 @@ export function WebCalibrationWorkspace({
   readyToStart?: boolean;
   cameraCheckRequired?: boolean;
   prepareFromTeaching?: boolean;
+  screenName?: string;
   showSessionCancel?: boolean;
   footer: HTMLElement | null;
   preview?: ReactNode;
@@ -147,7 +149,12 @@ export function WebCalibrationWorkspace({
     setup.phoneConnected,
     controller.create,
   ]);
-  const firstStep = s?.teachingId && s.referencePosition ? 1 : 0;
+  const firstStep =
+    (prepareFromTeaching && (!s || s.teachingId)) ||
+    (s?.teachingId && s.referencePosition)
+      ? 1
+      : 0;
+  const placingScreen = Boolean(s?.teachingId && !s.referencePosition);
   const quality = s?.explorationQuality;
   const steps = [
     'Set a calibration reference position',
@@ -260,7 +267,7 @@ export function WebCalibrationWorkspace({
       loading={busy}
       onClick={() => command('record-reference', true)}
     >
-      {t('Record Reference Position')}
+      {t(placingScreen ? 'Record sampling start' : 'Record Reference Position')}
     </Button>
   ) : stage === 'ready' && !s.referencePosition ? (
     <Button
@@ -514,14 +521,23 @@ export function WebCalibrationWorkspace({
                   stage === 'cancelled') &&
                 controls}
               {!(s?.phoneConnected ?? setup.phoneConnected) && !completed && (
-                <Typography.Paragraph>
-                  {t('Phone disconnected')}
+                <div className="robot-phone-reconnect">
+                  <div>
+                    <Typography.Text strong>
+                      {t('Phone disconnected')}
+                    </Typography.Text>
+                    <Typography.Text type="secondary">
+                      {t(
+                        'Open the calibration page on your phone and keep it in the foreground.',
+                      )}
+                    </Typography.Text>
+                  </div>
                   {onConnectPhone && (
                     <Button onClick={onConnectPhone}>
                       {t('Connect Phone')}
                     </Button>
                   )}
-                </Typography.Paragraph>
+                </div>
               )}
               {!completed && !setup.mapping && !s?.mapping && onCheckCamera && (
                 <Button onClick={onCheckCamera}>
@@ -531,9 +547,14 @@ export function WebCalibrationWorkspace({
               {(stage === 'positioning' ||
                 (stage === 'ready' && !s?.referencePosition)) && (
                 <Typography.Paragraph>
-                  {t(
-                    'Place the stylus 20–50 mm above the center of the screen. Release the robot and record the starting position. Recording does not move the robot.',
-                  )}
+                  {placingScreen
+                    ? t(
+                        'Installation teaching is saved. Before sampling, place the tip 20–50 mm above the centre of {0}, release the arm and record this screen’s starting position.',
+                        [screenName ?? t('the selected screen')],
+                      )
+                    : t(
+                        'Place the stylus 20–50 mm above the center of the screen. Release the robot and record the starting position. Recording does not move the robot.',
+                      )}
                 </Typography.Paragraph>
               )}
               {stage === 'ready' &&
@@ -613,7 +634,7 @@ export function WebCalibrationWorkspace({
               )}
             </>
           )}
-          <div className="robot-web-actions">{!footer && actions}</div>
+          {!footer && <div className="robot-web-actions">{actions}</div>}
         </section>
         {!externalPreview && (
           <section className="robot-setup-guide-card">

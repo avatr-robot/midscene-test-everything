@@ -256,6 +256,9 @@ function openPhone(
 test('iPhone helper uses cover and reports split system bars without Fullscreen API', () => {
   const html = calibrationPhonePage('test');
   expect(html).toContain('viewport-fit=cover');
+  expect(html).toContain(
+    'name="apple-mobile-web-app-status-bar-style" content="black-translucent"',
+  );
   // The page reports the orientation it gets; it never asks the browser for one.
   expect(html).not.toContain('name="screen-orientation"');
   expect(html).not.toContain('name="x5-orientation"');
@@ -293,6 +296,48 @@ test('unknown safe areas and Android retain the existing single-edge fallback', 
   expect(openPhone(700, 0, 0).last().layout.topInset).toBeUndefined();
   const phone = openPhone(700, 47, 34, false);
   phone.tap(47);
+  expect(phone.last().layout.topInset).toBeUndefined();
+});
+
+test('a standalone iPhone with an opaque status bar reports the missing top strip', () => {
+  const phone = openPhone(873, 0, 0);
+  phone.scope.window.screen.width = phone.scope.innerWidth = 430;
+  phone.scope.window.screen.height = 932;
+  phone.resize();
+  expect(phone.last().layout.topInset).toBeUndefined();
+  phone.scope.navigator.standalone = true;
+  phone.resize();
+  expect(phone.last().layout.topInset).toBe(59);
+  phone.scope.visualViewport.scale = 1.5;
+  phone.resize();
+  expect(phone.last().layout.topInset).toBeUndefined();
+  phone.scope.visualViewport.scale = 1;
+  phone.scope.innerHeight = 720;
+  phone.resize();
+  expect(phone.last().layout.topInset).toBeUndefined();
+});
+
+test('a full-height iPhone acknowledges the painted first row without adding a page inset', () => {
+  const phone = openPhone(844, 47, 34);
+  phone.scope.navigator.standalone = true;
+  const grid = phone.elements.get('surface')!.children[0] as {
+    style: { display: string; gridTemplateRows: string };
+    children: Array<{ getBoundingClientRect(): { height: number } }>;
+  };
+  grid.children[0].getBoundingClientRect = () => ({ height: 94 });
+  phone.receive({
+    view: 'waiting',
+    visibilityProbe: { id: 'probe', phase: 0 },
+  });
+  expect(grid.style.display).toBe('grid');
+  expect(grid.style.gridTemplateRows).toContain('env(safe-area-inset-top');
+  expect(phone.last().visibilityFirstRowHeight).toBeUndefined();
+  phone.paint();
+  expect(phone.last()).toMatchObject({
+    visibilityProbeAck: 'probe',
+    visibilityFirstRowHeight: 94,
+    layout: { width: 390, height: 844 },
+  });
   expect(phone.last().layout.topInset).toBeUndefined();
 });
 
