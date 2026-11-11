@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import type { CalibrationPageLayout } from '../assisted-contracts.js';
 import type {
   CalibrationVision,
   CalibrationVisionOptions,
@@ -8,6 +9,7 @@ import type {
 import {
   type CameraCorrection,
   RobotArmError,
+  SCREEN_DRIFT_DETECTION_ENABLED,
   type VisionBinding,
   type VisionSnapshot,
 } from '../contracts.js';
@@ -23,7 +25,11 @@ import { jpegSize } from './jpeg-size.js';
 import { PerspectiveMonitor } from './perspective-monitor.js';
 import { PerspectiveTransformer } from './perspective-transformer.js';
 import { checkPerspectiveValidity } from './perspective-validity.js';
-import type { CameraBackend, CameraDevice, CameraFrame } from './types.js';
+import type {
+  CameraBackend,
+  CameraDevice,
+  PerspectiveReferenceFrame,
+} from './types.js';
 import { measuredPerspectiveTarget, validateQuad } from './vision-geometry.js';
 import type { PerspectiveTarget } from './vision-types.js';
 
@@ -120,7 +126,7 @@ export class CameraSession implements CalibrationVision {
   private writeChain = Promise.resolve();
   private readonly transformer = new PerspectiveTransformer();
   /** Supplied by the calibration host for this screen while its phone is paired. */
-  referenceFrame?: () => CameraFrame | undefined;
+  referenceFrame?: () => PerspectiveReferenceFrame | undefined;
   private readonly perspective = new PerspectiveMonitor({
     file: () => `${this.correctionFile}.validity.json`,
     key: () => this.fingerprint(0, 0),
@@ -152,7 +158,7 @@ export class CameraSession implements CalibrationVision {
     if (stored.applied === false) return;
     this.correction = stored.correction;
     if (stored.target) this.target = stored.target;
-    await this.perspective.load();
+    if (SCREEN_DRIFT_DETECTION_ENABLED) await this.perspective.load();
   }
   async forScreen(screenId: string): Promise<CameraSession> {
     const scoped = new CameraSession(
@@ -300,7 +306,7 @@ export class CameraSession implements CalibrationVision {
       fingerprint,
       width: options.width,
       height: options.height,
-      validity: this.perspective.summary(),
+      validity: this.getPerspectiveValidity(),
     };
   }
   private fingerprint(width: number, height: number) {
@@ -319,24 +325,32 @@ export class CameraSession implements CalibrationVision {
   isBindingCurrent(binding: VisionBinding): boolean {
     return Boolean(
       this.correction &&
-        this.perspective.summary()?.state !== 'invalid' &&
+        this.getPerspectiveValidity()?.state !== 'invalid' &&
         binding.cameraId === this.camera.id &&
         binding.fingerprint === this.fingerprint(binding.width, binding.height),
     );
   }
   getPerspectiveValidity() {
-    return this.perspective.summary();
+    return SCREEN_DRIFT_DETECTION_ENABLED
+      ? this.perspective.summary()
+      : undefined;
   }
   checkPerspective(options?: { signal?: AbortSignal; maxAgeMs?: number }) {
-    return this.perspective.check(options);
+    options?.signal?.throwIfAborted();
+    return SCREEN_DRIFT_DETECTION_ENABLED
+      ? this.perspective.check(options)
+      : Promise.resolve(undefined);
   }
   assertPerspectiveCurrent() {
-    return this.perspective.assertCurrent();
+    return SCREEN_DRIFT_DETECTION_ENABLED
+      ? this.perspective.assertCurrent()
+      : Promise.resolve();
   }
   async checkCorrection(
     correction: CameraCorrection,
     jpeg?: Buffer,
     allowMismatch = false,
+    pageLayout?: CalibrationPageLayout,
   ) {
     validateCameraCorrection(correction);
     const image = jpeg ?? (await this.rawFrame());
@@ -350,11 +364,15 @@ export class CameraSession implements CalibrationVision {
         'Camera image dimensions changed; repeat correction',
         409,
       );
+    if (!SCREEN_DRIFT_DETECTION_ENABLED) return undefined;
     const result = await checkPerspectiveValidity({
       jpeg: image,
       points: correction.points,
       sourceWidth: size.width,
       sourceHeight: size.height,
+      rotation: correction.rotation,
+      pageLayout:
+        pageLayout ?? (jpeg ? undefined : this.referenceFrame?.()?.pageLayout),
     });
     if (!allowMismatch && result.state === 'invalid')
       throw new RobotArmError(

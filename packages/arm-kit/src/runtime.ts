@@ -47,6 +47,7 @@ import {
   type RobotArmProfile,
   type RobotState,
   type RuntimeState,
+  SCREEN_DRIFT_DETECTION_ENABLED,
   SCREEN_TILT_LIMIT_DEGREES,
   type SafePositionRequest,
   type ScreenMotionSettings,
@@ -198,6 +199,9 @@ function captureMotion(
   };
 }
 export class RobotArmRuntime extends RobotKernel {
+  allowsOutlineFrame(capturedAt: number) {
+    return this.adapter.allowsOutlineFrame(capturedAt);
+  }
   private stopGeneration = 0;
   get stopRevision() {
     return this.stopGeneration;
@@ -502,7 +506,9 @@ export class RobotArmRuntime extends RobotKernel {
               input.onPayloadRecheck &&
               this.motionSubmitted &&
               isRobotArmError(error) &&
-              isTransientFeedbackLoss(error) &&
+              (error.code === 'MOTION_INTERRUPTED' ||
+                error.code === 'MOTION_TIMEOUT' ||
+                isTransientFeedbackLoss(error)) &&
               // An evidence gap is a configuration precondition, not an
               // interruption: no command was travelling when it was reported,
               // so recovering the controller would only cost the operator a stop.
@@ -2135,7 +2141,10 @@ export class RobotArmRuntime extends RobotKernel {
         const mapping = ctx.screen.phoneMapping;
         const vision =
           deviceVision ?? this.profileStore.list().workstation?.vision;
-        if (vision?.validity?.state === 'invalid')
+        if (
+          SCREEN_DRIFT_DETECTION_ENABLED &&
+          vision?.validity?.state === 'invalid'
+        )
           throw new RobotArmError(
             'CALIBRATION_MISMATCH',
             'The saved screen outline no longer matches the camera view. Recalibrate before moving.',

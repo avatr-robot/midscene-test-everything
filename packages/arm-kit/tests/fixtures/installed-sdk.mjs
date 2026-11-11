@@ -21,6 +21,7 @@ const camera = {
   camera: { id: 'test-camera', name: 'Package test camera' },
   stream,
   getCorrection: () => undefined,
+  getRectifiedPreviewTarget: () => undefined,
   getPerspectiveValidity: () => undefined,
 };
 const owners = new Set();

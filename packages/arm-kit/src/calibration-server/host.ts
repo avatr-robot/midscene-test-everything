@@ -24,6 +24,7 @@ import { calibrationAccepted } from '../contracts.js';
 import {
   type CameraCorrection,
   RobotArmError,
+  SCREEN_DRIFT_DETECTION_ENABLED,
   type ToolProfile,
   semanticJson,
 } from '../contracts.js';
@@ -134,13 +135,20 @@ export class CalibrationHost {
     key: string;
     since: number;
     seen: number;
+    layout: CalibrationPageUpdate['layout'];
     frame?: CameraFrame;
   };
-  private readonly referenceFrame = () => this.activeReference()?.frame;
+  private readonly referenceFrame = () => {
+    const ref = this.activeReference();
+    if (ref?.frame) return { ...ref.frame, pageLayout: ref.layout };
+  };
   private activeReference() {
     const ref = this.reference;
     if (
       ref &&
+      controllerRuntime(this.options.arm).allowsOutlineFrame(
+        ref.frame?.capturedAt ?? Date.now(),
+      ) &&
       Date.now() - ref.seen < REFERENCE_REPORT_MAX_AGE_MS &&
       !this.service.phoneView().visibilityProbe &&
       this.service.phoneView().view !== 'waiting'
@@ -175,7 +183,7 @@ export class CalibrationHost {
       this.reference.key !== key ||
       now - this.reference.seen >= REFERENCE_REPORT_MAX_AGE_MS
     )
-      this.reference = { key, since: now, seen: now };
+      this.reference = { key, since: now, seen: now, layout: update.layout };
     const ref = this.reference;
     ref.seen = now;
     // Only use a frame bracketed by foreground reports from this display.
@@ -461,6 +469,7 @@ export class CalibrationHost {
       correction,
       undefined,
       allowMismatch,
+      this.activeReference()?.layout,
     );
     this.editable();
     assertCurrent?.();
@@ -510,7 +519,7 @@ export class CalibrationHost {
       output,
       assertCurrent,
     );
-    if (validity.state === 'invalid') {
+    if (validity?.state === 'invalid') {
       await this.service.clearMapping();
       return 'The screen outline does not match the camera view. Recalibrate before moving.';
     }
@@ -792,6 +801,10 @@ export class CalibrationHost {
       } else if (relative === '/recover' && req.method === 'POST') {
         send(200, await this.recover());
       } else if (relative === '/camera/validity' && req.method === 'GET') {
+        if (!SCREEN_DRIFT_DETECTION_ENABLED) {
+          send(200, { skipped: 'disabled' });
+          return true;
+        }
         const abort = new AbortController();
         const cancel = () => abort.abort();
         res.once('close', cancel);

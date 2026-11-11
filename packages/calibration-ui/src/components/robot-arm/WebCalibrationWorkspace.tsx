@@ -65,6 +65,9 @@ export function WebCalibrationWorkspace({
   const offerStandardRetry =
     stage === 'interrupted' &&
     !s?.awaitingSocketRecovery &&
+    !['MOTION_INTERRUPTED', 'MOTION_TIMEOUT'].includes(
+      s?.errorDetails?.code ?? '',
+    ) &&
     s?.collectionFailed &&
     s.explorationMode === 'slide';
   const completed = stage === 'completed' || completedAttempt;

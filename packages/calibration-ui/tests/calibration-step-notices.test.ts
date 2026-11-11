@@ -1,3 +1,4 @@
+import { calibrationPageMarkers } from '@midscene/arm-kit-shared/assisted-contracts';
 import { expect, it } from '@rstest/core';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -63,6 +64,43 @@ it('asks for a marker page before screen detection and keeps stale command error
   expect(html).toContain('识别屏幕标记');
   expect(html).toContain('打开标记页');
   expect(html).not.toContain('Calibration marker');
+});
+
+it('shows the fit residual when neither independent check marker was visible', () => {
+  const value = controller();
+  const size = { width: 400, height: 800 };
+  value.setup.mapping = {
+    vision: {
+      ...size,
+      cameraId: 'cam',
+      cameraName: 'Camera',
+      perspectiveProfileKey: 'p',
+      fingerprint: 'f',
+    },
+    webToImage: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    layout: {
+      ...size,
+      revision: 1,
+      screen: { ...size, devicePixelRatio: 1 },
+      markers: calibrationPageMarkers(size.width, size.height),
+    },
+    markerErrorPx: 1,
+    accuracy: {
+      fit: { count: 4, meanErrorCssPx: 1, maxErrorCssPx: 1.25 },
+      validation: { count: 0, meanErrorCssPx: 0, maxErrorCssPx: 0 },
+      points: [],
+    },
+  };
+  const html = renderToStaticMarkup(
+    createElement(WebCameraMappingStep, {
+      controller: value,
+      footer: null,
+      savedResult: { verified: true },
+      onContinue() {},
+    }),
+  );
+  expect(html).toContain('最大拟合误差 1.25 CSS px');
+  expect(html).toContain('未检测到独立验证标记');
 });
 
 it('offers automatic collection before recording the safe position', () => {
@@ -388,6 +426,10 @@ it.each(['slide', 'standard', 'fast'] as const)(
         }),
       );
     expect(render().includes('确认重试')).toBe(explorationMode === 'slide');
+    value.session.errorDetails = { code: 'MOTION_INTERRUPTED', status: 409 };
+    expect(render()).toContain('重新开始标定');
+    expect(render()).not.toContain('确认重试');
+    value.session.errorDetails = undefined;
     value.session.collectionFailed = false;
     expect(render()).not.toContain('确认重试');
   },

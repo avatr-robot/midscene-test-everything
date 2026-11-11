@@ -71,7 +71,7 @@ export function PhoneConnectDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  /** Continues from a first-screen Add Screen into the marker pass. */
+  /** Continues from Add Screen into the marker pass for this camera. */
   onContinue?: () => void | Promise<void>;
   readiness?: CameraPhoneReadiness;
   /** Cameras a page can be bound to; the current camera is the default. */
@@ -261,15 +261,21 @@ export function PhoneConnectDialog({
    * view is listed as Not connected on its own row and must not be counted as
    * connected in the summary.
    */
+  // Add Screen can start with the newly paired phone even when previously
+  // calibrated screens are offline. The regular status still covers all saved screens.
+  const requiredScreens = onContinue ? undefined : selectedCamera?.screens;
+  const requiredPhones = onContinue
+    ? 1
+    : Math.max(1, selectedCamera?.screenCount ?? 1);
   const readyPhones = pages.filter(
     (device) =>
-      isRequiredPhonePage(device, cameraId, selectedCamera?.screens) &&
+      isRequiredPhonePage(device, cameraId, requiredScreens) &&
       device.visible &&
       device.fullscreen,
   ).length;
   const connectedPhones = pages.filter(
     (device) =>
-      isRequiredPhonePage(device, cameraId, selectedCamera?.screens) &&
+      isRequiredPhonePage(device, cameraId, requiredScreens) &&
       device.visible &&
       device.fullscreen &&
       pageState(device) !== 'waiting',
@@ -296,11 +302,6 @@ export function PhoneConnectDialog({
   const unmatchedScreens = savedScreens.filter(
     (screen) => !matchedScreenIds.has(screen.id),
   );
-  const requiredPhones = Math.max(1, selectedCamera?.screenCount ?? 1);
-  /*
-   * The configured screens decide the count; another page being open is not a
-   * fault, because a multi-screen bench keeps one page per screen.
-   */
   const phonesReady = readyPhones >= requiredPhones;
   const phonesConnected = connectedPhones >= requiredPhones;
   const readyCount = Math.max(readyPhones, requiredPhones);

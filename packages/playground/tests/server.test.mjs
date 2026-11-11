@@ -97,7 +97,7 @@ test('code-configured arm connects, reports its own settings, retries and releas
     assert.equal((await updated.json()).values.linearSpeed, 42);
     assert.equal(updateMotionSettings.mock.calls.length, 1);
     assert.equal(arm.adapter.name, 'Independent adapter fake');
-    // The camera stage checks saved outlines before a wizard/session exists.
+    // Disabled outline checks do not open a camera or calibration host.
     const outlineHost = rstest
       .spyOn(PlaygroundDevices.prototype, 'ensureHost')
       .mockResolvedValue({
@@ -112,8 +112,8 @@ test('code-configured arm connects, reports its own settings, retries and releas
         `${server.url}/api/devices/cam/calibration/camera/validity`,
       );
       assert.equal(check.status, 200);
-      assert.equal((await check.json()).validity.state, 'invalid');
-      assert.equal(outlineHost.mock.calls[0][0], 'cam');
+      assert.deepEqual(await check.json(), { skipped: 'disabled' });
+      assert.equal(outlineHost.mock.calls.length, 0);
     } finally {
       outlineHost.mockRestore();
     }

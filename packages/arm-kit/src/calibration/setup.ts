@@ -50,7 +50,7 @@ function checkedMappingAccuracy(
   )
     throw new RobotArmError(
       'INVALID_MAPPING',
-      'Camera mapping requires distributed fit markers and finite independent check measurements.',
+      'Camera mapping requires four to six visible markers from the page layout and finite corner errors.',
     );
   return accuracy;
 }

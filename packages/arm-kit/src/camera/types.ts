@@ -3,6 +3,7 @@ import type {
   CameraBackendName,
   CameraLabel,
 } from '@midscene/arm-kit-shared/camera/profile';
+import type { CalibrationPageLayout } from '../assisted-contracts.js';
 
 export type {
   CameraBackendName,
@@ -45,6 +46,11 @@ export interface CameraFrame {
   id: number;
   capturedAt: number;
   jpeg: Buffer;
+}
+
+/** A shared camera frame observed while this screen's paired page was visible. */
+export interface PerspectiveReferenceFrame extends CameraFrame {
+  pageLayout?: CalibrationPageLayout;
 }
 
 export interface CameraSource extends EventEmitter {

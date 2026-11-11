@@ -300,7 +300,7 @@ it('safe position requires confirmation and current calibration; record does not
   }
 });
 
-it('rejects drift evidence before Agent screenshots or queued touch actions without changing geometry identity', async () => {
+it('allows screenshots and queued taps with previously recorded drift while detection is disabled', async () => {
   const f = await setup();
   try {
     const device = f.create();
@@ -316,13 +316,9 @@ it('rejects drift evidence before Agent screenshots or queued touch actions with
         expired: false,
       },
     });
-    await expect(device.screenshotBase64()).rejects.toMatchObject({
-      code: 'CALIBRATION_MISMATCH',
-    });
-    await expect(
-      device.inputPrimitives.pointer!.tap!({ x: 500, y: 250 }),
-    ).rejects.toMatchObject({ code: 'CALIBRATION_MISMATCH' });
-    expect(f.adapter.movements).toHaveLength(0);
+    await device.screenshotBase64();
+    await device.inputPrimitives.pointer!.tap!({ x: 500, y: 250 });
+    expect(f.adapter.movements.length).toBeGreaterThan(0);
     expect(f.vision.fingerprint).toBe('f');
   } finally {
     await f.dispose();

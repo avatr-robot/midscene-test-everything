@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ServerResponse } from 'node:http';
 import type { CameraFrame, CameraSessionManager } from '@midscene/arm-kit';
+import type { CalibrationPageLayout } from '@midscene/arm-kit-shared/assisted-contracts';
 import type { PerspectiveTarget } from '@midscene/arm-kit-shared/camera/vision-types';
 import type { CameraCorrection } from '@midscene/arm-kit-shared/contracts';
 import type { CameraStream } from '@midscene/arm-kit/internal/camera/camera-stream';
@@ -294,7 +295,7 @@ export async function saveStandaloneCorrection(
   correction: CameraCorrection,
   target?: PerspectiveTarget,
   screenId?: string,
-  checkCapture?: () => void,
+  checkCapture?: () => CalibrationPageLayout | undefined,
   allowMismatch = false,
 ) {
   const owner = randomUUID();
@@ -307,6 +308,7 @@ export async function saveStandaloneCorrection(
       correction,
       undefined,
       allowMismatch,
+      checkCapture?.(),
     );
     checkCapture?.();
     if (target) await camera.setPerspective(correction, target);

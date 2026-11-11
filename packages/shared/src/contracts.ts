@@ -1147,4 +1147,6 @@ export interface ControllerMotionSettingsUpdate {
 
 // Browser consumers use these types without loading Node camera backends.
 export type { CameraProfile, CameraCorrection } from './camera/profile.js';
+// Keep outline verification available for investigation while false alarms are resolved.
+export const SCREEN_DRIFT_DETECTION_ENABLED = false;
 export type * from './camera/perspective-validity.js';

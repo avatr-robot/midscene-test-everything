@@ -81,7 +81,7 @@ export interface WebPoint {
   x: number;
   y: number;
 }
-// Four outer markers fit the page transform. The two inner markers only score it.
+// Outer markers supply the reference fit for scoring the inner check markers.
 export const CALIBRATION_MARKER_CODES = [10, 11, 12, 13, 14, 15] as const;
 export const CALIBRATION_MARKERS = CALIBRATION_MARKER_CODES.map((code, i) => ({
   code,

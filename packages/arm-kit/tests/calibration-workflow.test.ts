@@ -485,6 +485,44 @@ describe('phone-assisted calibration coordinator', () => {
       await f.dispose();
     }
   });
+  it('recovers a stopped first move and prepares a retry in the open calibration', async () => {
+    const f = await setup();
+    try {
+      const ready = await f.recordReference();
+      const move = rstest.spyOn(f.adapter, 'moveLinear').mockResolvedValueOnce({
+        id: 'interrupted-probe',
+        acceptedAt: new Date().toISOString(),
+        wait: async () => ({
+          status: 'stopped',
+          completedAt: new Date().toISOString(),
+        }),
+      });
+      rstest
+        .spyOn(AutomaticCapture.prototype, 'run')
+        .mockImplementation(async (host) => {
+          await host.move(pose(100, -50, 90));
+        });
+      await f.service.command(ready.id, 'start-slide', true);
+      await rstest.waitFor(() =>
+        expect(f.service.status()).toMatchObject({
+          stage: 'interrupted',
+          errorDetails: { code: 'MOTION_INTERRUPTED' },
+        }),
+      );
+      expect((await f.runtime.state()).recoveryReason).toBe('interruption');
+      await f.runtime.recover();
+      const retry = await f.service.command(ready.id, 'restart', true);
+      expect(retry).toMatchObject({
+        stage: 'ready',
+        referencePosition: ready.referencePosition,
+        mapping: ready.mapping,
+        samples: 0,
+      });
+      expect(move).toHaveBeenCalledTimes(1);
+    } finally {
+      await f.dispose();
+    }
+  });
   it('audits a missing result on a live phone and holds the last probe position', async () => {
     const f = await setup();
     const audit = rstest.spyOn(f.auditStore, 'record');
@@ -604,7 +642,11 @@ describe('phone-assisted calibration coordinator', () => {
               touchSpreadPx: 0,
             });
             if (reason === 'controller') {
+              // Lose the channel after a measured step. A pre-dispatch loss
+              // instead exercises the bounded readiness retry.
+              await host.move(pose(100, -50, 100));
               await f.adapter.disconnect();
+              await f.adapter.connect();
               throw new RobotArmError('DISCONNECTED', 'Test channel lost', 503);
             }
             await new Promise<void>((resolve) =>
@@ -666,7 +708,9 @@ describe('phone-assisted calibration coordinator', () => {
             );
         }
         expect(run).toHaveBeenCalledTimes(1);
-        expect(f.adapter.movements).toHaveLength(0);
+        expect(f.adapter.movements).toEqual(
+          reason === 'controller' ? [pose(100, -50, 100)] : [],
+        );
       } finally {
         await f.dispose();
       }
@@ -1038,9 +1082,13 @@ it('stops collection when phone acknowledgements time out', async () => {
 it.each([
   [3, 2, true],
   [4, 1, true],
-  [3, 1, false],
-  [4, 0, false],
+  [2, 2, true],
+  [3, 1, true],
+  [4, 0, true],
+  [2, 1, false],
   [5, 1, false],
+  [2, 3, false],
+  [3.5, 1, false],
 ])(
   'confirms camera mapping with %i fit and %i check markers: %s',
   async (fit, check, accepted) => {

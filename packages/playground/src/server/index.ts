@@ -12,6 +12,7 @@ import {
   listCameras,
 } from '@midscene/arm-kit';
 import type { RobotArmAdapter } from '@midscene/arm-kit';
+import { SCREEN_DRIFT_DETECTION_ENABLED } from '@midscene/arm-kit-shared/contracts';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import {
   discoverWifiInterfaces,
@@ -527,11 +528,11 @@ export async function startPlaygroundHost({
         });
       }
       if (url.pathname === '/api/arm/disconnect' && req.method === 'POST') {
+        const input = await readBody(req);
         if (setup.busy || screenControl?.busy)
           return send(409, {
             error: 'Wait for the current robot control to finish',
           });
-        const input = await readBody(req);
         await setup.mutate(
           { session: input.session ?? setup.session },
           async () => {
@@ -553,8 +554,8 @@ export async function startPlaygroundHost({
         if (!tasks) return send(409, { error: 'Connect the arm first' });
         if (req.method === 'GET') return send(200, { tasks: tasks.list() });
         if (req.method === 'POST') {
-          screenControl?.assertNoManualAction();
           const input = await readBody(req);
+          screenControl?.assertNoManualAction();
           if (
             typeof input.cameraId !== 'string' ||
             (input.name !== undefined && typeof input.name !== 'string')
@@ -594,14 +595,19 @@ export async function startPlaygroundHost({
         url.pathname,
       );
       if (actionRoute) {
-        if (!devices || !screenControl || connecting)
+        const control = screenControl;
+        if (!devices || !control || connecting)
           return send(409, { error: 'Connect the arm first' });
         if (req.method !== 'POST')
           return send(405, { error: 'Method not allowed' });
         const id = decodeURIComponent(actionRoute[1]);
         const input = await readBody(req, 8192);
+        if (control !== screenControl || connecting || setup.busy)
+          return send(409, {
+            error: 'Wait for configuration changes to finish',
+          });
         return send(200, {
-          result: await screenControl.perform(id, input.action),
+          result: await control.perform(id, input.action),
         });
       }
       if (url.pathname === '/api/audit/actions' && req.method === 'GET') {
@@ -772,19 +778,26 @@ export async function startPlaygroundHost({
         if (req.method === 'GET')
           return send(200, { screens: devices.screens(true) });
         if (req.method === 'POST') {
+          const input = await readBody(req, 16384);
           if (screenControl?.busy)
             return send(409, {
               error: 'Wait for the manual screen gesture to finish',
             });
-          const input = await readBody(req, 16384);
           if (
             typeof input.cameraId !== 'string' ||
-            typeof input.name !== 'string' ||
-            !input.name.trim() ||
-            input.name.length > 100
+            (input.name !== undefined &&
+              (typeof input.name !== 'string' ||
+                !input.name.trim() ||
+                input.name.length > 100))
           )
             return send(400, { error: 'Select a camera and screen name' });
-          return send(200, await devices.addScreen(input.cameraId, input.name));
+          return send(
+            200,
+            await devices.markerCalibration.addScreen(
+              input.cameraId,
+              input.name,
+            ),
+          );
         }
         return send(405, { error: 'Method not allowed' });
       }
@@ -854,6 +867,12 @@ export async function startPlaygroundHost({
         }
         if (action === 'status' && req.method === 'GET')
           return send(200, devices.status(id));
+        if (
+          !SCREEN_DRIFT_DETECTION_ENABLED &&
+          action === 'camera/validity' &&
+          req.method === 'GET'
+        )
+          return send(200, { skipped: 'disabled' });
         const session = devices.entries.get(id)?.calibration;
         const host =
           action === 'camera/validity' && req.method === 'GET'
@@ -1127,11 +1146,11 @@ export async function startPlaygroundHost({
         return send(200, { ok: true });
       }
       if (url.pathname === '/api/cameras/correction' && req.method === 'POST') {
+        const input = await readBody(req, 65536);
         if (screenControl?.busy)
           return send(409, {
             error: 'Wait for the manual screen gesture to finish',
           });
-        const input = await readBody(req, 65536);
         if (typeof input.id !== 'string' || !input.correction)
           return send(400, { error: 'Camera id and correction are required' });
         if (devices || input.session !== undefined) {
@@ -1173,7 +1192,7 @@ export async function startPlaygroundHost({
               ),
               { status: 409 },
             );
-          preview.assertCaptured(evidence.pageKey);
+          return preview.assertCaptured(evidence.pageKey);
         };
         const validity = await setup.mutate(
           { session: setup.session },
@@ -1215,11 +1234,11 @@ export async function startPlaygroundHost({
         return send(200, { ok: true, validity });
       }
       if (url.pathname === '/api/cameras/stop' && req.method === 'POST') {
+        const input = await readBody(req);
         if (screenControl?.busy)
           return send(409, {
             error: 'Wait for the manual screen gesture to finish',
           });
-        const input = await readBody(req);
         await tasks?.closeCamera(input.id);
         await devices?.stop(input.id);
         return send(200, {});

@@ -1929,10 +1929,11 @@ export class CalibrationWorkflow {
     } else {
       s.safePosition = undefined;
       s.stage = 'return-ready';
-      s.error =
-        s.calibration.auto?.cameraVisibility?.clear === false
-          ? 'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.'
-          : 'No reachable camera-clear Safe Position was found within the bounded search.';
+      if (s.teachingId)
+        s.error =
+          s.calibration.auto?.cameraVisibility?.clear === false
+            ? 'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.'
+            : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }
     this.changed();
   }

@@ -10,11 +10,14 @@ import type { CameraSession } from '../src/camera/session.js';
 import type { CameraFrame } from '../src/camera/types.js';
 import { controllerRuntime } from '../src/controller-runtime.js';
 import { ArmController } from '../src/controller.js';
+import { robotSetupDefaults } from '../src/setup-contracts.js';
 import { fixture } from './fixtures.js';
 
 it('prepares first-time measured setup without inventing tool geometry or replacing accepted profiles', async () => {
   const f = await fixture();
   await f.runtime.shutdown();
+  // Cross-screen tool reuse needs adapter defaults for the new screen's motion.
+  Object.assign(f.adapter, { setupDefaults: robotSetupDefaults('mg400') });
   const arm = new ArmController({ adapter: f.adapter, profileStore: f.store });
   await arm.connect();
   const camera = {
@@ -294,7 +297,8 @@ it('admits only frames bracketed by visible phone reports for the active calibra
       revision: 1,
       width: 400,
       height: 800,
-      screen: { width: 400, height: 800, devicePixelRatio: 1 },
+      screen: { width: 400, height: 839, devicePixelRatio: 1 },
+      topInset: 39,
       markers: calibrationPageMarkers(400, 800),
     },
   };
@@ -310,7 +314,24 @@ it('admits only frames bracketed by visible phone reports for the active calibra
     frame = { capturedAt: ++now } as CameraFrame;
     now++;
     send();
-    expect(camera.referenceFrame?.()).toBe(frame);
+    expect(camera.referenceFrame?.()).toEqual({
+      ...frame,
+      pageLayout: report.layout,
+    });
+    expect(frame).not.toHaveProperty('pageLayout');
+    await arm.connect();
+    await f.adapter.enable();
+    await f.adapter.enterDragMode();
+    await arm.getState();
+    expect(camera.referenceFrame?.()).toBeUndefined();
+    frame = { capturedAt: ++now } as CameraFrame;
+    send();
+    await f.adapter.exitDragMode();
+    await arm.getState();
+    expect(camera.referenceFrame?.()).toBeUndefined();
+    frame = { capturedAt: ++now } as CameraFrame;
+    send();
+    expect(camera.referenceFrame?.()?.capturedAt).toBe(frame.capturedAt);
     send({ visible: false });
     expect(camera.referenceFrame?.()).toBeUndefined();
     frame = { capturedAt: ++now } as CameraFrame;
@@ -319,7 +340,10 @@ it('admits only frames bracketed by visible phone reports for the active calibra
     expect(camera.referenceFrame?.()).toBeUndefined(); // frame from the other app
     frame = { capturedAt: ++now } as CameraFrame;
     send();
-    expect(camera.referenceFrame?.()).toBe(frame);
+    expect(camera.referenceFrame?.()).toEqual({
+      ...frame,
+      pageLayout: report.layout,
+    });
     now += 3000;
     host.service.phoneHeartbeat(); // transport liveness alone does not confirm the display
     expect(camera.referenceFrame?.()).toBeUndefined();
@@ -327,7 +351,10 @@ it('admits only frames bracketed by visible phone reports for the active calibra
     expect(camera.referenceFrame?.()).toBeUndefined();
     frame = { capturedAt: ++now } as CameraFrame;
     send();
-    expect(camera.referenceFrame?.()).toBe(frame);
+    expect(camera.referenceFrame?.()).toEqual({
+      ...frame,
+      pageLayout: report.layout,
+    });
     send({ displayMode: 'browser' });
     expect(camera.referenceFrame?.()).toBeUndefined();
     host.service.restorePhoneHome();

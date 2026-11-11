@@ -601,15 +601,7 @@ export class CalibrationBatch {
       const { samplingMode = 'standard' } = input;
       if (samplingMode !== 'standard' && samplingMode !== 'slide')
         throw new RobotArmError('INVALID_ARGUMENT', 'Unknown sampling mode');
-      if (
-        [...this.devices.entries.values()].some(
-          (entry) =>
-            entry.calibration &&
-            ['queued', 'running', 'cancelling'].includes(
-              entry.calibration.phase,
-            ),
-        )
-      )
+      if (this.devices.hasActiveScreenCalibration)
         throw new RobotArmError(
           'BUSY',
           'Finish the current screen calibration before starting a batch',

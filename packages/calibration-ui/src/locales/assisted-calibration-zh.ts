@@ -63,6 +63,8 @@ export const assistedCalibrationZh: Record<string, string> = {
     '直接拖动四个角点，让绿框包含完整显示区域和系统栏。',
   '{0} fit markers · {1} held out · maximum {2} CSS px':
     '{0} 个拟合标记 · {1} 个独立验证标记 · 最大偏差 {2} CSS px',
+  '{0} fit markers · maximum fit error {1} CSS px · no check markers visible':
+    '{0} 个拟合标记 · 最大拟合误差 {1} CSS px · 未检测到独立验证标记',
   'Target circles and measured landings': '目标圆与实际落点',
   'Check all four display edges, including the system bars, before continuing.':
     '请对照两幅画面，核对四边是否包含完整屏幕和系统栏。',

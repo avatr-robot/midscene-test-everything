@@ -81,7 +81,7 @@ function listen() {
 }
 afterEach(() => rstest.restoreAllMocks());
 
-it('waits for changes in phone display mode, marker requests and actual mapping checks', () => {
+it('keeps phone setup, marker capture and mapping silent', () => {
   const { events } = listen();
   const announce = calibrationAnnouncements();
   announce(initial);
@@ -111,19 +111,7 @@ it('waits for changes in phone display mode, marker requests and actual mapping 
     'confirmed',
   ] as const)
     updateSetup({ mappingCheck });
-  expect(events()).toEqual([
-    'phoneHomeScreen',
-    'phoneFullscreen',
-    'phoneReady',
-    'phoneLost',
-    'phoneReady',
-    'markersCountdown',
-    'markersRetry',
-    'mappingStart',
-    'mappingFailed',
-    'mappingStart',
-    'mappingDone',
-  ]);
+  expect(events()).toEqual([]);
 });
 
 it('prioritizes loss of phone feedback when the same snapshot also changes a routine step', () => {
@@ -138,7 +126,7 @@ it('prioritizes loss of phone feedback when the same snapshot also changes a rou
   expect(events()).toEqual(['phoneLost']);
 });
 
-it('announces reference travel, sampling phases and boundary groups once per transition', () => {
+it('announces travel and boundary checks without narrating routine sampling phases', () => {
   const { events, click, voice } = listen();
   const announce = calibrationAnnouncements();
   const send = (
@@ -166,21 +154,12 @@ it('announces reference travel, sampling phases and boundary groups once per tra
   send('review');
   send('completed');
   expect(events()).toEqual([
-    'samplingReady',
     'approachStart',
-    'directionProbe',
-    'autoSampling',
     'referenceReturn',
-    'boundaryReview',
     'autoVerifying',
-    'hover',
-    'contact',
-    'autoAvoiding',
-    'autoReview',
-    'autoCompleted',
   ]);
   expect(click.mock.calls).toEqual([['click']]);
-  expect(voice).toHaveBeenCalledWith('contact', 2, 'calibration');
+  expect(voice).toHaveBeenCalledWith('referenceReturn', 2, 'calibration');
 });
 
 it('distinguishes the three taught positions, operator waits and a confirmed retry', () => {
@@ -220,19 +199,7 @@ it('distinguishes the three taught positions, operator waits and a confirmed ret
       awaitingSocketRecovery: true,
     }),
   );
-  expect(events()).toEqual([
-    'teachReference',
-    'teachReference',
-    'samplingReady',
-    'teachBoundary',
-    'confirmCorridor',
-    'samplingReady',
-    'autoWaitingSafe',
-    'recordSafe',
-    'retryRegular',
-    'autoStarted',
-    'autoFailed',
-  ]);
+  expect(events()).toEqual(['autoFailed', 'autoStarted', 'autoFailed']);
   expect(click).not.toHaveBeenCalled();
 });
 
@@ -282,15 +249,5 @@ it('leaves batch acceptance to the coordinator and ignores polling repeats and s
   update(7, 'stopping', 'exploring');
   update(8, 'stopped', 'stopped');
   update(9, 'completed', 'completed');
-  expect(events()).toEqual([
-    'autoStarted',
-    'mappingWaiting',
-    'batchPlacement',
-    'boundaryReview',
-    'autoWaitingSafe',
-    'autoReview',
-    'batchStopping',
-    'batchStopped',
-    'batchCompleted',
-  ]);
+  expect(events()).toEqual(['autoStarted', 'batchStopping']);
 });

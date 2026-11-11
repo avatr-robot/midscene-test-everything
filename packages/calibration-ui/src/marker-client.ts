@@ -202,6 +202,13 @@ export class ScreenCalibClient {
   deleteScreen(cameraId: string, id: string) {
     return this.request<void>('delete-screen', { cameraId, id });
   }
+  discardAddedScreen(cameraId: string, id: string) {
+    return this.request<void>('delete-screen', {
+      cameraId,
+      id,
+      onlyIfEmpty: true,
+    });
+  }
   deletePerspective(cameraId: string, id: string) {
     return this.request<void>('delete-perspective', { cameraId, id });
   }

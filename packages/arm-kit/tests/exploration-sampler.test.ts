@@ -369,7 +369,12 @@ describe('first-time automatic exploration', () => {
           if (mode === 'safety-floor')
             expect(lowestZ).toBeGreaterThanOrEqual(27.625);
           if (mode === 'fast-no-touch') {
-            expect(session.auto?.fastAdaptation?.searchSteps).toBe(6);
+            // The first grid point gets one inset retry with the same floor.
+            expect(session.auto?.fastAdaptation).toEqual({
+              searchSteps: 12,
+              maxSearchSteps: 12,
+            });
+            expect(lowestZ).toBeGreaterThanOrEqual(27.625);
             expect(session.auto?.collectedSamples).toHaveLength(3);
           }
           return;

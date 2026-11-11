@@ -148,11 +148,7 @@ export class ScreenControl {
         'Stop the calibration batch before touching the screen manually.',
         409,
       );
-    const calibration = entry.calibration?.phase;
-    if (
-      calibration &&
-      ['queued', 'running', 'cancelling'].includes(calibration)
-    )
+    if (this.devices.hasActiveScreenCalibration)
       throw new RobotArmError(
         'BUSY',
         'Wait for calibration to finish before touching the screen manually.',

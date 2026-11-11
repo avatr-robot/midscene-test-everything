@@ -76,7 +76,7 @@ function defaultScreenName(ua: string, id: string, browserPlatform?: string) {
 }
 
 /** A new screen gets the next free number, so the stage labels stay distinct. */
-function nextScreenName(screens: readonly { name: string }[]) {
+export function nextScreenName(screens: readonly { name: string }[]) {
   const taken = new Set(
     screens.map((screen) => screen.name.trim().toLocaleLowerCase()),
   );
@@ -281,6 +281,9 @@ export class ScreenCalibration {
   >();
   private serial: Promise<unknown> = Promise.resolve();
   constructor(private readonly devices: PlaygroundDevices) {}
+  addScreen(cameraId: string, name?: string) {
+    return this.serialize(() => this.devices.addScreen(cameraId, name));
+  }
   private get store() {
     return controllerRuntime(this.devices.arm).profileStore;
   }
@@ -304,7 +307,8 @@ export class ScreenCalibration {
         this.store.list().screenPages?.some((p) => p.targetId === id)
       )
         continue;
-      const target = this.screen(id);
+      const target = this.devices.screens().find((screen) => screen.id === id);
+      if (!target) continue;
       const url = entry.host.service.phoneStatus().links[0]?.url;
       const token = url && new URL(url).searchParams.get('token');
       if (!token) continue;
@@ -913,21 +917,28 @@ export class ScreenCalibration {
       return this.serialize(() =>
         this.create(input.cameraId, input.names, input.screenIds),
       );
-    const session = this.session(input.id!, input.token);
-    if (session.cameraId !== input.cameraId)
-      throw new RobotArmError(
-        'PROFILE_MISMATCH',
-        'Marker session belongs to another camera',
-        409,
-      );
+    const currentSession = () => {
+      const session = this.session(input.id!, input.token);
+      if (session.cameraId !== input.cameraId)
+        throw new RobotArmError(
+          'PROFILE_MISMATCH',
+          'Marker session belongs to another camera',
+          409,
+        );
+      return session;
+    };
     if (input.action === 'status') {
+      const session = currentSession();
       if (session.detecting) return this.snapshot(session);
-      return this.serialize(async () => {
+    }
+    return this.serialize(async () => {
+      const session = currentSession();
+      if (input.action === 'status') {
         await this.attachConnectedScreens(session);
         return this.snapshot(session);
-      });
-    }
-    return this.serialize(() => this.updateMarkerSession(session, input));
+      }
+      return this.updateMarkerSession(session, input);
+    });
   }
   private async attachConnectedScreens(session: MarkerSession) {
     if (session.state === 'cancelled' || session.expiresAt <= Date.now())
@@ -985,28 +996,7 @@ export class ScreenCalibration {
     if (input.action === 'remove') {
       if (!session.targets.some((t) => t.id === input.targetId))
         throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
-      const page = [...this.pages.values()].find(
-        (p) => p.saved.targetId === input.targetId,
-      );
-      if (page) {
-        await this.release(page, true);
-      }
-      session.targets = session.targets.filter((t) => t.id !== input.targetId);
-      session.applied.delete(input.targetId!);
-      for (const display of this.displays.values())
-        if (
-          display.visionSessionId === session.id &&
-          display.visionTargetId === input.targetId
-        )
-          display.state = 'closed';
-      if (
-        !this.store.deviceBinding(input.targetId!) &&
-        !this.devices.entries
-          .get(input.targetId!)
-          ?.camera.hasSavedPerspective() &&
-        !page
-      )
-        await this.store.archiveScreenTarget(input.targetId!);
+      await this.removeScreen(this.screen(input.targetId!));
       return this.snapshot(session);
     }
     if (input.action === 'cancel') {
@@ -1032,7 +1022,13 @@ export class ScreenCalibration {
   ) {
     const inset = layout.topInset ?? 0;
     if (inset <= 3) return correction;
-    const validity = await camera.checkCorrection(correction, jpeg, true);
+    const validity = await camera.checkCorrection(
+      correction,
+      jpeg,
+      true,
+      layout,
+    );
+    if (!validity) return correction;
     const top = validity.edges.find((edge) => edge.side === 'top');
     if (
       validity.state !== 'invalid' ||
@@ -1073,8 +1069,8 @@ export class ScreenCalibration {
       ...correction,
       points: { ...correction.points, topLeft: left, topRight: right },
     };
-    const verified = await camera.checkCorrection(refined, jpeg, true);
-    return verified.state === 'valid' &&
+    const verified = await camera.checkCorrection(refined, jpeg, true, layout);
+    return verified?.state === 'valid' &&
       verified.edges.length === 4 &&
       verified.edges.every((edge) => edge.class === 'on-edge')
       ? refined
@@ -1316,8 +1312,9 @@ export class ScreenCalibration {
           session.corrections.get(target.id)!,
           frame,
           true,
+          session.observations.get(target.id)!.layout,
         );
-      if (!allowMismatch && validity.state === 'invalid') {
+      if (!allowMismatch && validity?.state === 'invalid') {
         const sides = validity.edges
           .filter((edge) => edge.class === 'off-edge')
           .map((edge) => edge.side)
@@ -1374,6 +1371,7 @@ export class ScreenCalibration {
     targetDisplayId?: string;
     role?: 'markers' | 'mapping';
     keepBinding?: boolean;
+    onlyIfEmpty?: boolean;
     targets?: { id: string; token: string }[];
   }) {
     if (input.action === 'list')
@@ -1464,6 +1462,11 @@ export class ScreenCalibration {
       return { path: `/#bind=${token}`, expiresAt };
     }
     if (input.action === 'delete-screen') {
+      if (
+        input.onlyIfEmpty &&
+        !this.devices.screens().some((s) => s.id === input.id)
+      )
+        return {};
       const target = this.screen(input.id!);
       if (target.cameraId !== input.cameraId)
         throw new RobotArmError(
@@ -1471,30 +1474,7 @@ export class ScreenCalibration {
           'Screen belongs to another camera',
           409,
         );
-      const page = [...this.pages.values()].find(
-        (candidate) => candidate.saved.targetId === target.id,
-      );
-      if (page) await this.release(page, true);
-      const host = await this.devices.ensureHost(target.id);
-      await this.ensureTarget(target.id);
-      await host.service.clearMapping();
-      await (await this.devices.open(target.id)).camera.clearCorrection();
-      await this.store.archiveScreenTarget(target.id);
-      if (page) page.saved.targetId = undefined;
-      this.pageHosts.delete(target.id);
-      for (const session of this.sessions.values()) {
-        session.targets = session.targets.filter(
-          (candidate) => candidate.id !== target.id,
-        );
-        session.requests.delete(target.id);
-        session.corrections.delete(target.id);
-        session.applied.delete(target.id);
-        session.observations.delete(target.id);
-        delete session.frames[target.id];
-      }
-      for (const display of this.displays.values())
-        if (display.visionTargetId === target.id) display.state = 'closed';
-      if (target.id !== target.cameraId) await this.devices.stop(target.id);
+      await this.removeScreen(target, { onlyIfEmpty: input.onlyIfEmpty });
       return {};
     }
     if (input.action === 'delete-perspective') {
@@ -1559,6 +1539,14 @@ export class ScreenCalibration {
           409,
         );
       this.assertPageIdle(page);
+      const target = this.devices
+        .screens()
+        .find(
+          (screen) =>
+            screen.id === page.saved.targetId ||
+            screen.pageKey === page.saved.pageKey,
+        );
+      if (target) await this.removeScreen(target, { deletePerspective: true });
       await this.store.removeScreenPage(page.saved.id);
       this.pages.delete(page.saved.id);
       page.close();
@@ -1628,6 +1616,65 @@ export class ScreenCalibration {
       return { device: page.summary() };
     }
     throw new RobotArmError('INVALID_COMMAND', 'Unknown screen page command');
+  }
+  private async removeScreen(
+    {
+      id,
+      cameraId,
+      pageKey,
+    }: { id: string; cameraId: string; pageKey?: string },
+    options: { onlyIfEmpty?: boolean; deletePerspective?: boolean } = {},
+  ) {
+    // Forgetting an offline phone must also work with its camera unplugged.
+    const entry = options.deletePerspective
+      ? (this.devices.entries.get(id) ?? (await this.devices.opening.get(id)))
+      : await this.devices.open(id);
+    if (
+      options.onlyIfEmpty &&
+      (entry?.camera.getCorrection() ||
+        entry?.camera.hasSavedPerspective() ||
+        this.store.deviceBinding(id))
+    )
+      return;
+    const savedPage = this.store
+      .list()
+      .screenPages?.find(
+        (candidate) =>
+          candidate.targetId === id || candidate.pageKey === pageKey,
+      );
+    const page = savedPage && this.pages.get(savedPage.id);
+    if (page) await this.release(page, true);
+    await this.ensureTarget(id);
+    const host = entry?.host ?? (await entry?.hostOpening);
+    if (host) await host.service.clearMapping();
+    else await this.store.saveCalibrationMapping(id);
+    if (options.deletePerspective)
+      await this.devices.cameras.clearPerspective(
+        cameraId,
+        id === cameraId ? undefined : id,
+      );
+    else await entry?.camera.clearCorrection();
+    await this.store.archiveScreenTarget(id);
+    if (page) page.saved.targetId = undefined;
+    this.pageHosts.delete(id);
+    for (const session of this.sessions.values()) {
+      if (!session.targets.some((target) => target.id === id)) continue;
+      session.targets = session.targets.filter((target) => target.id !== id);
+      if (savedPage && !session.excludedPageIds?.includes(savedPage.id))
+        session.excludedPageIds = [
+          ...(session.excludedPageIds ?? []),
+          savedPage.id,
+        ];
+      if (!session.targets.length) session.state = 'cancelled';
+      session.requests.delete(id);
+      session.corrections.delete(id);
+      session.applied.delete(id);
+      session.observations.delete(id);
+      delete session.frames[id];
+    }
+    for (const display of this.displays.values())
+      if (display.visionTargetId === id) display.state = 'closed';
+    if (id !== cameraId) await this.devices.stop(id);
   }
   private async assign(
     page: ScreenPage,

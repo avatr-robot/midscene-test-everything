@@ -4,9 +4,16 @@ import { join } from 'node:path';
 import { afterEach, expect, it, rstest } from '@rstest/core';
 import sharp from 'sharp';
 import { PerspectiveMonitor } from '../src/camera/perspective-monitor.js';
-import type { CameraFrame } from '../src/camera/types.js';
+import type {
+  CameraFrame,
+  PerspectiveReferenceFrame,
+} from '../src/camera/types.js';
 import type { CameraCorrection } from '../src/contracts.js';
-import { SCREEN, renderFrame } from './fixtures/perspective-frame.js';
+import {
+  SCREEN,
+  renderFrame,
+  renderStatusBarFrame,
+} from './fixtures/perspective-frame.js';
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -42,7 +49,7 @@ async function fixture() {
     file: () => join(directory, 'evidence.json'),
     key: () => key,
     correction: () => correction,
-    referenceFrame: (): CameraFrame | undefined => frame,
+    referenceFrame: (): PerspectiveReferenceFrame | undefined => frame,
     frame: rstest.fn(async () => frame),
   };
   const monitor = new PerspectiveMonitor(source);
@@ -93,6 +100,30 @@ it('requires distinct fresh aligned frames for stable recovery and does not clea
       expect((await f.monitor.check())!.validity.state).toBe('invalid');
     }
   }
+});
+it('clears a stored bezel mismatch after fresh frames agree with the paired page inset', async () => {
+  const f = await fixture();
+  const screen = await renderStatusBarFrame(90);
+  f.correction.points = screen.points;
+  f.correction.rotation = screen.rotation;
+  rstest.useFakeTimers({ now: Date.now() });
+  f.next(screen.jpeg);
+  expect((await f.monitor.check())!.validity.state).toBe('invalid');
+  const restored = new PerspectiveMonitor(f.source);
+  await restored.load();
+  const rawFrame = f.source.referenceFrame;
+  f.source.referenceFrame = () => ({
+    ...rawFrame()!,
+    pageLayout: screen.pageLayout,
+  });
+  for (let i = 0; i < 3; i++) {
+    rstest.advanceTimersByTime(750);
+    f.next(screen.jpeg);
+    expect((await restored.check())!.validity.state).toBe(
+      i === 2 ? 'valid' : 'invalid',
+    );
+  }
+  expect(restored.summary()?.reasonCode).toBe('ALIGNED');
 });
 it('does not replace a measured mismatch on stale frames, camera errors or changed dimensions', async () => {
   const f = await fixture();

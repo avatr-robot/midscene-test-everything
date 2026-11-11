@@ -123,6 +123,8 @@ test.each(occludedPairs)(
 test('reports a displaced remaining check marker', async () => {
   const shifted = await photograph(true, layout.markers.slice(0, 5));
   const { accuracy } = await detectCalibrationMarkers(shifted, layout.markers);
+  // The photographed check marker is displaced by 10 CSS pixels.
+  expect(accuracy.validation.maxErrorCssPx).toBeGreaterThan(9);
   expect(mappingQualityWarnings(accuracy, layout).map((w) => w.label)).toEqual([
     'Check marker mean error',
     'Check marker maximum error',

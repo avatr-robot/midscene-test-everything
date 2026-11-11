@@ -124,3 +124,32 @@ export async function renderFrame(input: {
 }
 
 export const SCREEN: Rect = { x: 340, y: 150, width: 600, height: 420 };
+
+/** The black status bar blends into the bezel, but the page boundary is visible. */
+export async function renderStatusBarFrame(rotation: 0 | 90) {
+  const screen = { ...SCREEN, width: 360, height: 500 };
+  const width = rotation === 0 ? screen.width : screen.height;
+  const height = rotation === 0 ? screen.height : screen.width;
+  const topInset = height / 20;
+  const stripWidth = rotation === 0 ? screen.width : topInset;
+  const stripHeight = rotation === 0 ? topInset : screen.height;
+  const frame = await renderFrame({
+    screen,
+    icons: false,
+    bezel: 6,
+    glass: '#b6b6b6',
+    extra: `<rect x="${screen.x}" y="${screen.y}" width="${stripWidth}" height="${stripHeight}" fill="#141416"/>`,
+  });
+  return {
+    ...frame,
+    rotation,
+    pageLayout: {
+      revision: 1,
+      width,
+      height: height - topInset,
+      screen: { width, height, devicePixelRatio: 1 },
+      topInset,
+      markers: [],
+    },
+  };
+}

@@ -436,7 +436,7 @@ it('rejects accepted vision evidence after the perspective changes or the camera
   expect(camera.isBindingCurrent(binding)).toBe(false);
 });
 
-it('isolates drift evidence per screen on the shared stream without changing mapping fingerprints', async () => {
+it('skips drift checks on every screen without changing mapping fingerprints', async () => {
   const { renderFrame } = await import('./fixtures/perspective-frame.js');
   const { manager, backend } = await fixture();
   const left = await manager.acquire('camera', 'left-owner', 'left');
@@ -472,13 +472,17 @@ it('isolates drift evidence per screen on the shared stream without changing map
   source.emit('frame', frame.jpeg);
   expect(await left.checkPerspective()).toBeUndefined();
   left.referenceFrame = () => left.stream.currentFrame;
-  expect((await left.checkPerspective())?.validity.state).toBe('invalid');
+  expect(await left.checkPerspective()).toBeUndefined();
+  await left.assertPerspectiveCurrent();
+  expect(
+    await left.checkCorrection(left.getCorrection()!, frame.jpeg),
+  ).toBeUndefined();
   expect(await right.checkPerspective()).toBeUndefined();
   right.referenceFrame = () => right.stream.currentFrame;
-  expect((await right.checkPerspective())?.validity.state).toBe('valid');
+  expect(await right.checkPerspective()).toBeUndefined();
   const after = await left.binding(options);
   expect(after.fingerprint).toBe(before.fingerprint);
-  expect(after.validity?.state).toBe('invalid');
-  expect(left.isBindingCurrent(before)).toBe(false);
+  expect(after.validity).toBeUndefined();
+  expect(left.isBindingCurrent(before)).toBe(true);
   expect(right.isBindingCurrent(await right.binding(options))).toBe(true);
 });
