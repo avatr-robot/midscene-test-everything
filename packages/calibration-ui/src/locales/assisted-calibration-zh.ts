@@ -1,4 +1,5 @@
 export const assistedCalibrationZh: Record<string, string> = {
+  'Use Saved Teaching': '沿用已保存的示教',
   'Calibration saved · Camera mapping changed': '标定已保存，相机映射已变更',
   'Phone step acknowledgement timed out. Touch at this position is unknown.':
     '手机未在时限内确认本步，当前位置的接触状态未知。请检查标定页和连接后重试。',

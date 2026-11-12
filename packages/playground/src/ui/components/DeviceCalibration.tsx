@@ -10,12 +10,14 @@ export function DeviceCalibration({
   onClose,
   onScreenChange,
   initialStep,
+  reviewInstallationOnOpen,
 }: {
   id: string;
   cameraId?: string;
   onClose(screenId?: string): void;
   onScreenChange(id: string): void;
   initialStep?: 0 | 1;
+  reviewInstallationOnOpen?: boolean;
 }) {
   const language = usePreferences((state) => state.language);
   useEffect(
@@ -29,6 +31,7 @@ export function DeviceCalibration({
       onClose={onClose}
       onScreenChange={onScreenChange}
       initialStep={initialStep}
+      reviewInstallationOnOpen={reviewInstallationOnOpen}
     />
   );
 }
