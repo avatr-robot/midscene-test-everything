@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   type AutomaticCaptureHost,
+  type AutomaticCaptureMotionTiming,
   type AutomaticExplorationMode,
   CALIBRATION_PHONE_POLICY,
   type CalibrationPageLayout,
@@ -45,6 +46,10 @@ export class AutomaticCapture {
   private target?: { id: string; point: WebPoint };
   private observation?: StationaryPhoneObservation;
   private readonly recentObservations: PhoneProbeEvidence[] = [];
+  private readonly recentCoarseObservations: PhoneProbeEvidence[] = [];
+  get coarsePhoneObservations() {
+    return this.recentCoarseObservations;
+  }
   get phoneObservations() {
     return this.observation
       ? [...this.recentObservations.slice(-23), this.observation.diagnostics()]
@@ -159,8 +164,9 @@ export class AutomaticCapture {
     options?: Parameters<AutomaticCaptureHost['move']>[1],
   ) {
     this.check(host);
-    await host.move(pose, options);
+    const actual = await host.move(pose, options);
     this.check(host);
+    return actual;
   }
   /** Upstream owns all automatic sampling decisions; this boundary only adapts IO. */
   upstreamResult?: Awaited<ReturnType<typeof runAutoExploration>>;
@@ -180,7 +186,10 @@ export class AutomaticCapture {
     this.invalid = undefined;
     this.upstreamResult = undefined;
     this.recentObservations.length = 0;
+    this.recentCoarseObservations.length = 0;
     let requestedTipZMm = contactPoint(home, this.offset).z;
+    let measuredTipZMm: number | undefined;
+    let motionTiming: AutomaticCaptureMotionTiming | undefined;
     this.target = {
       id: randomUUID(),
       point: { x: this.layout.width / 2, y: this.layout.height / 2 },
@@ -276,6 +285,7 @@ export class AutomaticCapture {
             after: pose,
             positionConvention:
               sample.method === 'stepped' ? 'contact-interval' : 'predicted',
+            heightIntervalMm: sample.heightIntervalMm,
           },
         };
         (sample.role === 'probe' ? this.localPoints : this.points).push(point);
@@ -288,12 +298,22 @@ export class AutomaticCapture {
       check: () => this.check(host),
       currentPose: () => host.read(),
       move: async (pose, _ctx, speed, acceleration) => {
-        await this.move(host, pose, {
+        motionTiming = undefined;
+        const actual = await this.move(host, pose, {
           speed,
           acceleration,
           timeoutMs: 10000,
+          onTiming: (timing) => {
+            motionTiming = timing;
+          },
         });
         requestedTipZMm = contactPoint(pose, this.offset).z;
+        const measured =
+          actual ?? (this.mode === 'standard' ? undefined : await host.read());
+        measuredTipZMm = measured
+          ? contactPoint(measured, this.offset).z
+          : undefined;
+        return measured;
       },
       // The runtime move already performs adapter preflight and measured stable completion
       // under the same motion lease; do not duplicate these network round trips.
@@ -329,9 +349,18 @@ export class AutomaticCapture {
         findMappedSession: async () => page(),
         session: async () => page(),
         targets: async () => ({ mappingVersion, targets }),
-        setSample: async (_id, id, purpose, settleMs) => {
+        setSample: async (
+          _id,
+          id,
+          purpose,
+          settleMs,
+          allowBriefContactGaps,
+        ) => {
           if (purpose !== 'preflight')
-            this.operation = purpose === 'search-limit' ? 'search' : purpose;
+            this.operation =
+              purpose === 'search-limit' || purpose === 'coarse-search'
+                ? 'search'
+                : purpose;
           snapshot = undefined;
           sampleId = id;
           const observation = new StationaryPhoneObservation(
@@ -341,7 +370,10 @@ export class AutomaticCapture {
             requestedTipZMm,
             this.latest!.sequence,
             this.lastSeen,
+            measuredTipZMm,
+            motionTiming,
           );
+          motionTiming = undefined;
           this.observation = observation;
           try {
             const point = await observation.measure(
@@ -349,6 +381,7 @@ export class AutomaticCapture {
               this.changed,
               Math.min(this.layout.width, this.layout.height),
               settleMs,
+              allowBriefContactGaps,
             );
             snapshot = {
               sampleId: id,
@@ -357,9 +390,15 @@ export class AutomaticCapture {
               screen: point ? project(config.webToImage, point) : null,
             };
           } finally {
-            this.recentObservations.push(observation.diagnostics());
+            const evidence = observation.diagnostics();
+            this.recentObservations.push(evidence);
             if (this.recentObservations.length > 24)
               this.recentObservations.shift();
+            if (purpose === 'coarse-search') {
+              this.recentCoarseObservations.push(evidence);
+              if (this.recentCoarseObservations.length > 24)
+                this.recentCoarseObservations.shift();
+            }
             this.observation = undefined;
             this.changed();
           }
@@ -376,9 +415,9 @@ export class AutomaticCapture {
       },
       {
         startPose: home,
-        mode: this.mode === 'standard' ? 'standard' : 'fast-horizontal',
+        mode: this.mode === 'standard' ? 'standard' : 'fast-plane',
         collection: this.mode === 'slide' ? 'slide' : 'tap',
-        horizontalConfirmed: this.mode !== 'standard',
+        compliantSetupConfirmed: this.mode !== 'standard',
       },
     );
     this.captured = true;

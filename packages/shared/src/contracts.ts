@@ -570,6 +570,16 @@ export interface CalibrationVerification {
 }
 export interface AutoCalibrationEvidence {
   planeSource?: string;
+  tiltDeg?: number;
+  heightRangeMm?: number;
+  holdoutHeightMm?: number;
+  independentHeightCheck?: {
+    predictedZMm: number;
+    heightIntervalMm: [number, number];
+    errorMm: number;
+    predictionInInterval: boolean;
+    elapsedMs: number;
+  };
   planeRmseMm: number;
   gridRmsPx: number;
   gridRmsMm: number;

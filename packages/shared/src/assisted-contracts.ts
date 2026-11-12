@@ -460,6 +460,12 @@ export interface AssistedCalibrationState {
   target?: { id: string; point: WebPoint };
   result?: CalibrationProfile;
 }
+export interface AutomaticCaptureMotionTiming {
+  beforeSubmitMs: number;
+  adapterCompletionMs: number;
+  stableMs: number;
+}
+
 export interface AutomaticCaptureHost {
   preflight?(
     poses: CartesianPose[],
@@ -478,8 +484,9 @@ export interface AutomaticCaptureHost {
       speed?: MotionSpeed;
       acceleration?: MotionAcceleration;
       timeoutMs?: number;
+      onTiming?(timing: AutomaticCaptureMotionTiming): void;
     },
-  ): Promise<void>;
+  ): Promise<CartesianPose | undefined>;
 }
 
 export interface AssistedCaptureHost {
@@ -574,6 +581,7 @@ export interface CalibrationBatchState {
   robotProfileId?: string;
   toolProfileId?: string;
   samplingMode?: CalibrationBatchSamplingMode;
+  compliantSetupConfirmed?: true;
   usesSharedSafePosition?: true;
   /** Live while the batch searches for the shared Safe Position automatically. */
   automaticSharedParking?: true;

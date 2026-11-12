@@ -1,5 +1,6 @@
 /** Narrow host boundary for the pinned upstream sampling algorithm. */
 import type {
+  AutoCalibrationEvidence,
   CartesianPose,
   MotionAcceleration,
   MotionOptions,
@@ -73,6 +74,7 @@ export type ProbePurpose =
   | 'preflight'
   | 'release'
   | 'search'
+  | 'coarse-search'
   | 'search-limit'
   | 'refine'
   | 'press'
@@ -80,6 +82,7 @@ export type ProbePurpose =
 export interface CollectedSample {
   robot: { x: number; y: number; z: number };
   pressedZMm: number;
+  heightIntervalMm?: [number, number];
   screen: { x: number; y: number };
   role: 'probe' | 'fit' | 'validation';
   method: 'stepped' | 'direct' | 'slide';
@@ -91,9 +94,10 @@ export interface CalibrationSession {
     fastAdaptation?: { searchSteps: number; maxSearchSteps: number };
     mode?: string;
     collection?: string;
-    horizontalConfirmed?: boolean;
+    compliantSetupConfirmed?: boolean;
     screenSessionId?: string;
     collectedSamples?: CollectedSample[];
+    independentHeightCheck?: AutoCalibrationEvidence['independentHeightCheck'];
   };
 }
 export interface ApplicationContext {
@@ -107,9 +111,9 @@ export interface ApplicationContext {
 export interface AutoExplorationOptions {
   startPose: CartesianPose;
   page?: ScreenCalibSessionSummary;
-  mode?: 'standard' | 'fast-horizontal';
+  mode?: 'standard' | 'fast-plane';
   collection?: 'tap' | 'slide';
-  horizontalConfirmed?: boolean;
+  compliantSetupConfirmed?: boolean;
 }
 export interface AutoExplorationHost {
   currentPose(): Promise<CartesianPose>;
@@ -118,7 +122,7 @@ export interface AutoExplorationHost {
     ctx: ApplicationContext,
     speed: MotionSpeed,
     acceleration: MotionAcceleration,
-  ): Promise<void>;
+  ): Promise<CartesianPose | undefined>;
   stable(pose: CartesianPose, ctx: ApplicationContext): Promise<void>;
   preflight(
     steps: Array<{ name: string; pose: CartesianPose; options: MotionOptions }>,
@@ -144,6 +148,7 @@ export interface AutoExplorationHost {
       sampleId: string,
       purpose: ProbePurpose,
       settleMs: number,
+      allowBriefContactGaps?: boolean,
     ): Promise<void>;
     targets(
       id: string,

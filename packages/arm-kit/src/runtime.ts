@@ -356,6 +356,8 @@ export class RobotArmRuntime extends RobotKernel {
           return structuredClone(pose);
         },
         move: async (pose, probeOptions) => {
+          const startedAt = performance.now();
+          let submittedAt = startedAt;
           let submitted = false;
           const checkSubmission = () => {
             check();
@@ -399,6 +401,7 @@ export class RobotArmRuntime extends RobotKernel {
                     );
                 },
                 submitted: () => {
+                  submittedAt = performance.now();
                   submitted = true;
                   this.motionSubmitted = true;
                 },
@@ -414,6 +417,7 @@ export class RobotArmRuntime extends RobotKernel {
               this.motionSubmitted = previousMotionSubmitted;
             throw error;
           }
+          const adapterCompletedAt = performance.now();
           const actual = await this.motionExecutor.stable(
             pose,
             5000,
@@ -431,6 +435,12 @@ export class RobotArmRuntime extends RobotKernel {
               'The measured probe position did not reach the requested small step',
               409,
             );
+          probeOptions?.onTiming?.({
+            beforeSubmitMs: Math.round(submittedAt - startedAt),
+            adapterCompletionMs: Math.round(adapterCompletedAt - submittedAt),
+            stableMs: Math.round(performance.now() - adapterCompletedAt),
+          });
+          return actual;
         },
       };
       const collect = async () => {

@@ -27,9 +27,8 @@ export function fitExploration(
     | 'toolGeometryRevision'
     | 'screenGeometryRevision'
   >,
-  fast: boolean,
 ) {
-  const { probes, grid, start, screen } = collection;
+  const { probes, grid, start, screen, fastPlane } = collection;
   const validationGrid = grid.filter(
     (point) => point.target.role === 'validation',
   );
@@ -50,6 +49,10 @@ export function fitExploration(
   const result = autoCalibrationGeometry({
     startPose: start,
     samples,
+    measuredPlane: fastPlane,
+    measuredSurfaceSamples: fastPlane
+      ? [samples[0], ...samples.slice(probes.length)]
+      : undefined,
     screen,
     tool,
     capabilities: capabilities,
@@ -71,9 +74,15 @@ export function fitExploration(
     };
   });
   // Holdouts measure the independently fitted surface and never train it.
-  const validationHeightMaxMm = maxSurfaceResidualMm(
-    result.candidate,
-    validationGrid.map((point) => point.contact),
+  const measuredValidation = fastPlane?.measuredValidation ?? validationGrid;
+  const validationHeightMaxMm = Math.max(
+    fastPlane?.holdoutHeightMm ?? 0,
+    measuredValidation.length
+      ? maxSurfaceResidualMm(
+          result.candidate,
+          measuredValidation.map((point) => point.contact),
+        )
+      : 0,
   );
 
   // Validation targets were excluded from both plane and XY fitting above.
@@ -99,7 +108,13 @@ export function fitExploration(
       409,
     );
   const evidence = {
-    planeSource: fast ? 'assumed-horizontal' : 'measured',
+    planeSource: 'measured',
+    ...(fastPlane && {
+      tiltDeg: fastPlane.tiltDeg,
+      heightRangeMm: fastPlane.heightRangeMm,
+      holdoutHeightMm: fastPlane.holdoutHeightMm,
+      independentHeightCheck: fastPlane.independentHeightCheck,
+    }),
     planeRmseMm: result.quality.rmseMm,
     gridRmsPx,
     gridRmsMm: result.gridRmsMm,

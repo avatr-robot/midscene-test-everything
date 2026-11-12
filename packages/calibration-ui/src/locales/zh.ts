@@ -46,8 +46,8 @@ const calibrationZh: Record<string, string> = {
     '已保存的安装示教由当前相机的各块屏幕共用。',
   'Record the camera-side boundary once to enable automatic camera avoidance.':
     '记录一次相机侧边界，即可在边界验证后自动移动到相机安全位。',
-  'The phone is horizontal, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.':
-    '确认手机水平、触控笔竖直，参考位一侧整条机械臂的路径不会碰到相机，且没有其他障碍物。',
+  'The phone is securely fixed, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.':
+    '确认手机已固定、触控笔竖直，参考位一侧整条机械臂的路径不会碰到相机，且没有其他障碍物。',
   'Move straight from the reference towards the camera and stop at a safe boundary. Leave clearance for the whole arm, then release it before recording.':
     '从参考位朝相机方向直线移动，在仍安全的位置停下。为整条机械臂留足间隙，松手后记录。',
   'Moving to the camera-avoidance position': '正在移动到相机避让安全位',

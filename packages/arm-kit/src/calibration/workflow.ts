@@ -765,6 +765,7 @@ export class CalibrationWorkflow {
         phoneConnected: this.phone.connected(),
         phoneDiagnostics: this.phoneStatus().diagnostics,
         phoneObservations: this.measurements?.phoneObservations,
+        coarsePhoneObservations: this.measurements?.coarsePhoneObservations,
         capture: snapshot?.capture,
         points: snapshot?.points,
         verificationAttempts: s.verificationAttempts,
@@ -1811,8 +1812,9 @@ export class CalibrationWorkflow {
             check: checkCollecting,
             move: async (pose, options) => {
               lastMoveConfirmed = false;
-              await host.move(pose, options);
+              const actual = await host.move(pose, options);
               lastMoveConfirmed = true;
+              return actual;
             },
           },
           reference,
@@ -1871,6 +1873,17 @@ export class CalibrationWorkflow {
       // reference before waiting for a review of the new geometry.
       if (lastMoveConfirmed && s.explorationQuality?.warnings?.length)
         await travelToReference('return');
+      if (measurements.coarsePhoneObservations.length)
+        void this.runtime.auditStore?.record({
+          kind: 'calibration',
+          id: s.id,
+          outcome: 'completed',
+          detail: structuredClone({
+            stage: 'automatic-sampling',
+            deviceId: this.options.deviceId,
+            coarsePhoneObservations: measurements.coarsePhoneObservations,
+          }),
+        });
     };
     const task = this.runtime.collectAutomaticPoints(collectionInput, collect);
     this.captureOperationId = this.runtime.current()?.requestId;
@@ -1999,21 +2012,15 @@ export class CalibrationWorkflow {
       screen,
     };
     const robot = this.runtime.profileStore.getRobot(input.robotProfileId);
-    const result = fitExploration(
-      collection,
-      tool,
-      this.runtime.capabilities,
-      {
-        id: randomUUID(),
-        robotProfileId: robot.id,
-        toolProfileId: tool.id,
-        screenProfileId: s.id,
-        robotGeometryRevision: robot.geometryRevision,
-        toolGeometryRevision: tool.geometryRevision,
-        screenGeometryRevision: 1,
-      },
-      s.explorationMode !== 'standard',
-    );
+    const result = fitExploration(collection, tool, this.runtime.capabilities, {
+      id: randomUUID(),
+      robotProfileId: robot.id,
+      toolProfileId: tool.id,
+      screenProfileId: s.id,
+      robotGeometryRevision: robot.geometryRevision,
+      toolGeometryRevision: tool.geometryRevision,
+      screenGeometryRevision: 1,
+    });
     const candidate = result.candidate;
     const fit: Fit = {
       kind: candidate.kind,
@@ -2340,7 +2347,6 @@ export class CalibrationWorkflow {
     const state = this.status();
     const c = state?.calibration;
     const evidence = c?.auto?.evidence;
-    const fast = state?.explorationMode === 'slide';
     const reasons: string[] = [];
     if (
       state?.stage !== 'review' ||
@@ -2364,7 +2370,7 @@ export class CalibrationWorkflow {
       quality.inliers > quality.total ||
       !Array.isArray(evidence.samples) ||
       evidence.samples.length < 7 ||
-      evidence.planeSource !== (fast ? 'assumed-horizontal' : 'measured') ||
+      evidence.planeSource !== 'measured' ||
       !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
       (evidence.surfaceMaxMm ?? 0) > SAMPLED_SURFACE_LIMIT_MM
     )

@@ -487,7 +487,7 @@ export function WebCalibrationWorkspace({
                     onChange={(e) => setConfirmed(e.target.checked)}
                   >
                     {t(
-                      'The phone is horizontal, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.',
+                      'The phone is securely fixed, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.',
                     )}
                   </Checkbox>
                 )}
@@ -594,7 +594,7 @@ export function WebCalibrationWorkspace({
                       {t(
                         mode === 'standard'
                           ? 'I confirm the setup and clear workspace for sampling and automatic boundary verification.'
-                          : 'I confirm the screen is horizontal and secured, the setup is ready, and the workspace is clear for sampling and automatic boundary verification.',
+                          : 'I confirm the screen is securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.',
                       )}
                     </Checkbox>
                   </>

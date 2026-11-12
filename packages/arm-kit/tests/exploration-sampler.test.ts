@@ -24,10 +24,12 @@ describe('first-time automatic exploration', () => {
   it.each([
     'standard',
     'standard-tilt',
-    'fast-tilt',
+    'fast-tilt-slide',
+    'fast-corner-inset-slide',
+    'fast-height-limit-slide',
     'fast-tap',
     'fast-slide',
-    'fast-adaptive-tap',
+    'fast-refine-stalled',
     'fast-adaptive-slide',
     'fast-hysteresis',
     'fast-offset-hysteresis',
@@ -35,7 +37,6 @@ describe('first-time automatic exploration', () => {
     'press-recovers',
     'bad-validation',
     'fast-no-touch',
-    'fast-deep-recovery',
     'fast-delayed',
     'initial-touch-offset',
     'release-missing',
@@ -78,7 +79,6 @@ describe('first-time automatic exploration', () => {
           : mode.includes('hysteresis')
             ? activationZ + 2.5
             : activationZ;
-      const initialSteps: number[] = [];
       let previousHeld = false;
       let missedPress = false;
       let contact: { x: number; y: number; z: number } | undefined;
@@ -89,13 +89,21 @@ describe('first-time automatic exploration', () => {
       let delayedOnce = false;
       let delayedMoveCount = 0;
       const motions: CartesianPose[] = [];
-      let gridSteps = 0;
       let actualPose = pose(100, -50, startZ);
       const finishedSampling = false;
-      let reacquisitionLift = false;
+      let missedSlide = false;
+      let refining = false;
       let lowestZ = Number.POSITIVE_INFINITY;
       const isFast = !mode.startsWith('standard') && mode !== 'safety-floor';
-      const tilted = mode.endsWith('-tilt');
+      const slopeX =
+        mode === 'fast-height-limit-slide'
+          ? 0.038
+          : mode === 'fast-tilt-slide'
+            ? 0.031
+            : mode === 'standard-tilt'
+              ? 0.015
+              : 0;
+      const tilted = slopeX !== 0;
       const pagePixel = () =>
         contact && touching
           ? {
@@ -127,6 +135,9 @@ describe('first-time automatic exploration', () => {
           screen: { x, y },
         };
       });
+      const cornerTargets = targets.filter(
+        (target) => target.css.x !== 200 && target.css.y !== 125,
+      );
       const screenCalib = {
         findMappedSession: async () => ({ ...page }),
         session: async () => {
@@ -142,8 +153,16 @@ describe('first-time automatic exploration', () => {
                   : page.sampleSnapshot,
           };
         },
-        setSample: async (_id: string, sampleId: string) => {
+        setSample: async (_id: string, sampleId: string, purpose: string) => {
           let screen = pagePixel();
+          if (
+            mode === 'fast-adaptive-slide' &&
+            purpose === 'slide' &&
+            !missedSlide
+          ) {
+            missedSlide = true;
+            screen = null;
+          }
           if (
             mode === 'press-recovers' &&
             !missedPress &&
@@ -239,6 +258,7 @@ describe('first-time automatic exploration', () => {
           AutoExplorationHost['preflight']
         >[0]) => {
           finalPress = step.name.endsWith(' press');
+          refining = step.name.endsWith(' refine');
         },
         move: async (
           target: CartesianPose,
@@ -253,29 +273,25 @@ describe('first-time automatic exploration', () => {
           );
           if (finalPress) finalPressCount++;
           finalPress = false;
-          const point = contactPoint(target, f.tool.offsetMm);
+          const measured = structuredClone(target);
+          if (mode === 'fast-slide') measured.positionMm.z += 0.04;
+          if (mode === 'fast-refine-stalled' && refining)
+            measured.positionMm.z +=
+              activationZ - contactPoint(target, f.tool.offsetMm).z;
+          const point = contactPoint(measured, f.tool.offsetMm);
           const previous = contactPoint(actualPose, f.tool.offsetMm);
-          if (
-            mode === 'fast-adaptive-slide' &&
-            !finishedSampling &&
-            point.x < 50 &&
-            point.y < -75 &&
-            point.z > previous.z &&
-            Math.hypot(point.x - previous.x, point.y - previous.y) < 0.01
-          )
-            reacquisitionLift = true;
           if (!finishedSampling) motions.push(target);
           if (point.z > previous.z && previous.z <= 30)
             releaseProbeStarted = true;
           if (releaseProbeStarted && point.z < previous.z) repressing = true;
-          actualPose = target;
+          actualPose = measured;
           contact = point;
           lowestZ = Math.min(lowestZ, point.z);
           previousHeld = touching;
           const inside =
             point.x >= 0 && point.x <= 200 && point.y <= 0 && point.y >= -100;
           const tiltOffset = tilted
-            ? 0.015 * (point.x - 100) - 0.005 * (point.y + 50)
+            ? slopeX * (point.x - 100) - 0.005 * (point.y + 50)
             : 0;
           touching =
             inside &&
@@ -287,24 +303,21 @@ describe('first-time automatic exploration', () => {
           if (mode === 'repress-missing' && repressing) touching = false;
           if (mode === 'fast-no-touch' && point.x < 50) touching = false;
           if (
-            mode.startsWith('fast-adaptive') ||
-            mode === 'fast-deep-recovery'
-          ) {
-            const localZ =
-              point.x < 50
-                ? mode === 'fast-deep-recovery'
-                  ? 28.25
-                  : 29
-                : activationZ;
-            touching =
-              inside &&
-              (previousHeld ? point.z < localZ + 0.1 : point.z <= localZ);
-          }
+            mode === 'fast-corner-inset-slide' &&
+            cornerTargets.some(
+              ({ screen }) =>
+                Math.hypot(
+                  point.x - (screen.x / 999) * 200,
+                  point.y + (screen.y / 499) * 100,
+                ) < 1,
+            )
+          )
+            touching = false;
           // A remote point that only touches at the floor would need a final
           // press below that floor. It must be rejected before submission.
           if (mode === 'safety-floor' && point.x > 105)
             touching = point.z <= 27.625;
-          return {};
+          return measured;
         },
         stable: async () => undefined,
         stationaryPose: async () => pose(100, -50, startZ),
@@ -317,36 +330,16 @@ describe('first-time automatic exploration', () => {
         currentPose: async () => actualPose,
         screenCalib,
         progress: (current: CalibrationSession) => {
-          const progress = current.auto?.progress;
-          // Inspect acquisition independently of subsequent fitting gates.
-          if (
-            mode === 'fast-deep-recovery' &&
-            progress?.phase === 'grid' &&
-            progress.index === 2
-          )
-            throw new Error('Deep recovery collected');
-          if (
-            progress?.message === 'Initial touch' &&
-            progress.probeZMm !== undefined
-          )
-            initialSteps.push(progress.probeZMm);
-          if (progress?.message === 'Initial touch · refine')
+          if (current.auto?.progress?.message === 'Initial touch · refine')
             expect(previousHeld).toBe(false);
-
-          if (
-            current.auto?.progress?.phase === 'search' &&
-            current.auto.progress.index > 0 &&
-            current.auto.progress.message?.startsWith('Grid ')
-          )
-            gridSteps++;
         },
       };
       const job = runAutoExploration(host as never, session, ctx, {
         startPose: pose(100, -50, startZ),
         ...(isFast
           ? {
-              mode: 'fast-horizontal' as const,
-              horizontalConfirmed: true,
+              mode: 'fast-plane' as const,
+              compliantSetupConfirmed: true,
               collection: mode.endsWith('slide')
                 ? ('slide' as const)
                 : ('tap' as const),
@@ -360,23 +353,32 @@ describe('first-time automatic exploration', () => {
           'snapshot-missing': 'Phone step acknowledgement timed out',
           'snapshot-stale': 'Phone step acknowledgement timed out',
           'safety-floor': 'safety floor',
-          'fast-no-touch': 'fast local height-search budget',
-          'fast-deep-recovery': 'Deep recovery collected',
+          'fast-no-touch': 'safety floor',
+          'fast-height-limit-slide': 'height range',
+          'fast-refine-stalled': 'could not narrow the contact interval',
         };
         if (expected[mode]) {
           await expect(job).rejects.toThrow(expected[mode]);
           if (mode.startsWith('snapshot-')) expect(motions).toHaveLength(0);
+          if (mode === 'fast-refine-stalled')
+            expect(session.auto?.collectedSamples).toBeUndefined();
           if (mode === 'safety-floor')
             expect(lowestZ).toBeGreaterThanOrEqual(27.625);
           if (mode === 'fast-no-touch') {
-            // The first grid point gets one inset retry with the same floor.
-            expect(session.auto?.fastAdaptation).toEqual({
-              searchSteps: 12,
-              maxSearchSteps: 12,
-            });
-            expect(lowestZ).toBeGreaterThanOrEqual(27.625);
+            expect(lowestZ).toBeGreaterThanOrEqual(23);
             expect(session.auto?.collectedSamples).toHaveLength(3);
+            await expect(job).rejects.toMatchObject({
+              details: {
+                confirmedNoTouch: true,
+                safetyFloorZMm: expect.any(Number),
+                commandFloorZMm: expect.any(Number),
+              },
+            });
           }
+          if (mode === 'fast-height-limit-slide')
+            expect(
+              session.auto?.collectedSamples?.some((p) => p.method === 'slide'),
+            ).toBe(false);
           return;
         }
         const collection = await job;
@@ -384,19 +386,13 @@ describe('first-time automatic exploration', () => {
         expect(collection.grid).toHaveLength(isFast ? 6 : 9);
         if (mode === 'standard') expect(finalPressCount).toBe(12);
         const fit = () =>
-          fitExploration(
-            collection,
-            f.tool,
-            f.runtime.capabilities,
-            {
-              id: 'candidate',
-              ...f.binding,
-              robotGeometryRevision: 1,
-              toolGeometryRevision: 1,
-              screenGeometryRevision: 1,
-            },
-            isFast,
-          );
+          fitExploration(collection, f.tool, f.runtime.capabilities, {
+            id: 'candidate',
+            ...f.binding,
+            robotGeometryRevision: 1,
+            toolGeometryRevision: 1,
+            screenGeometryRevision: 1,
+          });
         if (mode === 'bad-validation') {
           const result = fit();
           expect(result.evidence.validationMaxPx).toBeCloseTo(20);
@@ -406,38 +402,86 @@ describe('first-time automatic exploration', () => {
           expect(result.candidate.acceptanceStatus).toBe('pending');
           return;
         }
-        if (mode === 'fast-adaptive-tap' || mode === 'fast-tilt') {
-          const result = fit();
-          expect(result.evidence.planeSource).toBe('assumed-horizontal');
-          expect(result.quality.inliers).toBeLessThan(result.quality.total);
-          expect(result.candidate.acceptanceStatus).toBe('pending');
-          return;
-        }
         const result = fit();
         if (tilted) {
           const { normal } = result.candidate.plane;
-          expect(-normal.x / normal.z).toBeCloseTo(0.015, 3);
-          expect(-normal.y / normal.z).toBeCloseTo(-0.005, 3);
+          expect(-normal.x / normal.z).toBeCloseTo(slopeX, 2);
+          expect(-normal.y / normal.z).toBeCloseTo(-0.005, 2);
         }
         expect(result.candidate.acceptanceStatus).toBe('pending');
         // The simulated screen maps pixels in XY; the measured axes follow its surface.
-        const sizePrecision =
-          tilted || mode.startsWith('fast-adaptive') ? 1 : 4;
+        const sizePrecision = tilted ? 1 : 4;
         expect(result.measuredSize.physicalWidthMm).toBeCloseTo(
-          tilted ? Math.hypot(200, 3) : 200,
+          tilted ? Math.hypot(200, slopeX * 200) : 200,
           sizePrecision,
         );
         expect(result.measuredSize.physicalHeightMm).toBeCloseTo(
           tilted ? Math.hypot(100, 0.5) : 100,
           sizePrecision,
         );
-        expect(result.coverage).toBeGreaterThan(0.6);
+        if (mode === 'fast-corner-inset-slide') {
+          const first = collection.probes[0].contact;
+          for (const point of collection.grid.filter(
+            (p) => p.target.role === 'fit',
+          )) {
+            const targetX = (point.target.screen.x / 999) * 200;
+            const targetY = (-point.target.screen.y / 499) * 100;
+            const dx = first.x - targetX;
+            const dy = first.y - targetY;
+            const fraction = 3 / Math.hypot(dx, dy);
+            expect(point.contact.x).toBeCloseTo(targetX + dx * fraction);
+            expect(point.contact.y).toBeCloseTo(targetY + dy * fraction);
+          }
+        } else {
+          expect(result.coverage).toBeGreaterThan(0.6);
+        }
         expect(result.gridRmsMm).toBeLessThan(0.75);
         expect(result.evidence.validationMaxMm).toBeLessThan(1);
-        if (mode === 'fast-slide')
+        if (isFast) {
+          expect(result.evidence.planeSource).toBe('measured');
           expect(
-            session.auto?.collectedSamples?.filter((p) => p.method === 'slide'),
-          ).toHaveLength(5);
+            session.auto?.collectedSamples
+              ?.filter((p) => p.role === 'fit')
+              .map((p) => p.method),
+          ).toEqual(['stepped', 'stepped', 'stepped', 'stepped']);
+        }
+        if (mode === 'fast-tilt-slide') {
+          expect(result.evidence.heightRangeMm).toBeGreaterThan(4);
+          expect(result.evidence.heightRangeMm).toBeLessThanOrEqual(6);
+        }
+        if (mode === 'fast-slide' || mode === 'fast-tilt-slide')
+          expect(
+            session.auto?.collectedSamples
+              ?.filter((p) => p.role === 'validation')
+              .map((p) => p.method),
+          ).toEqual(['stepped', 'slide']);
+        if (mode === 'fast-slide') {
+          const first = collection.probes[0];
+          expect(first.heightIntervalMm?.[0]).toBeLessThanOrEqual(activationZ);
+          expect(first.heightIntervalMm?.[1]).toBeGreaterThan(activationZ);
+          expect(first.pressedZ).toBeCloseTo(first.contact.z - 0.5 + 0.04);
+          expect(result.evidence.independentHeightCheck).toMatchObject({
+            heightIntervalMm: [expect.any(Number), expect.any(Number)],
+            elapsedMs: expect.any(Number),
+          });
+        }
+        if (mode === 'fast-tap') {
+          for (const point of collection.grid.filter(
+            (p) => p.target.role === 'fit',
+          )) {
+            const [touchZ, clearZ] = point.heightIntervalMm!;
+            expect(clearZ - touchZ).toBeLessThanOrEqual(0.250001);
+            expect(point.pressedZ).toBeCloseTo(touchZ, 6);
+          }
+        }
+        if (mode === 'fast-adaptive-slide') {
+          expect(missedSlide).toBe(true);
+          expect(
+            session.auto?.collectedSamples
+              ?.filter((p) => p.role === 'validation')
+              .map((p) => p.method),
+          ).toEqual(['stepped', 'stepped']);
+        }
         if (mode === 'press-recovers') expect(missedPress).toBe(true);
         expect(f.store.getScreen(f.screen.id)).toEqual(f.screen);
       } finally {

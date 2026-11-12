@@ -41,16 +41,8 @@ export function explorationTargets(
     )
     .slice(0, 4);
   const checks = targets.filter((t) => t.purpose === 'check').slice(0, 2);
-  const rows = [...new Set([...fit, ...checks].map((t) => t.point.y))].sort(
-    (a, b) => a - b,
-  );
-  return [...fit, ...checks].sort(
-    (a, b) =>
-      a.point.y - b.point.y ||
-      (rows.indexOf(a.point.y) % 2
-        ? b.point.x - a.point.x
-        : a.point.x - b.point.x),
-  );
+  fit.sort((a, b) => a.point.y - b.point.y || a.point.x - b.point.x);
+  return [fit[0], fit[3], fit[1], fit[2], ...checks];
 }
 
 /** Match dev's target generation: fixed inset and mapped screen bounds only. */

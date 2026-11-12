@@ -357,6 +357,8 @@ export function maxSurfaceResidualMm(
 export function autoCalibrationGeometry(input: {
   startPose: CartesianPose;
   samples: AutoCalibrationSample[];
+  measuredPlane?: ReturnType<typeof fitContactPlane>;
+  measuredSurfaceSamples?: AutoCalibrationSample[];
   screen: ScreenProfile;
   tool: ToolProfile;
   capabilities: RobotArmCapabilities;
@@ -378,12 +380,14 @@ export function autoCalibrationGeometry(input: {
   );
   const samples = deduped.length >= 5 ? deduped : input.samples;
   const sampleWeights = samples.map((sample) => sample.weight ?? 1);
-  const { plane, quality } = fitContactPlane(
-    samples.map((sample) => sample.robot),
-    rotate(input.startPose.orientation, input.tool.contactDirection),
-    {},
-    sampleWeights,
-  );
+  const { plane, quality } =
+    input.measuredPlane ??
+    fitContactPlane(
+      samples.map((sample) => sample.robot),
+      rotate(input.startPose.orientation, input.tool.contactDirection),
+      {},
+      sampleWeights,
+    );
   const robotXY = samples.map((sample) => ({
     x: sample.robot.x,
     y: sample.robot.y,
@@ -474,8 +478,9 @@ export function autoCalibrationGeometry(input: {
     ) / samples.length,
   );
   const { surface, maxAbsMm: surfaceMaxMm } = surfaceCompensation(
-    samples,
-    sampleWeights,
+    input.measuredSurfaceSamples ?? samples,
+    input.measuredSurfaceSamples?.map((sample) => sample.weight ?? 1) ??
+      sampleWeights,
     geometry,
     input.screen,
     measuredSize,

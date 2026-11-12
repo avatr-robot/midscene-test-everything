@@ -37,6 +37,7 @@ export class BatchClient {
     planVersion: string;
     auto: true;
     horizontalConfirmed: true;
+    compliantSetupConfirmed?: true;
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual';
     corridorConfirmed?: true;
