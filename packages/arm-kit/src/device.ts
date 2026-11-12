@@ -13,6 +13,7 @@ import {
   type CalibrationProfile,
   type MappedScreenProfile,
   RobotArmError,
+  SCREEN_DRIFT_DETECTION_ENABLED,
   type ScreenAction,
   type ScreenPoint,
   type VisionBinding,
@@ -340,7 +341,10 @@ export class RobotArmDevice extends AbstractInterface {
       height: context.screen.pixelHeight,
     });
     this.assertAlive();
-    if (snapshot.binding.validity?.state === 'invalid')
+    if (
+      SCREEN_DRIFT_DETECTION_ENABLED &&
+      snapshot.binding.validity?.state === 'invalid'
+    )
       throw new RobotArmError(
         'CALIBRATION_MISMATCH',
         'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
@@ -608,7 +612,7 @@ export class RobotArmDevice extends AbstractInterface {
         const runtime = controllerRuntime(this.options.arm);
         let stopping: Promise<void> | undefined;
         const cancel = () => {
-          stopping = this.options.arm.stop();
+          stopping = this.options.arm.stopInterruptedWork();
           void stopping.catch(() => undefined);
         };
         abort.addEventListener('abort', cancel, { once: true });

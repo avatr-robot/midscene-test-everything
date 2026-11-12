@@ -459,7 +459,9 @@ export function CalibrationPowerButton({
   );
   const label =
     control.action === 'recover'
-      ? 'Check Recovery'
+      ? config.armState?.requiresOperatorRecovery === false
+        ? 'Waiting for controller recovery'
+        : 'Check Recovery'
       : control.action === 'payload'
         ? 'Sync Tool Payload'
         : 'Enable Robot';

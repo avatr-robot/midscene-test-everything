@@ -126,7 +126,7 @@ export class ArmController {
               .cancel(action.requestId)
               .catch((error) => {
                 this.deviceStopFailures.set(ownerId, error);
-                this.deviceActions.stop(error);
+                this.deviceActions.cancelAll(error);
                 throw error;
               });
             void cancelling.catch(() => undefined);
@@ -164,7 +164,8 @@ export class ArmController {
               this.positionUnknown = true;
             if (!fromCalibrationId && error.details?.motionOccurred)
               this.lastCalibrationId = action.calibrationProfileId;
-            if (error.details?.recoveryRequired) this.deviceActions.stop(error);
+            if (error.details?.recoveryRequired)
+              this.deviceActions.cancelAll(error);
           }
           throw error;
         } finally {
@@ -277,7 +278,7 @@ export class ArmController {
         try {
           result = await work(abort);
         } catch (error) {
-          if (safeTarget && (await this.#runtime.state()).recoveryRequired)
+          if (safeTarget && this.#runtime.recoveryReason)
             this.positionUnknown = true;
           throw error;
         }
@@ -323,6 +324,12 @@ export class ArmController {
     await this.#runtime.stop();
   }
 
+  /** @internal Stop a cancelled Device operation and discard its pending successors. */
+  stopInterruptedWork(): Promise<void> {
+    this.deviceActions.cancelAll(new Error('Arm operation interrupted'));
+    return this.#runtime.stopCalibrationOperation();
+  }
+
   async pause(): Promise<void> {
     this.deviceActions.stop(new Error('Arm paused'));
     await this.#runtime.pause();
@@ -335,7 +342,7 @@ export class ArmController {
 
   async resume(): Promise<void> {
     await this.#runtime.resume();
-    await this.recover();
+    if (!this.#runtime.requiresOperatorRecovery) this.deviceActions.resume();
   }
 
   async recover(): Promise<void> {

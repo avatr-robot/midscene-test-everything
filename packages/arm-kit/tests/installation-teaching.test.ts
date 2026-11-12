@@ -77,7 +77,8 @@ it('returns from boundary readback noise without commanding a point across the p
       cameraBoundary: { point: { x: 164, y: 28 }, normal: { x: 0.6, y: 0.8 } },
       corridorConfirmed: true,
     });
-    const justOutside = pose(160 + 0.000006, 30 + 0.000008, 75);
+    // A 0.5 mm readback error along the taught plane's unit normal.
+    const justOutside = pose(160.3, 30.4, 75);
     const move = rstest.spyOn(f.adapter, 'moveLinear');
     f.adapter.setPoseForTesting(justOutside);
     await f.runtime.positionInstallationPoint(
@@ -101,6 +102,8 @@ it('returns from boundary readback noise without commanding a point across the p
       'reference',
     );
     expect(move.mock.calls.map(([p]) => p.positionMm.z)).toEqual([90, 90, 90]);
+    expect(move.mock.calls[0][0].positionMm.x).toBeCloseTo(160, 9);
+    expect(move.mock.calls[0][0].positionMm.y).toBeCloseTo(30, 9);
     for (const [, options] of move.mock.calls) {
       expect(options).toMatchObject({
         speed: motion.actionSpeed,
@@ -109,16 +112,18 @@ it('returns from boundary readback noise without commanding a point across the p
     }
     expect(f.adapter.movements.at(-1)).toEqual(reference);
     move.mockClear();
-    // The same tiny excess is still rejected when it belongs to a requested target.
+    // Even a much smaller excess is rejected for a requested target.
     await expect(
       f.runtime.collectAutomaticPoints(binding, (host) =>
-        host.move(justOutside),
+        host.move(pose(160.000006, 30.000008, 75)),
       ),
     ).rejects.toMatchObject({ code: 'CAMERA_BOUNDARY_EXCEEDED' });
-    f.adapter.setPoseForTesting(pose(160.006, 30.008, 75));
-    await expect(
-      f.runtime.positionInstallationPoint({ ...binding, motion }, 'reference'),
-    ).rejects.toMatchObject({ code: 'CAMERA_BOUNDARY_EXCEEDED' });
+    f.adapter.setPoseForTesting(pose(160.3006, 30.4008, 75));
+    for (const point of ['reference', 'cameraBoundary'] as const) {
+      await expect(
+        f.runtime.positionInstallationPoint({ ...binding, motion }, point),
+      ).rejects.toMatchObject({ code: 'CAMERA_BOUNDARY_EXCEEDED' });
+    }
     expect(move).not.toHaveBeenCalled();
   } finally {
     await f.cleanup();

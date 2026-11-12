@@ -1,4 +1,5 @@
 export const assistedCalibrationZh: Record<string, string> = {
+  'Calibration saved · Camera mapping changed': '标定已保存，相机映射已变更',
   'Phone step acknowledgement timed out. Touch at this position is unknown.':
     '手机未在时限内确认本步，当前位置的接触状态未知。请检查标定页和连接后重试。',
   'The phone cancelled the active pointer. Touch at this position is unknown.':
@@ -12,16 +13,19 @@ export const assistedCalibrationZh: Record<string, string> = {
     '开始标定前需要重新检查相机映射。',
   'The robot was stopped manually. Confirm recovery before sampling.':
     '机械臂已手动停止。恢复采样前，请确认恢复。',
+  'Waiting for controller recovery': '正在等待控制器恢复',
+  'Release the emergency stop. Recovery is checked automatically.':
+    '请解除急停，系统会自动检查恢复状态。',
   'Emergency stop was triggered. Confirm recovery before sampling.':
     '急停已触发。解除急停后，请确认恢复。',
-  'Resolve the controller fault and confirm recovery before sampling.':
-    '请处理控制器报警，再确认恢复。',
+  'Clear the controller fault. Recovery is checked automatically.':
+    '请处理控制器报警，系统会自动检查恢复状态。',
   'Connection interrupted. Checking readiness before returning to sampling setup.':
     '连接中断，重连并检查机械臂状态后将返回采样准备。',
   'Resume the robot to continue calibration.':
     '请在顶部恢复机械臂运行，再继续标定。',
-  'Check controller recovery before collecting points.':
-    '采样前，请先检查并恢复控制器。',
+  'Waiting for the controller to confirm it is ready.':
+    '正在等待控制器确认就绪状态。',
   'Prepare the robot and tool payload before collecting points.':
     '采样前，请确认机械臂已使能并已应用工具负载。',
   'No measurement recorded for this step.': '本次标定未保存这一步的测量记录。',
@@ -63,6 +67,8 @@ export const assistedCalibrationZh: Record<string, string> = {
     '直接拖动四个角点，让绿框包含完整显示区域和系统栏。',
   '{0} fit markers · {1} held out · maximum {2} CSS px':
     '{0} 个拟合标记 · {1} 个独立验证标记 · 最大偏差 {2} CSS px',
+  '{0} fit markers · maximum fit error {1} CSS px · no check markers visible':
+    '{0} 个拟合标记 · 最大拟合误差 {1} CSS px · 未检测到独立验证标记',
   'Target circles and measured landings': '目标圆与实际落点',
   'Check all four display edges, including the system bars, before continuing.':
     '请对照两幅画面，核对四边是否包含完整屏幕和系统栏。',
@@ -126,6 +132,9 @@ export const assistedCalibrationZh: Record<string, string> = {
     '请先记录标定参考位，再开始采点。',
 
   'Calibration Reference Position': '标定参考位',
+  'Record sampling start': '记录采样起点',
+  'Installation teaching is saved. Before sampling, place the tip 20–50 mm above the centre of {0}, release the arm and record this screen’s starting position.':
+    '已沿用安装示教。采样前，请将笔尖放在「{0}」中心上方 2–5 cm，松开机械臂，记录这块屏幕的采样起点。',
   'Record Reference Position': '记录参考位',
   'Set a calibration reference position': '设置标定参考位',
   'Reference position recorded': '参考位已记录',
@@ -229,6 +238,8 @@ export const assistedCalibrationZh: Record<string, string> = {
     '请回到手机标定页，并恢复默认缩放。',
   'Scan the QR code again to connect.': '请用手机重新扫码连接。',
   'Phone paused': '手机页面已暂停',
+  'Open the calibration page on your phone and keep it in the foreground.':
+    '请在手机上打开标定网页，并保持页面在前台。',
   'Phone disconnected': '手机连接已断开',
   'Phone screen: {0} × {1} CSS px': '手机整屏：{0} × {1} CSS px',
   'From phone screen · {0} × {1} px': '来自手机整屏比例 · {0} × {1} px',

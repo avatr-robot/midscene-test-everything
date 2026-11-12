@@ -41,12 +41,18 @@ async function photograph(
 
 test('scores fit and independent marker errors against viewport size with measurement slack', () => {
   const fit = { count: 4, meanErrorCssPx: 3.01, maxErrorCssPx: 4.01 };
-  const validation = { ...fit, count: 2 };
+  const validation = { count: 2, meanErrorCssPx: 5.32, maxErrorCssPx: 6.56 };
   const accuracy = { fit, validation, points: [] };
+  // At 400 CSS px, the reported check errors are 1.33% mean and 1.64% max.
   expect(mappingQualityWarnings(accuracy, layout)).toEqual([]);
-  validation.maxErrorCssPx = 6;
+  validation.meanErrorCssPx = 6.6;
+  validation.maxErrorCssPx = 8.8;
+  expect(mappingQualityWarnings(accuracy, layout)).toEqual([]);
+  validation.meanErrorCssPx = 8;
+  validation.maxErrorCssPx = 9;
   expect(mappingQualityWarnings(accuracy, layout)).toEqual([
-    { label: 'Check marker maximum error', percent: 1.5, targetPercent: 1 },
+    { label: 'Check marker mean error', percent: 2, targetPercent: 1.5 },
+    { label: 'Check marker maximum error', percent: 2.25, targetPercent: 2 },
   ]);
   expect(
     mappingQualityWarnings(accuracy, { width: 1600, height: 800 }),
@@ -123,6 +129,8 @@ test.each(occludedPairs)(
 test('reports a displaced remaining check marker', async () => {
   const shifted = await photograph(true, layout.markers.slice(0, 5));
   const { accuracy } = await detectCalibrationMarkers(shifted, layout.markers);
+  // The photographed check marker is displaced by 10 CSS pixels.
+  expect(accuracy.validation.maxErrorCssPx).toBeGreaterThan(9);
   expect(mappingQualityWarnings(accuracy, layout).map((w) => w.label)).toEqual([
     'Check marker mean error',
     'Check marker maximum error',

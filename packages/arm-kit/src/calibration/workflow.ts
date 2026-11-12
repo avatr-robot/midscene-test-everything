@@ -470,7 +470,7 @@ export class CalibrationWorkflow {
       awaitingSocketRecovery:
         this.socketRecovery?.session === s &&
         this.socketRecovery.stopRevision === this.runtime.stopRevision &&
-        this.runtime.recoveryReason === 'socket-disconnect',
+        this.runtime.canRecoverSamplingSocket(this.socketRecovery.operationId),
       phoneConnected: this.phone?.connected() ?? false,
       layout: s.mapping?.layout ?? this.phone?.update?.layout,
     });
@@ -1353,9 +1353,13 @@ export class CalibrationWorkflow {
         await this.assertMechanicalFrame();
         this.recordPositionRequested = false;
         s.error = undefined;
+        // Replacing an existing reference starts a new teaching draft. A new
+        // screen only needs a sampling start within the shared installation.
+        if (s.referencePosition || !s.teachingId) {
+          s.cameraBoundaryPosition = undefined;
+          s.teachingId = undefined;
+        }
         s.referencePosition = undefined;
-        s.cameraBoundaryPosition = undefined;
-        s.teachingId = undefined;
         s.stage = 'positioning';
         this.capture = this.recordPosition()
           .catch((e) => {
@@ -1651,6 +1655,19 @@ export class CalibrationWorkflow {
         409,
       );
     await this.assertMechanicalFrame(true);
+    const input = this.input!;
+    if (
+      this.runtime.profileStore.getTool(input.toolProfileId).contactFrame ===
+        'flange' &&
+      (!s.teachingId ||
+        this.runtime.profileStore.installationTeaching(input)?.id !==
+          s.teachingId)
+    )
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'Save installation teaching before flange contact calibration',
+        409,
+      );
     this.captureStopRevision = this.runtime.stopRevision;
     s.automaticWorkflow = automaticWorkflow;
     s.explorationMode = mode;
@@ -1929,10 +1946,11 @@ export class CalibrationWorkflow {
     } else {
       s.safePosition = undefined;
       s.stage = 'return-ready';
-      s.error =
-        s.calibration.auto?.cameraVisibility?.clear === false
-          ? 'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.'
-          : 'No reachable camera-clear Safe Position was found within the bounded search.';
+      if (s.teachingId)
+        s.error =
+          s.calibration.auto?.cameraVisibility?.clear === false
+            ? 'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.'
+            : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }
     this.changed();
   }
@@ -2255,7 +2273,7 @@ export class CalibrationWorkflow {
     if (!s.result) s.stage = 'cancelled';
   }
   private async stopPendingWork() {
-    if (this.ownsOperation()) await this.runtime.stop();
+    if (this.ownsOperation()) await this.runtime.stopCalibrationOperation();
     await this.capture;
     await this.verification;
   }
@@ -2357,12 +2375,7 @@ export class CalibrationWorkflow {
       const screen = this.runtime.profileStore.getScreen(
         c.candidate!.screenProfileId,
       );
-      const warnings = explorationQualityWarnings(
-        screen,
-        quality,
-        evidence,
-        fast,
-      );
+      const warnings = explorationQualityWarnings(screen, quality, evidence);
       if (state?.mapping)
         warnings.push(
           ...mappingQualityWarnings(

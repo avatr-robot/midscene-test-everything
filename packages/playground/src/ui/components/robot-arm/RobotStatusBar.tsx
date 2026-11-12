@@ -92,7 +92,8 @@ export function RobotStatusBar({
   const name = useConnection((state) => state.adapter?.name);
   const language = useLanguage();
   const zh = language === 'zh';
-  const [data, setData] = useState<Snapshot>();
+  type ScreenSnapshot = Snapshot & { cameraId?: string };
+  const [data, setData] = useState<ScreenSnapshot>();
   const [queryError, setQueryError] = useState<string>();
   const [commandError, setCommandError] = useState<string>();
   const [open, setOpen] = useState(false);
@@ -100,7 +101,7 @@ export function RobotStatusBar({
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const pending = useRef(false);
-  const confirmation = useRef<Snapshot>();
+  const confirmation = useRef<ScreenSnapshot>();
   const choose = (action: Action) => {
     confirmation.current = data;
     setCommandError(undefined);
@@ -108,7 +109,8 @@ export function RobotStatusBar({
   };
   const confirmationChanged = Boolean(
     confirm &&
-      (confirmation.current?.session !== data?.session ||
+      (confirmation.current?.cameraId !== cameraId ||
+        confirmation.current?.session !== data?.session ||
         confirmation.current?.tool?.toolProfileId !==
           data?.tool?.toolProfileId ||
         confirmation.current?.tool?.toolRevision !== data?.tool?.toolRevision ||
@@ -134,7 +136,7 @@ export function RobotStatusBar({
             value.error?.message ?? value.error ?? `HTTP ${response.status}`,
           );
         if (active) {
-          setData(value);
+          setData({ ...value, cameraId });
           setQueryError(undefined);
         }
       } catch (error) {
@@ -159,6 +161,7 @@ export function RobotStatusBar({
     state.status.quality.stale;
   const connected = Boolean(state?.connected);
   const locked =
+    data?.cameraId !== cameraId ||
     busy ||
     Boolean(controlPending) ||
     stale ||
@@ -186,7 +189,11 @@ export function RobotStatusBar({
     Boolean(faults.length || paused || data?.state.recoveryRequired);
   const execute = async (action: Action, expected = data) => {
     if (pending.current && action !== 'emergencyStop') return;
-    if (!expected) return;
+    if (
+      !expected ||
+      (action !== 'emergencyStop' && expected.cameraId !== cameraId)
+    )
+      return;
     pending.current = true;
     setBusy(true);
     setCommandError(undefined);
@@ -460,14 +467,17 @@ export function RobotStatusBar({
               {zh ? '继续' : 'Resume'}
             </Button>
           )}
-          {(data?.state.recoveryRequired || controlError) && !paused && (
-            <Button
-              disabled={locked || Boolean(faults.length)}
-              onClick={() => choose('recover')}
-            >
-              {t('Check Recovery')}
-            </Button>
-          )}
+          {((data?.state.recoveryRequired &&
+            data.state.requiresOperatorRecovery !== false) ||
+            controlError) &&
+            !paused && (
+              <Button
+                disabled={locked || Boolean(faults.length)}
+                onClick={() => choose('recover')}
+              >
+                {t('Check Recovery')}
+              </Button>
+            )}
           {settings}
           <Badge count={faults.length}>
             <Button

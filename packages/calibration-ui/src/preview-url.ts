@@ -25,3 +25,11 @@ export function cameraPreviewUrl(base: string, viewer: string) {
   params.set('viewer', viewer);
   return `${base}/camera/preview?${params.toString()}`;
 }
+
+/** The raw image is shared by all screens observed by this camera. */
+export function rawCameraPreviewUrl(cameraId: string, viewer: string) {
+  const params = new URLSearchParams({ id: cameraId, view: 'raw', viewer });
+  const client = previewClientId();
+  if (client) params.set('client', client);
+  return `/api/cameras/preview?${params}`;
+}

@@ -13,11 +13,12 @@ import { markerSvg } from '@midscene/arm-kit/internal/camera/calibration-markers
 import { CameraSession } from '@midscene/arm-kit/internal/camera/session';
 import { ProfileStore } from '@midscene/arm-kit/internal/runtime/profile-store';
 import { TestRobotAdapter } from '@midscene/arm-kit/internal/testkit/test-adapter';
-import { afterEach, expect, it } from '@rstest/core';
+import { afterEach, expect, it, rstest } from '@rstest/core';
 import sharp from 'sharp';
 import { PlaygroundDevices } from '../src/server/devices';
 import { PhonePairings } from '../src/server/phone-pairings';
 import { ScreenCalibration } from '../src/server/screen-calibration';
+import { ScreenControl } from '../src/server/screen-control';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -54,6 +55,8 @@ async function fixture({ screens = true }: { screens?: boolean } = {}) {
       return session;
     },
     release: async () => {},
+    clearPerspective: async (_id: string, screenId?: string) =>
+      (screenId ? scoped.get(screenId) : root)?.clearPerspective(),
     close: async () => {},
   } as unknown as CameraSessionManager;
   const pairings = new PhonePairings(join(directory, 'pairings.json'));
@@ -224,6 +227,13 @@ it('binds each phone once, gives it distinct markers and applies all passing per
     id: f.session.id,
     token: f.session.token,
   });
+  // A delayed cancellation from Add Screen must keep an applied result.
+  await f.service.pageAction({
+    action: 'delete-screen',
+    cameraId: 'cam',
+    id: second.targetId,
+    onlyIfEmpty: true,
+  });
   expect(
     f.devices.entries.get(first.targetId)?.camera.getCorrection(),
   ).toBeDefined();
@@ -234,6 +244,67 @@ it('binds each phone once, gives it distinct markers and applies all passing per
     first.targetHost.service.setup().selection?.toolProfileId,
   );
   expect(f.adapter.movements).toHaveLength(0);
+});
+it('waits for the iPhone origin before projecting its full display from the markers', async () => {
+  const f = await fixture();
+  const { page, targetHost, targetId } = await f.connect();
+  const initial = targetHost.service.phoneObservation()!;
+  const layout = {
+    ...initial.layout,
+    screen: { ...initial.layout.screen, height: 839 },
+    insetDiagnostics: {
+      version: 1 as const,
+      userAgent: 'iPhone',
+      viewportMeta: null,
+      measurementMatchesViewport: false,
+      reason: 'awaiting-origin-tap',
+    },
+  };
+  const update = {
+    ...initial,
+    platform: 'ios' as const,
+    displayMode: 'standalone' as const,
+    layout,
+    sequence: 2,
+    markersPainted: false,
+  };
+  targetHost.service.receivePhone(update);
+  expect(page.summary()).toMatchObject({
+    awaitingOriginTap: true,
+    markersReady: false,
+  });
+  targetHost.service.receivePhone({
+    ...update,
+    sequence: 3,
+    markersPainted: true,
+    layout: {
+      ...layout,
+      revision: 2,
+      topInset: 0,
+      insetDiagnostics: {
+        ...layout.insetDiagnostics,
+        reason: 'touch-origin',
+        measurementMatchesViewport: true,
+      },
+    },
+  });
+  expect(page.summary()).toMatchObject({
+    awaitingOriginTap: false,
+    markersReady: true,
+  });
+  await f.render();
+  const detection = (await f.service.markerAction({
+    action: 'detect',
+    cameraId: 'cam',
+    id: f.session.id,
+    token: f.session.token,
+    targetIds: [targetId],
+  })) as MarkerCalibrationDetectionResponse;
+  const result = detection.session.targets.find(
+    (target) => target.id === targetId,
+  )?.result;
+  expect(result?.points.topLeft.y).toBeCloseTo(50, -1);
+  expect(result?.points.bottomLeft.y).toBeCloseTo(889, -1);
 });
 it('applies a screen mapping when only its four outer markers remain visible', async () => {
   const f = await fixture();
@@ -586,6 +657,11 @@ it('leaves an extra phone waiting until the original first-calibration UI alloca
 
 it('keeps commands gated while a real Controller queue is occupied, then grants the calibration session', async () => {
   const f = await fixture();
+  const other = await f.devices.addScreen('cam', 'Other screen');
+  await f.devices.open(other.id);
+  const control = new ScreenControl(f.devices, () => undefined);
+  const tapOther = () =>
+    control.perform(other.id, { type: 'tap', point: { x: 10, y: 10 } });
   let release!: () => void;
   let entered!: () => void;
   const ready = new Promise<void>((resolve) => {
@@ -600,11 +676,14 @@ it('keeps commands gated while a real Controller queue is occupied, then grants 
   });
   try {
     await ready;
-    const status = (await f.devices.startCalibration('cam')) as {
+    const opening = f.devices.startCalibration('cam');
+    await expect(tapOther()).rejects.toMatchObject({ code: 'BUSY' });
+    const status = (await opening) as {
       phase: string;
       attemptId: string;
     };
     expect(status.phase).toBe('queued');
+    await expect(tapOther()).rejects.toMatchObject({ code: 'BUSY' });
     expect(() =>
       f.devices.assertCalibrationRunning('cam', status.attemptId),
     ).toThrow('Controller queue');
@@ -612,6 +691,7 @@ it('keeps commands gated while a real Controller queue is occupied, then grants 
     release();
     await owner;
     await f.devices.entries.get('cam')!.calibration!.ready;
+    await expect(tapOther()).rejects.toMatchObject({ code: 'BUSY' });
     expect(() =>
       f.devices.assertCalibrationRunning('cam', status.attemptId),
     ).not.toThrow();
@@ -771,23 +851,151 @@ it('keeps paired pages at home on restart until their own calibration screen ope
   expect(host.service.status()).toBeNull();
   expect(f.adapter.movements).toHaveLength(0);
 });
-it('forgets an offline page and keeps the screen it served', async () => {
+it('removes a forgotten phone and its perspective from saved screens and open marker sessions', async () => {
   const f = await fixture();
-  const { page, targetId } = await f.connect();
+  const android = await f.connect();
+  const harmony = await f.connect();
+  const command = { cameraId: 'cam', id: f.session.id, token: f.session.token };
+  await f.render();
+  await f.service.markerAction({ ...command, action: 'detect' });
+  await f.service.markerAction({ ...command, action: 'apply' });
+  const camera = f.devices.entries.get(android.targetId)!.camera;
+  expect(camera.hasSavedPerspective()).toBe(true);
+  await expect(
+    f.service.pageAction({ action: 'forget', id: android.page.saved.id }),
+  ).rejects.toThrow('still connected');
   await f.service.pageAction({
     action: 'release',
-    id: page.saved.id,
+    id: android.page.saved.id,
     keepBinding: true,
   });
-  expect(f.devices.screens().some((screen) => screen.id === targetId)).toBe(
-    true,
-  );
-  // No phone ever reported on this page in this test, so it counts as offline.
-  await f.service.pageAction({ action: 'forget', id: page.saved.id });
-  expect(f.store.list().screenPages).toHaveLength(0);
-  expect(f.devices.screens().some((screen) => screen.id === targetId)).toBe(
-    true,
-  );
+  await f.service.pageAction({ action: 'forget', id: android.page.saved.id });
+  expect(await f.service.phoneHost(android.token)).toBeUndefined();
+  expect(camera.hasSavedPerspective()).toBe(false);
+  expect(f.devices.screens()).toMatchObject([
+    { id: harmony.targetId, pageKey: harmony.pageKey, hasCorrection: true },
+  ]);
+  expect(
+    await f.service.markerAction({ ...command, action: 'status' }),
+  ).toMatchObject({ targets: [{ id: harmony.targetId }] });
+  await f.store.load();
+  expect(f.store.list().screenPages?.map((p) => p.id)).toEqual([
+    harmony.page.saved.id,
+  ]);
+  expect(f.devices.screens().map((s) => s.id)).toEqual([harmony.targetId]);
+  expect(f.adapter.movements).toHaveLength(0);
+});
+it('forgets a bound offline page with the camera unplugged and keeps a released page’s former screen', async () => {
+  const f = await fixture();
+  const bound = await f.connect();
+  const released = await f.connect();
+  const legacyToken = new URL(
+    f.host.service.phoneStatus().links[0].url,
+  ).searchParams.get('token');
+  await f.service.pageAction({ action: 'release', id: released.page.saved.id });
+  await f.service.pageAction({
+    action: 'release',
+    id: bound.page.saved.id,
+    keepBinding: true,
+  });
+  await f.devices.stop('cam');
+  for (const { page } of [released, bound])
+    await f.service.pageAction({ action: 'forget', id: page.saved.id });
+  expect(f.store.list().screenPages).toEqual([]);
+  expect(f.devices.screens().map((s) => s.id)).toEqual([released.targetId]);
+  expect(await f.devices.resolvePhoneHost(legacyToken)).toBeUndefined();
+  expect(f.devices.entries.size).toBe(0);
+});
+it('keeps removed marker targets out of every session and camera discovery, including the last target', async () => {
+  const f = await fixture();
+  const first = await f.connect();
+  const second = await f.connect();
+  const command = { cameraId: 'cam', id: f.session.id, token: f.session.token };
+  const reopened = await f.service.create('cam', undefined, [
+    first.targetId,
+    second.targetId,
+  ]);
+  await f.service.markerAction({
+    ...command,
+    action: 'remove',
+    targetId: second.targetId,
+  });
+  expect(f.devices.screens().map((s) => s.id)).toEqual([first.targetId]);
+  expect(second.page.summary()).toMatchObject({
+    mode: 'waiting',
+    screenId: undefined,
+  });
+  expect(first.page.summary()).toMatchObject({
+    mode: 'markers',
+    screenId: first.targetId,
+  });
+  expect(
+    await f.service.markerAction({
+      action: 'status',
+      cameraId: 'cam',
+      id: reopened.id,
+      token: reopened.token,
+    }),
+  ).toMatchObject({
+    targets: [{ id: first.targetId }],
+    excludedPageIds: [second.page.saved.id],
+  });
+  await Promise.all([
+    expect(
+      f.service.markerAction({
+        ...command,
+        action: 'remove',
+        targetId: first.targetId,
+      }),
+    ).resolves.toMatchObject({ state: 'cancelled', targets: [] }),
+    expect(
+      f.service.markerAction({
+        ...command,
+        action: 'add',
+        name: 'Stale auto-add',
+      }),
+    ).rejects.toMatchObject({ code: 'MARKER_CALIBRATION_EXPIRED' }),
+  ]);
+  await f.store.load();
+  await f.devices.startAll(async () => [], ['cam']);
+  expect([...f.devices.entries.keys()]).toEqual(['cam']);
+  expect(f.devices.screens()).toEqual([]);
+  expect(f.adapter.movements).toHaveLength(0);
+});
+it('can remove a saved marker target left without its page by an older version', async () => {
+  const f = await fixture();
+  const android = await f.connect();
+  const harmony = await f.connect();
+  const command = { cameraId: 'cam', id: f.session.id, token: f.session.token };
+  await f.render();
+  await f.service.markerAction({ ...command, action: 'detect' });
+  await f.service.markerAction({ ...command, action: 'apply' });
+  await f.service.pageAction({
+    action: 'release',
+    id: android.page.saved.id,
+    keepBinding: true,
+  });
+  // The old forget operation deleted only the browser identity.
+  await f.store.removeScreenPage(android.page.saved.id);
+  const restarted = new ScreenCalibration(f.devices);
+  cleanups.push(() => restarted.close());
+  const session = await restarted.create('cam', undefined, [
+    android.targetId,
+    harmony.targetId,
+  ]);
+  await restarted.markerAction({
+    action: 'remove',
+    cameraId: 'cam',
+    id: session.id,
+    token: session.token,
+    targetId: android.targetId,
+  });
+  expect(f.devices.screens()).toMatchObject([
+    { id: harmony.targetId, pageKey: harmony.pageKey, hasCorrection: true },
+  ]);
+  await expect(
+    restarted.create('cam', undefined, [android.targetId]),
+  ).rejects.toThrow('Screen not found');
 });
 it('does not steal a saved screen when more phones use the global connection code', async () => {
   const f = await fixture();
@@ -830,7 +1038,7 @@ it('refuses a global reconnect while the bound screen is collecting samples', as
   expect(f.adapter.movements).toHaveLength(0);
 });
 
-it('checks all current outlines before writing any passing result when a phone moved after detection', async () => {
+it('applies detected perspectives without running drift detection', async () => {
   const f = await fixture();
   const first = await f.connect();
   const second = await f.connect();
@@ -842,20 +1050,18 @@ it('checks all current outlines before writing any passing result when a phone m
     token: f.session.token,
   });
   await f.render(false, 30);
-  await expect(
-    f.service.markerAction({
-      action: 'apply',
-      cameraId: 'cam',
-      id: f.session.id,
-      token: f.session.token,
-    }),
-  ).rejects.toMatchObject({ code: 'CALIBRATION_MISMATCH' });
+  await f.service.markerAction({
+    action: 'apply',
+    cameraId: 'cam',
+    id: f.session.id,
+    token: f.session.token,
+  });
   expect(
     f.devices.entries.get(first.targetId)?.camera.getCorrection(),
-  ).toBeUndefined();
+  ).toBeDefined();
   expect(
     f.devices.entries.get(second.targetId)?.camera.getCorrection(),
-  ).toBeUndefined();
+  ).toBeDefined();
   expect(f.adapter.movements).toHaveLength(0);
 });
 
@@ -910,6 +1116,52 @@ it('starts a marker session for the explicitly created Add Screen target', async
   expect(f.devices.screens().some((screen) => screen.id === created.id)).toBe(
     true,
   );
+  const other = await f.devices.addScreen('cam', 'Created in another tab');
+  const discard = {
+    action: 'delete-screen',
+    cameraId: 'cam',
+    id: created.id,
+    onlyIfEmpty: true,
+  };
+  await f.service.pageAction(discard);
+  await f.service.pageAction(discard);
+  const ids = f.devices.screens().map((screen) => screen.id);
+  expect(ids).not.toContain(created.id);
+  expect(ids).toContain(other.id);
+});
+it('assigns available names to concurrent Add Screen requests when numbers have gaps', async () => {
+  const f = await fixture({ screens: false });
+  await f.service.addScreen('cam', 'Screen 3');
+  const [left, right] = await Promise.all([
+    f.service.addScreen('cam'),
+    f.service.addScreen('cam'),
+  ]);
+  expect([left.name, right.name]).toEqual(['Screen 4', 'Screen 5']);
+  expect(left.id).not.toBe(right.id);
+});
+it('releases the camera and screen name after a new calibration host fails to open', async () => {
+  const f = await fixture({ screens: false });
+  const before = [...f.devices.entries.keys()];
+  const open = rstest
+    .spyOn(f.devices, 'ensureHost')
+    .mockImplementationOnce(async (id) => {
+      await f.devices.open(id);
+      throw new Error('Camera unavailable');
+    });
+  try {
+    await expect(f.service.addScreen('cam', 'Fresh')).rejects.toThrow(
+      'Camera unavailable',
+    );
+    expect([...f.devices.entries.keys()]).toEqual(before);
+    expect(f.devices.screens().some((screen) => screen.name === 'Fresh')).toBe(
+      false,
+    );
+  } finally {
+    open.mockRestore();
+  }
+  await expect(f.service.addScreen('cam', 'Fresh')).resolves.toMatchObject({
+    name: 'Fresh',
+  });
 });
 it('reassigns a released phone to an explicitly created replacement screen', async () => {
   const f = await fixture();

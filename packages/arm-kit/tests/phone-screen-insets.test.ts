@@ -256,6 +256,9 @@ function openPhone(
 test('iPhone helper uses cover and reports split system bars without Fullscreen API', () => {
   const html = calibrationPhonePage('test');
   expect(html).toContain('viewport-fit=cover');
+  expect(html).toContain(
+    'name="apple-mobile-web-app-status-bar-style" content="black-translucent"',
+  );
   // The page reports the orientation it gets; it never asks the browser for one.
   expect(html).not.toContain('name="screen-orientation"');
   expect(html).not.toContain('name="x5-orientation"');
@@ -296,6 +299,61 @@ test('unknown safe areas and Android retain the existing single-edge fallback', 
   expect(phone.last().layout.topInset).toBeUndefined();
 });
 
+test.each([0, 59])(
+  'standalone iPhone measures origin %i for the same 59px gap',
+  (origin) => {
+    const phone = openPhone(873, 0, 0);
+    phone.scope.window.screen.width = phone.scope.innerWidth = 430;
+    phone.scope.window.screen.height = 932;
+    phone.resize();
+    expect(phone.last().layout.topInset).toBeUndefined();
+    phone.scope.navigator.standalone = true;
+    phone.resize();
+    expect(phone.last().layout.topInset).toBeUndefined();
+    expect(phone.elements.get('fullscreen-help')?.textContent).toMatch(
+      /Tap the page/,
+    );
+    phone.receive({ view: 'markers', markerRequest: 'detect' });
+    phone.paint();
+    expect(phone.last().markersPainted).toBe(false);
+    phone.tap(origin);
+    phone.paint();
+    expect(phone.last().layout.topInset).toBe(origin);
+    expect(phone.last().markersPainted).toBe(true);
+    phone.scope.visualViewport.scale = 1.5;
+    phone.resize();
+    expect(phone.last().layout.topInset).toBeUndefined();
+    phone.scope.visualViewport.scale = 1;
+    phone.scope.innerHeight = 720;
+    phone.resize();
+    expect(phone.last().layout.topInset).toBeUndefined();
+  },
+);
+
+test('a full-height iPhone acknowledges the painted first row without adding a page inset', () => {
+  const phone = openPhone(844, 47, 34);
+  phone.scope.navigator.standalone = true;
+  const grid = phone.elements.get('surface')!.children[0] as {
+    style: { display: string; gridTemplateRows: string };
+    children: Array<{ getBoundingClientRect(): { height: number } }>;
+  };
+  grid.children[0].getBoundingClientRect = () => ({ height: 94 });
+  phone.receive({
+    view: 'waiting',
+    visibilityProbe: { id: 'probe', phase: 0 },
+  });
+  expect(grid.style.display).toBe('grid');
+  expect(grid.style.gridTemplateRows).toContain('env(safe-area-inset-top');
+  expect(phone.last().visibilityFirstRowHeight).toBeUndefined();
+  phone.paint();
+  expect(phone.last()).toMatchObject({
+    visibilityProbeAck: 'probe',
+    visibilityFirstRowHeight: 94,
+    layout: { width: 390, height: 844 },
+  });
+  expect(phone.last().layout.topInset).toBeUndefined();
+});
+
 test('a portrait start requests the primary portrait orientation once', async () => {
   const phone = openPhone(800, 0, 0, false, true);
   await phone.elements.get('marker-fullscreen')?.onclick?.();
@@ -324,6 +382,24 @@ test('iOS standalone follows the viewport when screen.orientation is stale', () 
     height: 844,
   });
   expect(phone.last().layout.topInset).toBeUndefined();
+});
+
+test('the selection hint keeps the current marker display and layout revision', () => {
+  const phone = openPhone(844, 47, 34);
+  const markers = {
+    view: 'markers',
+    markerRequest: 'same-markers',
+    anchors: [],
+  };
+  phone.receive(markers);
+  phone.paint();
+  const revision = phone.last().layout.revision;
+  phone.receive({ ...markers, selectionHint: true });
+  expect(phone.elements.get('selection-hint')?.hidden).toBe(false);
+  phone.receive(markers);
+  expect(phone.elements.get('selection-hint')?.hidden).toBe(true);
+  expect(phone.last().layout.revision).toBe(revision);
+  expect(phone.reloaded()).toBe(false);
 });
 
 test('Android reports the displayed view and visibility when switching away and back', () => {

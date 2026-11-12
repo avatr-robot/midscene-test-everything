@@ -150,6 +150,18 @@ function validateTool(t: ProfileInput<ToolProfile>): void {
   if (!t.id || !t.name)
     throw new RobotArmError('INVALID_PROFILE', 'Tool identity is required');
   assertVector(t.offsetMm);
+  if (
+    t.contactFrame !== undefined &&
+    (t.contactFrame !== 'flange' ||
+      length(t.offsetMm) !== 0 ||
+      t.contactDirection?.x !== 0 ||
+      t.contactDirection?.y !== 0 ||
+      t.contactDirection?.z !== -1)
+  )
+    throw new RobotArmError(
+      'INVALID_PROFILE',
+      'Flange contact requires a straight-down tool with zero coordinate offset',
+    );
   unit(t.contactDirection);
   if (Math.abs(length(t.contactDirection) - 1) > 1e-5)
     throw new RobotArmError(
@@ -165,7 +177,7 @@ function geometry(value: VersionedProfile): string {
   }
   if ('offsetMm' in rest) {
     const t = rest as unknown as ToolProfile;
-    return semanticJson([t.offsetMm, t.contactDirection]);
+    return semanticJson([t.offsetMm, t.contactDirection, t.contactFrame]);
   }
   const r = rest as unknown as RobotArmProfile;
   return semanticJson([r.adapterId, r.connectionIdentity, r.installation]);
@@ -512,6 +524,14 @@ export class ProfileStore {
       }
     });
   }
+  setOperatorStop(
+    reason: ProfileData['operatorStop'],
+    guard?: () => void,
+  ): Promise<void> {
+    return this.transaction((d) => {
+      d.operatorStop = reason;
+    }, guard);
+  }
   setSoftwarePaused(paused: boolean): Promise<void> {
     return this.transaction((d) => {
       d.softwarePaused = paused;
@@ -526,7 +546,7 @@ export class ProfileStore {
       };
     });
   }
-  clearOperation(requestId?: string): Promise<void> {
+  clearOperation(requestId?: string, guard?: () => void): Promise<void> {
     return this.transaction((d) => {
       if (!requestId)
         for (const session of d.sessions ?? [])
@@ -534,7 +554,7 @@ export class ProfileStore {
             session.recoveryAcknowledged = true;
       if (!requestId || d.pendingOperation?.requestId === requestId)
         d.pendingOperation = undefined;
-    });
+    }, guard);
   }
   list(): ProfileData {
     return structuredClone(this.data);

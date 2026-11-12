@@ -136,6 +136,14 @@ export function screenDeviceUrl(publicUrl: string, address?: string) {
   if (address) url.hostname = address;
   return url.href;
 }
+/** An offline phone or a slow connection must not hold up the screen picker. */
+export function identifyScreen(cameraId: string, targetId: string) {
+  void markerRequest(
+    '/api/screen-pages',
+    { action: 'identify', cameraId, targetId },
+    AbortSignal.timeout(1600),
+  ).catch(() => {});
+}
 export class ScreenCalibClient {
   constructor(readonly cameraId?: string) {}
   private request<T>(action: string, body: unknown = {}) {
@@ -201,6 +209,13 @@ export class ScreenCalibClient {
   }
   deleteScreen(cameraId: string, id: string) {
     return this.request<void>('delete-screen', { cameraId, id });
+  }
+  discardAddedScreen(cameraId: string, id: string) {
+    return this.request<void>('delete-screen', {
+      cameraId,
+      id,
+      onlyIfEmpty: true,
+    });
   }
   deletePerspective(cameraId: string, id: string) {
     return this.request<void>('delete-perspective', { cameraId, id });

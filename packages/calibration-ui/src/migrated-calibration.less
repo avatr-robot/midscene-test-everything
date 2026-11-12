@@ -222,8 +222,20 @@
 .robot-calibration-batch-queue {
   padding: 16px 0;
 }
-.guided-teaching-toolbar {
-  margin-bottom: 16px;
+.phone-connect-dialog .robot-device-phone-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+}
+.phone-connect-dialog .robot-device-phone-address {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  .ant-typography {
+    margin-block-end: 0;
+  }
 }
 .phone-connect-code {
   margin: 4px 0 0;
@@ -315,22 +327,24 @@
 
 // The shell body is the scroll container for both the controls and the preview.
 .calibration-page.guided-calibration {
+  --guided-inset: 16px;
+  --guided-max-width: 1320px;
   flex: 1;
   height: auto;
   min-height: 0;
 
   .calibration-shell-header,
   .calibration-shell-footer {
-    padding: 8px 16px;
+    padding: 8px var(--guided-inset);
   }
   .calibration-shell-body {
-    padding: 16px;
+    padding: var(--guided-inset);
   }
   .calibration-shell-footer:has(> .arm-calibration-footer:empty) {
     display: none;
   }
   .arm-calibration-footer {
-    max-width: 1320px;
+    max-width: var(--guided-max-width);
   }
   .marker-calibration-sidebar {
     height: auto;
@@ -342,7 +356,7 @@
   }
 }
 .guided-toolbar {
-  max-width: 1320px;
+  max-width: var(--guided-max-width);
   margin: 0 auto;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -405,13 +419,42 @@
 .guided-calibration-layout {
   display: grid;
   grid-template-columns: minmax(330px, 460px) minmax(280px, 1fr);
-  gap: 24px;
-  max-width: 1320px;
+  gap: var(--guided-inset);
+  max-width: var(--guided-max-width);
   margin: 0 auto;
   align-items: start;
 }
-.guided-calibration-flow {
+.guided-calibration-flow,
+.guided-camera {
   min-width: 0;
+  padding: var(--guided-inset);
+  border: 1px solid var(--rv-border);
+  border-radius: 12px;
+  background: var(--midscene-surface);
+}
+.guided-calibration-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+
+  > .guided-screen-controls {
+    display: contents;
+  }
+  > .ant-select,
+  > .guided-screen-controls > .ant-btn {
+    align-self: flex-start;
+    max-width: 100%;
+  }
+  .perspective-observation {
+    margin-bottom: 0;
+  }
+}
+.guided-calibration-flow [data-installation-teaching] {
+  display: grid;
+  gap: 12px;
+  > .ant-typography {
+    margin: 0;
+  }
 }
 .guided-calibration-flow .robot-setup-task-layout,
 .guided-calibration-flow .robot-teaching-layout {
@@ -420,14 +463,9 @@
 .guided-camera {
   display: grid;
   gap: 12px;
-  padding: 16px;
-  border: 1px solid var(--rv-border);
-  border-radius: 12px;
-  background: var(--midscene-surface);
-  min-width: 0;
 }
 .guided-camera .ant-tabs-nav {
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .guided-camera .ant-tabs-extra-content {
   min-width: 0;
@@ -472,7 +510,6 @@
   }
   .guided-camera {
     grid-row: 1;
-    padding: 10px 12px;
     gap: 6px;
   }
   .guided-camera .robot-setup-illustration,
@@ -485,6 +522,14 @@
   }
 }
 @container robot-setup (max-width: 480px) {
+  .guided-calibration-flow,
+  .guided-camera {
+    padding: 12px;
+  }
+  .robot-web-phases {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .guided-steps {
     gap: 2px;
     button {

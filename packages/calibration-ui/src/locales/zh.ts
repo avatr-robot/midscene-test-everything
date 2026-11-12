@@ -1639,6 +1639,8 @@ export const zh: Record<string, string> = {
   'because Stop could not be confirmed': '因无法确认停止',
   'Tool payload application unconfirmed — check controller state':
     '工具负载应用未确认 — 请检查控制器状态',
+  'Leave blank to calibrate using the flange pose at contact.':
+    '可留空。标定将使用笔尖接触屏幕时的法兰位姿。',
   'Enter a nonnegative measured length.': '请输入非负的实测长度。',
   'Touch tool': '触控工具',
   'Touch screen': '触摸屏',

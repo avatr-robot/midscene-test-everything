@@ -101,7 +101,7 @@ export function CameraMappingStep({
    */
   perspectiveOpen?: boolean;
   onPerspectiveOpenChange?(open: boolean): void;
-  onSelectScreen(id: string): void;
+  onSelectScreen?(id: string): void;
   onAddScreen?(): void;
   onPair(): void;
   onDetect(): void;
@@ -160,7 +160,7 @@ export function CameraMappingStep({
       done: Boolean(screen),
       action: (
         <Space size={4} wrap>
-          {screens.length > 1 && (
+          {onSelectScreen && screens.length > 1 && (
             <Select
               aria-label={t('Calibration Screen')}
               // A camera id that has no screen target yet is not a choice; show
@@ -190,7 +190,9 @@ export function CameraMappingStep({
     {
       title: t('Screen page'),
       detail: !phoneConnected
-        ? t('Keep the phone page visible and fullscreen')
+        ? t(
+            'Open the calibration page on your phone and keep it in the foreground.',
+          )
         : phoneFullscreen
           ? t('Phone connected. You can continue.')
           : t('Keep each screen page visible and in fullscreen.'),

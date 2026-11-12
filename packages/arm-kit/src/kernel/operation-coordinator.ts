@@ -9,18 +9,26 @@ import {
 export class OperationCoordinator {
   protected operation?: CurrentOperation;
   protected leased = false;
+  protected operatorStop?: 'manual-stop' | 'emergency-stop';
+  protected recoveryRevision = 0;
   private requiredRecovery?: RecoveryReason;
+  get requiresOperatorRecovery() {
+    return this.operatorStop !== undefined;
+  }
   get recoveryReason() {
-    return this.requiredRecovery;
+    return this.operatorStop ?? this.requiredRecovery;
   }
   protected get recoveryRequired() {
     return this.recoveryReason !== undefined;
   }
   protected set recoveryRequired(value: boolean) {
-    if (!value) this.requiredRecovery = undefined;
-    else this.requireRecovery('interruption');
+    if (!value) {
+      this.operatorStop = undefined;
+      this.requiredRecovery = undefined;
+    } else this.requireRecovery('interruption');
   }
   protected requireRecovery(reason: RecoveryReason) {
+    this.recoveryRevision++;
     // A later transport error must never downgrade an operator or hardware stop.
     const priority: Record<RecoveryReason, number> = {
       'socket-disconnect': 0,
@@ -63,7 +71,9 @@ export class OperationCoordinator {
     if (this.recoveryRequired && !allowRecovery)
       throw new RobotArmError(
         'RECOVERY_REQUIRED',
-        'Explicit recovery check is required',
+        this.requiresOperatorRecovery
+          ? 'Explicit recovery check is required after an operator stop'
+          : 'Robot recovery is pending',
         409,
       );
     this.leased = true;

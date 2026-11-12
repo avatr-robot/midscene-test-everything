@@ -68,7 +68,7 @@ it('streams the initial snapshot, page handoff and disconnect over the real tran
     );
     expect(paused.status).toBe(200);
     expect(await paused.json()).toEqual({
-      skipped: 'reference-page-unavailable',
+      skipped: 'disabled',
     });
     const reader = await events();
     expect((await snapshot(reader)).phone.state).toBe('waiting');

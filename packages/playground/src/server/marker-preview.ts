@@ -139,6 +139,7 @@ export class MarkerPreview {
         ),
         { status: 409 },
       );
+    return this.phone.assertConnected().layout;
   }
   async capture(
     cameras: CameraSessionManager,

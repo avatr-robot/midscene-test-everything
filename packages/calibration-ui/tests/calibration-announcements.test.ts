@@ -81,7 +81,7 @@ function listen() {
 }
 afterEach(() => rstest.restoreAllMocks());
 
-it('waits for changes in phone display mode, marker requests and actual mapping checks', () => {
+it('keeps phone setup, marker capture and mapping silent', () => {
   const { events } = listen();
   const announce = calibrationAnnouncements();
   announce(initial);
@@ -111,19 +111,7 @@ it('waits for changes in phone display mode, marker requests and actual mapping 
     'confirmed',
   ] as const)
     updateSetup({ mappingCheck });
-  expect(events()).toEqual([
-    'phoneHomeScreen',
-    'phoneFullscreen',
-    'phoneReady',
-    'phoneLost',
-    'phoneReady',
-    'markersCountdown',
-    'markersRetry',
-    'mappingStart',
-    'mappingFailed',
-    'mappingStart',
-    'mappingDone',
-  ]);
+  expect(events()).toEqual([]);
 });
 
 it('prioritizes loss of phone feedback when the same snapshot also changes a routine step', () => {
@@ -138,7 +126,7 @@ it('prioritizes loss of phone feedback when the same snapshot also changes a rou
   expect(events()).toEqual(['phoneLost']);
 });
 
-it('announces reference travel, sampling phases and boundary groups once per transition', () => {
+it('announces travel and boundary checks without narrating routine sampling phases', () => {
   const { events, click, voice } = listen();
   const announce = calibrationAnnouncements();
   const send = (
@@ -163,24 +151,58 @@ it('announces reference travel, sampling phases and boundary groups once per tra
       send('safety', { calibration: boundary(group, index) });
   }
   send('avoiding-camera');
+  send('avoiding-camera');
+  send('review');
   send('review');
   send('completed');
   expect(events()).toEqual([
-    'samplingReady',
     'approachStart',
-    'directionProbe',
-    'autoSampling',
     'referenceReturn',
-    'boundaryReview',
     'autoVerifying',
-    'hover',
-    'contact',
     'autoAvoiding',
     'autoReview',
-    'autoCompleted',
   ]);
   expect(click.mock.calls).toEqual([['click']]);
-  expect(voice).toHaveBeenCalledWith('contact', 2, 'calibration');
+  expect(voice).toHaveBeenCalledWith('referenceReturn', 2, 'calibration');
+});
+
+it('announces automatic shared parking once, including a retry after interruption', () => {
+  const { events } = listen();
+  const announce = batchAnnouncements();
+  const batch: CalibrationBatchState = {
+    id: 'batch',
+    revision: 1,
+    status: 'running',
+    currentIndex: 0,
+    items: [
+      {
+        deviceId: 'phone',
+        screenId: 'phone',
+        name: 'Phone',
+        attempts: 1,
+        runIds: [],
+        status: 'completed',
+      },
+    ],
+  };
+  announce(batch);
+  const parking = {
+    ...batch,
+    currentIndex: 1,
+    automaticSharedParking: true as const,
+  };
+  announce({ ...parking, revision: 2 });
+  announce({ ...parking, revision: 3 });
+  announce({ ...batch, currentIndex: 1, status: 'failed', revision: 4 });
+  announce({ ...parking, revision: 5 });
+  announce({ ...batch, status: 'completed', revision: 6 });
+  announce({ ...batch, status: 'completed', revision: 7 });
+  expect(events()).toEqual([
+    'autoAvoiding',
+    'autoFailed',
+    'autoAvoiding',
+    'batchCompleted',
+  ]);
 });
 
 it('distinguishes the three taught positions, operator waits and a confirmed retry', () => {
@@ -220,19 +242,7 @@ it('distinguishes the three taught positions, operator waits and a confirmed ret
       awaitingSocketRecovery: true,
     }),
   );
-  expect(events()).toEqual([
-    'teachReference',
-    'teachReference',
-    'samplingReady',
-    'teachBoundary',
-    'confirmCorridor',
-    'samplingReady',
-    'autoWaitingSafe',
-    'recordSafe',
-    'retryRegular',
-    'autoStarted',
-    'autoFailed',
-  ]);
+  expect(events()).toEqual(['autoFailed', 'autoStarted', 'autoFailed']);
   expect(click).not.toHaveBeenCalled();
 });
 
@@ -278,19 +288,10 @@ it('leaves batch acceptance to the coordinator and ignores polling repeats and s
   update(2, 'waiting', 'awaiting-mapping');
   update(4, 'waiting', 'awaiting-boundary-review');
   update(5, 'waiting', 'awaiting-acceptance', 'awaiting-safe-position');
+  expect(events()).toEqual(['autoStarted']);
   update(6, 'waiting', 'awaiting-acceptance', 'awaiting-acceptance');
-  update(7, 'stopping', 'exploring');
-  update(8, 'stopped', 'stopped');
-  update(9, 'completed', 'completed');
-  expect(events()).toEqual([
-    'autoStarted',
-    'mappingWaiting',
-    'batchPlacement',
-    'boundaryReview',
-    'autoWaitingSafe',
-    'autoReview',
-    'batchStopping',
-    'batchStopped',
-    'batchCompleted',
-  ]);
+  update(7, 'waiting', 'awaiting-acceptance', 'awaiting-acceptance');
+  update(8, 'stopping', 'exploring');
+  update(9, 'stopped', 'stopped');
+  expect(events()).toEqual(['autoStarted', 'autoReview', 'batchStopping']);
 });

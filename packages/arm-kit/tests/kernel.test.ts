@@ -6,7 +6,7 @@ import {
   RobotKernel,
   validateMotionOptions,
 } from '../src/kernel.js';
-import { RobotArmRuntime } from '../src/runtime.js';
+import { ProfileStore, RobotArmRuntime } from '../src/runtime.js';
 import {
   stageOptions,
   validateContactPolicy,
@@ -265,8 +265,7 @@ describe('SDK motion and application share one lease', () => {
       const count = f.adapter.movements.length;
       await f.runtime.resume();
       expect(f.adapter.movements).toHaveLength(count);
-      expect((await f.runtime.state()).recoveryRequired).toBe(true);
-      await f.runtime.recover();
+      expect((await f.runtime.state()).recoveryRequired).toBe(false);
     } finally {
       await f.cleanup();
     }
@@ -306,7 +305,30 @@ describe('SDK motion and application share one lease', () => {
 });
 
 describe('restart and human verification gates', () => {
-  it('requires explicit recovery after a persisted unfinished operation', async () => {
+  it.each(['stop', 'emergencyStop'] as const)(
+    'preserves the saved installation when %s precedes initialization',
+    async (control) => {
+      const f = await fixture();
+      try {
+        const restarted = new RobotArmRuntime({
+          adapter: f.adapter,
+          profileStore: new ProfileStore(f.store.filePath),
+        });
+        await restarted[control]();
+        await restarted.initialize();
+        expect(restarted.profileStore.getCalibration(f.calibration.id)).toEqual(
+          f.calibration,
+        );
+        expect(restarted.profileStore.list().operatorStop).toBe(
+          control === 'stop' ? 'manual-stop' : 'emergency-stop',
+        );
+      } finally {
+        await f.cleanup();
+      }
+    },
+  );
+
+  it('checks a persisted unfinished operation before admitting new SDK motion', async () => {
     const f = await fixture();
     try {
       await f.store.markOperation('unfinished', 'motion');
@@ -316,23 +338,127 @@ describe('restart and human verification gates', () => {
         auditStore: f.auditStore,
       });
       await restarted.initialize();
-      expect((await restarted.state()).recoveryRequired).toBe(true);
-      await expect(
-        restarted.motion({
-          requestId: 'restart',
-          robotProfileId: f.robot.id,
-          kind: 'linear',
-          target: pose(),
-          options: { speed: { kind: 'ratio', value: 0.1 } },
-          timeoutMs: 2000,
-        }),
-      ).rejects.toMatchObject({ code: 'RECOVERY_REQUIRED' });
-      await restarted.recover();
+      expect(restarted.recoveryReason).toBeUndefined();
+      expect(f.store.list().pendingOperation).toBeUndefined();
+      await restarted.motion({
+        requestId: 'restart',
+        robotProfileId: f.robot.id,
+        kind: 'linear',
+        target: pose(),
+        options: { speed: { kind: 'ratio', value: 0.1 } },
+        timeoutMs: 2000,
+      });
+      expect(restarted.recoveryReason).toBeUndefined();
       expect(f.store.list().pendingOperation).toBeUndefined();
     } finally {
       await f.cleanup();
     }
   });
+  it('checks fresh feedback on the next command after a fault clears without status polling', async () => {
+    const f = await fixture();
+    try {
+      await f.adapter.faultForTesting();
+      expect((await f.runtime.state()).recoveryReason).toBe('fault');
+      await expect(f.runtime.enterDragMode()).rejects.toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+      });
+      await f.adapter.clearFaults();
+      await f.runtime.enterDragMode();
+      expect((await f.adapter.getState()).dragMode).toBe(true);
+      await f.runtime.exitDragMode();
+      expect(f.runtime.recoveryReason).toBeUndefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it('retains an operator stop across restart and a healthy status refresh', async () => {
+    const f = await fixture();
+    try {
+      await f.runtime.stop();
+      const restarted = new RobotArmRuntime({
+        adapter: f.adapter,
+        profileStore: f.store,
+      });
+      await restarted.initialize();
+      expect((await restarted.state()).recoveryReason).toBe('manual-stop');
+      await expect(restarted.enterDragMode()).rejects.toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+      });
+      await restarted.recover();
+      expect(f.store.list().operatorStop).toBeUndefined();
+      expect((await restarted.state()).recoveryRequired).toBe(false);
+      expect(f.adapter.movements).toHaveLength(0);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it('requires explicit recovery after observing a hardware emergency stop, even across restart', async () => {
+    const f = await fixture();
+    try {
+      const persist = rstest.spyOn(f.store, 'setOperatorStop');
+      await f.adapter.emergencyStop();
+      expect((await f.runtime.state()).requiresOperatorRecovery).toBe(true);
+      await f.runtime.state();
+      expect(persist).toHaveBeenCalledTimes(1);
+      await f.adapter.clearFaults();
+      expect((await f.runtime.state()).recoveryReason).toBe('emergency-stop');
+      const restarted = new RobotArmRuntime({
+        adapter: f.adapter,
+        profileStore: new ProfileStore(f.store.filePath),
+      });
+      await restarted.initialize();
+      await expect(restarted.enterDragMode()).rejects.toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+      });
+      expect((await restarted.state()).requiresOperatorRecovery).toBe(true);
+      await restarted.recover();
+      expect((await restarted.state()).recoveryRequired).toBe(false);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it('a manual stop during automatic pose verification supersedes both the check and the waiting action', async () => {
+    const f = await fixture();
+    let finish!: () => void;
+    try {
+      await f.adapter.faultForTesting();
+      expect((await f.runtime.state()).recoveryReason).toBe('fault');
+      await expect(f.runtime.enterDragMode()).rejects.toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+        details: { reasons: expect.arrayContaining(['ROBOT_FAULT']) },
+      });
+      await f.adapter.clearFaults();
+      const read = f.adapter.getPose.bind(f.adapter);
+      const posePending = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const poseRead = rstest
+        .spyOn(f.adapter, 'getPose')
+        .mockImplementationOnce(async () => {
+          await posePending;
+          return read();
+        });
+      const polling = f.runtime.state();
+      await rstest.waitFor(() => expect(poseRead).toHaveBeenCalledTimes(1));
+      const action = expect(f.runtime.enterDragMode()).rejects.toMatchObject({
+        code: 'RECOVERY_REQUIRED',
+      });
+      await f.runtime.stop();
+      finish();
+      await action;
+      expect((await polling).recoveryReason).toBe('manual-stop');
+      expect(f.store.list().operatorStop).toBe('manual-stop');
+      expect((await f.adapter.getState()).dragMode).toBe(false);
+      expect(f.adapter.movements).toHaveLength(0);
+    } finally {
+      finish?.();
+      await f.cleanup();
+    }
+  });
+
   it('human rejection prevents activating an otherwise valid calibration', async () => {
     const f = await fixture();
     try {

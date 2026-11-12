@@ -284,12 +284,24 @@ export function WebCameraMappingStep({
               {t(
                 'Page marker fit verified; screen edges require visual confirmation',
               )}
-              {accuracy &&
-                ` · ${t('{0} fit markers · {1} held out · maximum {2} CSS px', [
-                  accuracy.fit.count,
-                  accuracy.validation.count,
-                  accuracy.validation.maxErrorCssPx.toFixed(2),
-                ])}`}
+              {accuracy && (
+                <>
+                  {' · '}
+                  {accuracy.validation.count > 0
+                    ? t('{0} fit markers · {1} held out · maximum {2} CSS px', [
+                        accuracy.fit.count,
+                        accuracy.validation.count,
+                        accuracy.validation.maxErrorCssPx.toFixed(2),
+                      ])
+                    : t(
+                        '{0} fit markers · maximum fit error {1} CSS px · no check markers visible',
+                        [
+                          accuracy.fit.count,
+                          accuracy.fit.maxErrorCssPx.toFixed(2),
+                        ],
+                      )}
+                </>
+              )}
             </span>
           ) : !verified && (check || mappingBusy) ? (
             <>

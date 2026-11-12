@@ -44,7 +44,10 @@ export class RobotDriverBoundary {
   readonly id: string;
   readonly name: string;
   readonly connectionIdentity: string;
-  constructor(readonly adapter: RobotArmAdapter) {
+  constructor(
+    readonly adapter: RobotArmAdapter,
+    private readonly onEmergencyStop?: () => void | Promise<void>,
+  ) {
     this.resolver = new DriverSupport(adapter);
     this.id = adapter.id;
     this.name = adapter.name;
@@ -77,8 +80,32 @@ export class RobotDriverBoundary {
       maxLinearSpeedMmPerSecond: linear?.constraints?.speed.linear?.max,
     };
   }
+  private backdriving = false;
+  private enteringDrag = false;
+  private dragEndedAt = Number.NEGATIVE_INFINITY;
+  private dragFeedbackAt = Number.NEGATIVE_INFINITY;
+
+  allowsOutlineFrame(capturedAt: number) {
+    return (
+      !this.enteringDrag && !this.backdriving && capturedAt > this.dragEndedAt
+    );
+  }
   get enterDragMode() {
-    return this.resolver.method('enterDragMode');
+    const enter = this.resolver.method('enterDragMode');
+    return (
+      enter &&
+      (async () => {
+        this.enteringDrag = true;
+        try {
+          await enter();
+          this.backdriving = true;
+        } finally {
+          this.enteringDrag = false;
+          this.dragFeedbackAt = Date.now();
+          this.dragEndedAt = Date.now();
+        }
+      })
+    );
   }
   get exitDragMode() {
     return this.resolver.method('exitDragMode');
@@ -261,6 +288,20 @@ export class RobotDriverBoundary {
       assertFresh(s.quality, this.adapter.readinessPolicy.maxStateAgeMs);
     const current =
       payloadEpoch === this.payloadEpoch && generation === this.generation;
+    const receivedAt = Date.parse(s.quality.receivedAt);
+    if (
+      current &&
+      !this.enteringDrag &&
+      !s.quality.stale &&
+      receivedAt >= this.dragFeedbackAt &&
+      s.connection === 'connected' &&
+      s.operationMode !== 'unknown'
+    ) {
+      this.dragFeedbackAt = receivedAt;
+      const dragging = s.operationMode === 'backdrive';
+      if (this.backdriving && !dragging) this.dragEndedAt = Date.now();
+      this.backdriving = dragging;
+    }
     if (
       current &&
       s.connection === 'disconnected' &&
@@ -275,6 +316,7 @@ export class RobotDriverBoundary {
       this.appliedPayload()
     )
       this.invalidatePayload('disabled');
+    if (current && s.emergencyStop === 'active') await this.onEmergencyStop?.();
     return s;
   }
   async getState(fresh = true): Promise<RobotState> {

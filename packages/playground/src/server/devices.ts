@@ -11,7 +11,7 @@ import { calibrationPreviewPositions } from '@midscene/arm-kit/internal/calibrat
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import { CalibrationBatch } from './calibration-batch.js';
 import type { PhonePairings } from './phone-pairings.js';
-import { ScreenCalibration } from './screen-calibration.js';
+import { ScreenCalibration, nextScreenName } from './screen-calibration.js';
 
 interface CalibrationSession {
   attemptId: string;
@@ -205,19 +205,25 @@ export class PlaygroundDevices {
   pairingLinks(token: string) {
     return this.phoneLinks(token);
   }
-  async addScreen(cameraId: string, name: string) {
+  async addScreen(cameraId: string, name?: string) {
     await this.open(cameraId);
     const existing = this.screens().filter((t) => t.cameraId === cameraId);
     if (existing.length >= 9) throw new Error('At most 9 screens per camera');
+    const screenName = name ?? nextScreenName(existing);
     const id = randomUUID();
     const store = controllerRuntime(this.arm).profileStore;
-    await store.saveScreenTarget({ id, cameraId, name });
-    await this.open(id);
-    // The wizard selects the new screen immediately; prepare its calibration
-    // host here so the first configuration/validity requests cannot fail with
-    // "Calibration is not ready" while a host is still opening behind them.
-    await this.ensureHost(id);
-    return { id, cameraId, name };
+    await store.saveScreenTarget({ id, cameraId, name: screenName });
+    try {
+      await this.ensureHost(id);
+      return { id, cameraId, name: screenName };
+    } catch (error) {
+      try {
+        await store.archiveScreenTarget(id);
+      } finally {
+        await this.stop(id);
+      }
+      throw error;
+    }
   }
   async startAll(discover = listCameras, previewing: readonly string[] = []) {
     this.discoveryError = undefined;
@@ -232,7 +238,7 @@ export class PlaygroundDevices {
         controllerRuntime(this.arm).profileStore.list().screenTargets ?? [];
       await Promise.allSettled(
         targets
-          .filter((t) => cameraIds.has(t.cameraId))
+          .filter((t) => !t.archived && cameraIds.has(t.cameraId))
           .map((t) => this.open(t.id)),
       );
     } catch (error) {
@@ -596,6 +602,16 @@ export class PlaygroundDevices {
         409,
       );
   }
+  get hasActiveScreenCalibration() {
+    return (
+      this.calibrationOpening.size > 0 ||
+      [...this.entries.values()].some(
+        ({ calibration }) =>
+          calibration &&
+          ['queued', 'running', 'cancelling'].includes(calibration.phase),
+      )
+    );
+  }
   assertCalibrationRunning(id: string, attemptId: string) {
     const session = this.entries.get(id)?.calibration;
     if (session?.phase !== 'running')
@@ -616,7 +632,15 @@ export class PlaygroundDevices {
     const active = this.phoneHost(token);
     if (active) return active;
     const cameraId = this.pairings?.camera(token);
-    if (!cameraId) return undefined;
+    if (
+      !cameraId ||
+      controllerRuntime(this.arm)
+        .profileStore.list()
+        .screenTargets?.some(
+          (screen) => screen.id === cameraId && screen.archived,
+        )
+    )
+      return undefined;
     // Restoring the input page prepares a session, never starts collection.
     await this.ensureHost(cameraId);
     return this.entries.get(cameraId)?.host;

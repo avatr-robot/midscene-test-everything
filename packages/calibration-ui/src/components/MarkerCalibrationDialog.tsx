@@ -39,6 +39,7 @@ import {
   type TargetDisplaySession,
   screenDeviceUrl,
 } from '../marker-client';
+import { automaticMarkerPages } from '../screen-selection';
 import { detectMarkersWithRetry } from '../utils/detect-markers';
 import {
   prepareMarkerPagesForDetection,
@@ -106,6 +107,7 @@ export function MarkerCalibrationDialog({
   resumeSession,
   autoAddTarget = false,
   firstScreenCalibration = false,
+  pairWaitingPages = false,
   includeSucceededTargets = false,
   keepSessionOnClose = false,
   onAdjustManually,
@@ -154,15 +156,17 @@ export function MarkerCalibrationDialog({
    * of its own: add a target for each page and detect all of them in one pass.
    */
   firstScreenCalibration?: boolean;
+  /** Add Screen may reuse a waiting phone previously released from this camera. */
+  pairWaitingPages?: boolean;
   /** Reopens succeeded targets instead of treating them as already finished. */
   includeSucceededTargets?: boolean;
   keepSessionOnClose?: boolean;
   /**
    * The markers could not be read, so the caller can place the four corners by
-   * hand instead. The dialog closes itself first: only one editor at a time.
+   * hand on the screen whose detection failed.
    */
-  onAdjustManually?: () => void;
-  onClose: () => void;
+  onAdjustManually?: (targetId: string) => void;
+  onClose: (reason: 'dismissed' | 'detected') => void;
   onDetected: (
     session: MarkerCalibrationSession,
     response: MarkerCalibrationDetectionResponse,
@@ -429,6 +433,12 @@ export function MarkerCalibrationDialog({
   const ownTargetIds = new Set(
     (session?.targets ?? []).map((target) => target.id),
   );
+  const autoPairingDevices = automaticMarkerPages(
+    devices,
+    ownTargetIds,
+    session?.excludedPageIds,
+    firstScreenCalibration || autoAddTarget || pairWaitingPages,
+  );
   /**
    * A page bound to another screen's display is already showing that screen.
    * Handing it to this target would calibrate the same glass twice, so those
@@ -491,7 +501,7 @@ export function MarkerCalibrationDialog({
    * already bound to a display of this session. A background page is not
    * counted, because its markers cannot be detected yet.
    */
-  const pagesInSession = devices.filter(
+  const pagesInSession = autoPairingDevices.filter(
     (device) =>
       (device.visible && pageCanBeClaimed(device)) ||
       (device.targetDisplayId !== undefined &&
@@ -551,7 +561,7 @@ export function MarkerCalibrationDialog({
        * different phone just because that phone is visible: a multi-screen
        * recalibration must map each target to its own page.
        */
-      const available = devices.filter(
+      const available = autoPairingDevices.filter(
         (device) =>
           device.visible && !used.has(device.id) && pageCanBeClaimed(device),
       );
@@ -688,7 +698,7 @@ export function MarkerCalibrationDialog({
     if (!keepSessionOnClose) clearDisplays(true);
     activeSessionId.current = undefined;
     activeToken.current = undefined;
-    onClose();
+    onClose('dismissed');
   }, [api, clearDisplays, keepSessionOnClose, onClose, onSessionCancelled]);
 
   useEffect(() => {
@@ -879,8 +889,14 @@ export function MarkerCalibrationDialog({
               'MARKER_CALIBRATION_EXPIRED',
               'MARKER_CALIBRATION_NOT_FOUND',
             ].includes(cause.code ?? '')
-          )
+          ) {
+            autoScreenCreated.current = true;
+            activeToken.current = undefined;
+            activeSessionId.current = undefined;
+            clearDisplays(false);
+            setSession(undefined);
             onSessionCancelled?.(id);
+          }
           setError(cause instanceof Error ? cause.message : String(cause));
         }
       } finally {
@@ -1045,7 +1061,7 @@ export function MarkerCalibrationDialog({
         await onDetected(response.session, response, detectionTargetIds, token);
         activeSessionId.current = undefined;
         activeToken.current = undefined;
-        onClose();
+        onClose('detected');
       } catch (cause) {
         if (controller.signal.aborted) return;
         speakCalibration('markerFailed');
@@ -1241,26 +1257,23 @@ export function MarkerCalibrationDialog({
     setCreating(true);
     setError(undefined);
     try {
-      if (current.targets.length === 1) {
-        await api.cancelMarkerCalibration(current.id, token);
-        const display = displaysRef.current[targetId];
-        if (display?.id) await screenCalib.closeTargetDisplay(display.id);
-        clearDisplays(false);
-        activeSessionId.current = undefined;
-        activeToken.current = undefined;
-        setSession(undefined);
-        setScreenName(current.targets[0].name);
-        onSessionCancelled?.(current.id);
-        return;
-      }
       const updated = await api.removeMarkerCalibrationTarget(
         current.id,
         targetId,
         token,
       );
+      autoAddedTargetFor.current = current.id;
+      if (!updated.targets.length) {
+        autoScreenCreated.current = true;
+        clearDisplays(false);
+        activeSessionId.current = undefined;
+        activeToken.current = undefined;
+        setSession(undefined);
+        onSessionCancelled?.(current.id);
+        onClose('dismissed');
+        return;
+      }
       const removed = displaysRef.current[targetId];
-      if (removed?.id)
-        void screenCalib.closeTargetDisplay(removed.id).catch(() => undefined);
       if (removed) {
         const remaining = { ...displaysRef.current };
         delete remaining[targetId];
@@ -1321,6 +1334,9 @@ export function MarkerCalibrationDialog({
       ),
     },
   ];
+  const manualTarget =
+    session?.targets.find((target) => target.state === 'failed') ??
+    session?.targets[0];
   return (
     <MarkerCalibrationPanel
       variant={variant}
@@ -1334,19 +1350,21 @@ export function MarkerCalibrationDialog({
           {/*
             Detection is the primary path, but the glass is sometimes visible
             when the markers are not (glare, focus, a cropped marker). Offer the
-            manual corner editor exactly when a pass has failed, and close this
-            panel first so the operator sees one editor at a time.
+            manual corner editor when a pass has failed. Hand off the target
+            before closing so the wizard keeps it for the editor.
           */}
-          {onAdjustManually && session && (error || retryingAfterFailure) && (
-            <Button
-              onClick={() => {
-                close();
-                onAdjustManually();
-              }}
-            >
-              {t('Place the corners manually')}
-            </Button>
-          )}
+          {onAdjustManually &&
+            manualTarget &&
+            (error || retryingAfterFailure) && (
+              <Button
+                onClick={() => {
+                  onAdjustManually(manualTarget.id);
+                  close();
+                }}
+              >
+                {t('Place the corners manually')}
+              </Button>
+            )}
           {existingScreensKey && error && !session && (
             <Button
               onClick={() => setReconnectAttempt((value) => value + 1)}

@@ -1,13 +1,22 @@
 import sharp from 'sharp';
-import { CALIBRATION_RELATIVE_SLACK } from '../assisted-contracts.js';
-import { RobotVisionError } from './errors.js';
-import { destinationCorners } from './perspective-transformer.js';
 import {
+  CALIBRATION_RELATIVE_SLACK,
+  type CalibrationPageLayout,
+} from '../assisted-contracts.js';
+import { RobotVisionError } from './errors.js';
+import {
+  applyHomography,
   computeHomography,
+  destinationCorners,
+  quadFromArray,
   quadToArray,
   validateQuad,
 } from './vision-geometry.js';
-import type { ImagePoint, ScreenQuad } from './vision-types.js';
+import type {
+  ImagePoint,
+  PerspectiveRotation,
+  ScreenQuad,
+} from './vision-types.js';
 
 /**
  * How much of a saved Perspective Preset is still on the phone screen.
@@ -34,6 +43,8 @@ export interface PerspectiveValidityInput {
   points: ScreenQuad;
   sourceWidth: number;
   sourceHeight: number;
+  rotation?: PerspectiveRotation;
+  pageLayout?: CalibrationPageLayout;
 }
 
 /** Width the frame is reduced to before measuring. */
@@ -293,14 +304,14 @@ export async function prepareValidityFrame(
 function measureEdges(
   image: GrayImage,
   quad: ScreenQuad,
-): { edges: EdgeMeasurement[]; screenWidth: number } {
-  const screenWidth = screenWidthOf(quad);
+  screenWidth: number,
+): EdgeMeasurement[] {
   const search = Math.round(clamp(screenWidth * 0.04, 6, 60));
   const tolerance = Math.max(
     VALIDITY_ALIGN_TOLERANCE_MIN_PX,
     screenWidth * VALIDITY_ALIGN_TOLERANCE_RATIO,
   );
-  const edges = outwardNormals(quad).map((edge, index) => {
+  return outwardNormals(quad).map((edge, index) => {
     const magnitudes: number[] = [];
     const usable: EdgeSample[] = [];
     for (let sample = 0; sample < VALIDITY_SAMPLES_PER_EDGE; sample += 1) {
@@ -396,11 +407,13 @@ function measureEdges(
       },
     };
   });
-  return { edges, screenWidth };
 }
 
 /** Gaussian elimination for the 4x4 similarity normal equations. */
-function solve4(rows: number[][], values: number[]): number[] {
+function solve4(
+  rows: number[][],
+  values: number[],
+): [number, number, number, number] | undefined {
   const size = 4;
   const matrix = Array.from({ length: size }, (_, row) => [
     ...rows[row]!,
@@ -412,11 +425,7 @@ function solve4(rows: number[][], values: number[]): number[] {
       if (Math.abs(matrix[row]![column]!) > Math.abs(matrix[pivot]![column]!))
         pivot = row;
     }
-    if (Math.abs(matrix[pivot]![column]!) < 1e-9)
-      throw new RobotVisionError(
-        'INVALID_ARGUMENT',
-        'Perspective edges are degenerate and cannot be fitted',
-      );
+    if (Math.abs(matrix[pivot]![column]!) < 1e-9) return undefined;
     [matrix[column], matrix[pivot]] = [matrix[pivot]!, matrix[column]!];
     const divisor = matrix[column]![column]!;
     for (let item = column; item <= size; item += 1)
@@ -428,7 +437,7 @@ function solve4(rows: number[][], values: number[]): number[] {
         matrix[row]![item]! -= factor * matrix[column]![item]!;
     }
   }
-  return matrix.map((row) => row[size]!);
+  return matrix.map((row) => row[size]!) as [number, number, number, number];
 }
 
 function similarityEquation(sample: EdgeSample): [number[], number] {
@@ -451,7 +460,7 @@ function fitSimilarity(
   residualAllowancePx: number,
 ): SimilarityFit | undefined {
   if (samples.length < VALIDITY_MIN_CORRESPONDENCES) return undefined;
-  const fit = (subset: readonly EdgeSample[]): SimilarityFit => {
+  const fit = (subset: readonly EdgeSample[]): SimilarityFit | undefined => {
     const normal = Array.from({ length: 4 }, () => [0, 0, 0, 0]);
     const rhs = [0, 0, 0, 0];
     for (const sample of subset) {
@@ -461,12 +470,9 @@ function fitSimilarity(
         for (let j = 0; j < 4; j += 1) normal[i]![j]! += row[i]! * row[j]!;
       }
     }
-    const [tx, ty, scale, rotation] = solve4(normal, rhs) as [
-      number,
-      number,
-      number,
-      number,
-    ];
+    const solution = solve4(normal, rhs);
+    if (!solution) return undefined;
+    const [tx, ty, scale, rotation] = solution;
     const residual = Math.sqrt(
       subset.reduce((sum, sample) => {
         const [row, offset] = similarityEquation(sample);
@@ -498,6 +504,7 @@ function fitSimilarity(
     };
   };
   const first = fit(samples);
+  if (!first) return undefined;
   const kept = samples.filter((sample) => {
     const [row, offset] = similarityEquation(sample);
     const predicted =
@@ -507,7 +514,10 @@ function fitSimilarity(
       row[3]! * first.rotation;
     return Math.abs(predicted - offset) <= residualAllowancePx;
   });
-  return kept.length >= VALIDITY_MIN_CORRESPONDENCES ? fit(kept) : first;
+  // After rejecting outliers only parallel edges may remain.
+  return kept.length >= VALIDITY_MIN_CORRESPONDENCES
+    ? (fit(kept) ?? first)
+    : first;
 }
 
 function measureTexture(
@@ -703,14 +713,55 @@ export async function checkPerspectiveValidity(
   input: PerspectiveValidityInput,
   prepared?: PreparedValidityFrame,
 ): Promise<PerspectiveValidityResult> {
-  const { image, quad } = prepared ?? (await decodeWorkingFrame(input));
-  const { edges, screenWidth } = measureEdges(image, quad);
+  const frame = prepared ?? (await decodeWorkingFrame(input));
+  const glass = await measureOutline(input, frame, frame.quad);
+  const layout = input.pageLayout;
+  if (glass.state === 'valid' || !layout?.topInset) return glass;
+  const inset = layout.topInset / layout.screen.height;
+  if (
+    !(
+      inset > 0 &&
+      inset < 1 &&
+      layout.topInset <= layout.screen.height - layout.height
+    )
+  )
+    return glass;
+
+  // A dark status bar can blend into the bezel. Only substitute the page
+  // boundary when the other three sides independently agree with the glass.
+  const corners = destinationCorners(2, 2, input.rotation ?? 0); // unit square
+  const top = corners.findIndex(
+    (p, i) => p.y === 0 && corners[(i + 1) % 4]!.y === 0,
+  );
+  const missing = glass.edges.filter((edge) => edge.class !== 'on-edge');
+  if (missing.length !== 1 || missing[0]!.side !== SIDES[top]) return glass;
+  const toCamera = computeHomography(corners, quadToArray(frame.quad));
+  const page = quadFromArray(
+    corners.map((p) =>
+      applyHomography(toCamera, { x: p.x, y: p.y === 0 ? inset : p.y }),
+    ),
+  );
+  const visible = await measureOutline(input, frame, page);
+  return visible.state === 'valid' &&
+    visible.edges.every((edge) => edge.class === 'on-edge')
+    ? visible
+    : glass;
+}
+
+async function measureOutline(
+  input: PerspectiveValidityInput,
+  { image, quad }: PreparedValidityFrame,
+  outline: ScreenQuad,
+): Promise<PerspectiveValidityResult> {
+  // Fit on the observed outline, but always report drift and corners for the full glass.
+  const screenWidth = screenWidthOf(quad);
+  const edges = measureEdges(image, outline, screenWidth);
   // Edge offsets are measured on the working frame, with a subpixel-fitting noise floor.
   const residualAllowancePx =
     Math.max(2.5, screenWidth * VALIDITY_ALIGN_TOLERANCE_RATIO) *
     (1 + CALIBRATION_RELATIVE_SLACK);
-  const texture = measureTexture(image, quad, screenWidth);
-  const { band, bandsBySide } = await measureBand(image, quad);
+  const texture = measureTexture(image, outline, screenWidth);
+  const { band, bandsBySide } = await measureBand(image, outline);
   const usable = edges.flatMap((edge) => edge.usable);
   const observedEdges = edges.filter((edge) => edge.usable.length > 0).length;
   const onEdge = edges.filter((edge) => edge.report.class === 'on-edge');

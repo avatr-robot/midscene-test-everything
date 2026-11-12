@@ -44,6 +44,10 @@ export class ArmActionQueue {
   /** Stop blocks successors before signalling the active operation. */
   stop(reason = new Error('Arm actions stopped')): void {
     this.blocked = true;
+    this.cancelAll(reason);
+  }
+
+  cancelAll(reason: unknown): void {
     for (const entry of [...this.entries]) this.cancelEntry(entry, reason);
     if (this.active) this.cancelEntry(this.active, reason);
   }

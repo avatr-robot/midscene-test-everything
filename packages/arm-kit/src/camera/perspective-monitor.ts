@@ -9,13 +9,16 @@ import { RobotArmError } from '../contracts.js';
 import { jpegSize } from './jpeg-size.js';
 import { PerspectiveValidityTracker } from './perspective-validity-tracker.js';
 import { checkPerspectiveValidity } from './perspective-validity.js';
-import type { CameraFrame } from './types.js';
+import type { CameraFrame, PerspectiveReferenceFrame } from './types.js';
 
 const EVIDENCE_MAX_AGE_MS = 30 * 60_000;
 const FRAME_MAX_AGE_MS = 2_000;
 type Evidence = PerspectiveValidityCheck & { key: string };
 
-function validateFrame(frame: CameraFrame, correction: CameraCorrection) {
+export function validatePerspectiveFrame(
+  frame: CameraFrame,
+  correction: CameraCorrection,
+) {
   if (
     !Number.isFinite(frame.capturedAt) ||
     Date.now() - frame.capturedAt > FRAME_MAX_AGE_MS ||
@@ -23,7 +26,7 @@ function validateFrame(frame: CameraFrame, correction: CameraCorrection) {
   )
     throw new RobotArmError(
       'VISION_UNAVAILABLE',
-      'A fresh camera frame is required to check the screen outline',
+      'A fresh camera frame is required to check the camera perspective',
       409,
     );
   const size = jpegSize(frame.jpeg);
@@ -52,7 +55,7 @@ export class PerspectiveMonitor {
       key(): string;
       correction(): CameraCorrection | undefined;
       frame(): Promise<CameraFrame>;
-      referenceFrame(): CameraFrame | undefined;
+      referenceFrame(): PerspectiveReferenceFrame | undefined;
     },
   ) {}
   async load() {
@@ -157,15 +160,17 @@ export class PerspectiveMonitor {
     const key = this.source.key();
     const revision = this.revision;
     const latest = await this.source.frame();
-    validateFrame(latest, correction);
+    validatePerspectiveFrame(latest, correction);
     const frame = this.source.referenceFrame();
     if (!frame || Date.now() - frame.capturedAt > FRAME_MAX_AGE_MS) return;
-    if (frame !== latest) validateFrame(frame, correction);
+    if (frame !== latest) validatePerspectiveFrame(frame, correction);
     const raw = await checkPerspectiveValidity({
       jpeg: frame.jpeg,
       points: correction.points,
       sourceWidth: correction.sourceWidth,
       sourceHeight: correction.sourceHeight,
+      rotation: correction.rotation,
+      pageLayout: frame.pageLayout,
     });
     if (revision !== this.revision || key !== this.source.key())
       throw new RobotArmError(
@@ -173,6 +178,8 @@ export class PerspectiveMonitor {
         'Camera correction changed during outline verification',
         409,
       );
+    // Drag mode or a change of phone view may have withdrawn the reference during decoding.
+    if (!this.source.referenceFrame()) return;
     const previous = this.evidence?.key === key ? this.evidence : undefined;
     const validity = this.tracker.observe({
       cameraId: 'screen',

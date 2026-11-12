@@ -98,7 +98,6 @@ export async function applyCalibrationCommand(
           ctx.screen,
           s.candidate.quality,
           s.auto.evidence,
-          true,
         ).length === 0;
       await runBoundaryVerification(this, s, ctx, 'hover', {
         allowUnacceptedHover: true,

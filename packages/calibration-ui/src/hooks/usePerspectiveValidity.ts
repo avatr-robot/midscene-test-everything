@@ -1,3 +1,4 @@
+import { SCREEN_DRIFT_DETECTION_ENABLED } from '@midscene/arm-kit-shared/contracts';
 import { useEffect, useState } from 'react';
 import {
   type PerspectiveObservation,
@@ -16,7 +17,7 @@ export function usePerspectiveValidity(
     PerspectiveObservation & { key: string }
   >();
   useEffect(() => {
-    if (!enabled) return;
+    if (!SCREEN_DRIFT_DETECTION_ENABLED || !enabled) return;
     const watcher = observePerspective({
       baseUrl,
       visible: () => document.visibilityState !== 'hidden',
@@ -31,5 +32,7 @@ export function usePerspectiveValidity(
       document.removeEventListener('visibilitychange', visible);
     };
   }, [baseUrl, enabled, key]);
-  return enabled && result?.key === key ? result : {};
+  return SCREEN_DRIFT_DETECTION_ENABLED && enabled && result?.key === key
+    ? result
+    : {};
 }

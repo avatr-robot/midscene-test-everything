@@ -10,6 +10,7 @@ export interface SpeechPort {
 }
 interface Pending {
   event: VoiceEvent;
+  text: string;
   priority: number;
   at: number;
   scope?: string;
@@ -52,7 +53,8 @@ export class VoiceSpeaker {
     }
   }
   notify(event: VoiceEvent, priority = 0, scope?: string) {
-    if (!this.enabled || !this.active) return;
+    const message = voiceMessages[event];
+    if (!message || !this.enabled || !this.active) return;
     const at = Date.now();
     const last = this.recent.get(event);
     if (last !== undefined && at - last < 2500) return;
@@ -72,7 +74,13 @@ export class VoiceSpeaker {
       this.cancel();
     }
     this.recent.set(event, at);
-    this.queue.push({ event, priority, at, scope });
+    this.queue.push({
+      event,
+      text: message[this.language === 'zh' ? 1 : 0],
+      priority,
+      at,
+      scope,
+    });
     this.queue.sort((a, b) => b.priority - a.priority);
     this.queue = this.queue.slice(0, 3);
     this.flush();
@@ -102,11 +110,7 @@ export class VoiceSpeaker {
       done('Speech timed out');
     }, 10000);
     try {
-      this.port.speak(
-        voiceMessages[next.event][this.language === 'zh' ? 1 : 0],
-        this.language,
-        done,
-      );
+      this.port.speak(next.text, this.language, done);
     } catch (error) {
       done(String(error));
     }

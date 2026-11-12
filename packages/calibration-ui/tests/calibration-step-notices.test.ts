@@ -1,3 +1,4 @@
+import { calibrationPageMarkers } from '@midscene/arm-kit-shared/assisted-contracts';
 import { expect, it } from '@rstest/core';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -63,6 +64,43 @@ it('asks for a marker page before screen detection and keeps stale command error
   expect(html).toContain('识别屏幕标记');
   expect(html).toContain('打开标记页');
   expect(html).not.toContain('Calibration marker');
+});
+
+it('shows the fit residual when neither independent check marker was visible', () => {
+  const value = controller();
+  const size = { width: 400, height: 800 };
+  value.setup.mapping = {
+    vision: {
+      ...size,
+      cameraId: 'cam',
+      cameraName: 'Camera',
+      perspectiveProfileKey: 'p',
+      fingerprint: 'f',
+    },
+    webToImage: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    layout: {
+      ...size,
+      revision: 1,
+      screen: { ...size, devicePixelRatio: 1 },
+      markers: calibrationPageMarkers(size.width, size.height),
+    },
+    markerErrorPx: 1,
+    accuracy: {
+      fit: { count: 4, meanErrorCssPx: 1, maxErrorCssPx: 1.25 },
+      validation: { count: 0, meanErrorCssPx: 0, maxErrorCssPx: 0 },
+      points: [],
+    },
+  };
+  const html = renderToStaticMarkup(
+    createElement(WebCameraMappingStep, {
+      controller: value,
+      footer: null,
+      savedResult: { verified: true },
+      onContinue() {},
+    }),
+  );
+  expect(html).toContain('最大拟合误差 1.25 CSS px');
+  expect(html).toContain('未检测到独立验证标记');
 });
 
 it('offers automatic collection before recording the safe position', () => {
@@ -224,7 +262,7 @@ it('shows the percent, raw holdout and continuation action for a reviewable fit'
       holdoutMaxMm: 3,
       shortSideMm: 100,
       coverage: 0.64,
-      warnings: [{ label: 'Holdout maximum', percent: 3, targetPercent: 1.5 }],
+      warnings: [{ label: 'Holdout maximum', percent: 3, targetPercent: 2 }],
     },
   };
   const html = renderToStaticMarkup(
@@ -236,13 +274,13 @@ it('shows the percent, raw holdout and continuation action for a reviewable fit'
   );
   expect(html).toContain('3.00 mm');
   expect(html).toContain('3.00%');
-  expect(html).toContain('建议 ≤1.5%');
+  expect(html).toContain('建议 ≤2%');
   expect(html).toContain('10% 的相对容差');
   expect(html).toContain('继续边界验证');
 });
 
 it.each([true, false])(
-  'uses the reference step only if the selected screen needs a reference (has reference: %s)',
+  'opens sampling preparation after teaching (selected screen has a start: %s)',
   (hasReference) => {
     const value = controller();
     value.session = {
@@ -265,18 +303,21 @@ it.each([true, false])(
       createElement(WebCalibrationWorkspace, {
         controller: value,
         prepareFromTeaching: true,
+        screenName: 'iPhone',
         footer: null,
         onActivated: async () => {},
       }),
     );
+    expect(html).not.toContain('设置标定参考位');
+    expect(html).not.toContain('上一步');
+    expect(html).toContain('1 采集标定点');
     if (hasReference) {
-      expect(html).not.toContain('设置标定参考位');
-      expect(html).not.toContain('上一步');
-      expect(html).toContain('1 采集标定点');
       expect(html).toContain('普通');
+      expect(html).not.toContain('记录这块屏幕的采样起点');
     } else {
-      expect(html).toContain('设置标定参考位');
+      expect(html).toContain('「iPhone」中心上方');
       expect(html).toContain('进入拖动模式');
+      expect(html).not.toContain('开始自动标定');
     }
   },
 );
@@ -388,6 +429,10 @@ it.each(['slide', 'standard', 'fast'] as const)(
         }),
       );
     expect(render().includes('确认重试')).toBe(explorationMode === 'slide');
+    value.session.errorDetails = { code: 'MOTION_INTERRUPTED', status: 409 };
+    expect(render()).toContain('重新开始标定');
+    expect(render()).not.toContain('确认重试');
+    value.session.errorDetails = undefined;
     value.session.collectionFailed = false;
     expect(render()).not.toContain('确认重试');
   },

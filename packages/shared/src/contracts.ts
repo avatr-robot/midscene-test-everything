@@ -231,6 +231,8 @@ export interface RobotArmProfile extends VersionedProfile {
   jointBounds?: { min: number; max: number }[];
 }
 export interface ToolProfile extends VersionedProfile {
+  /** Unknown vertical stylus length. Contact geometry is fitted in flange coordinates. */
+  contactFrame?: 'flange';
   offsetMm: Vector3;
   contactDirection: Vector3;
   payload?: ToolPayload;
@@ -651,6 +653,7 @@ export interface ProfileData {
   format: 'midscene.robot-arm.profiles';
   schemaVersion: 1;
   softwarePaused?: boolean;
+  operatorStop?: 'manual-stop' | 'emergency-stop';
   pendingOperation?: { requestId: string; kind: string; startedAt: string };
   robots: RobotArmProfile[];
   tools: ToolProfile[];
@@ -674,6 +677,8 @@ export interface ProfileData {
     string,
     {
       geometryKey: string;
+      /** Older cached errors were scored on the same markers used to fit them. */
+      accuracyBasis?: 'outer-markers';
       mapping: import('./assisted-contracts.js').WebCalibrationMapping;
     }
   >;
@@ -881,6 +886,7 @@ export interface RuntimeState {
   operation?: CurrentOperation;
   recoveryRequired: boolean;
   recoveryReason?: RecoveryReason;
+  requiresOperatorRecovery?: boolean;
   softwarePaused: boolean;
 }
 /** Controller initialization diagnostics; HTTP service availability is separate. */
@@ -1147,4 +1153,6 @@ export interface ControllerMotionSettingsUpdate {
 
 // Browser consumers use these types without loading Node camera backends.
 export type { CameraProfile, CameraCorrection } from './camera/profile.js';
+// Keep outline verification available for investigation while false alarms are resolved.
+export const SCREEN_DRIFT_DETECTION_ENABLED = false;
 export type * from './camera/perspective-validity.js';

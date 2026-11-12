@@ -1,6 +1,7 @@
 import { expect, it } from '@rstest/core';
 import { fitExploration } from '../src/calibration/exploration/fit.js';
 import { coverage } from '../src/calibration/exploration/geometry.js';
+import { explorationQualityWarnings } from '../src/calibration/exploration/quality.js';
 import { mappedExplorationTargets } from '../src/calibration/exploration/targets.js';
 import { fixture, pose } from './fixtures.js';
 
@@ -18,6 +19,32 @@ const phoneMap = (p: { x: number; y: number }) => {
     y: (m[3] * p.x + m[4] * p.y + m[5]) / d,
   };
 };
+
+it.each([
+  [1.58, 2.01, []],
+  [1.65, 2.2, []],
+  [1.66, 2.2, ['Grid RMS']],
+  [1.65, 2.21, ['Holdout maximum']],
+] as const)(
+  'reviews touch errors of %s and %s percent against the short edge',
+  (gridRmsMm, validationMaxMm, labels) => {
+    const warnings = explorationQualityWarnings(
+      { physicalWidthMm: 200, physicalHeightMm: 100 },
+      { rmseMm: 0, total: 9, inliers: 9, minorSpanMm: 80, majorSpanMm: 160 },
+      {
+        gridRmsMm,
+        validationMaxMm,
+        planeRmseMm: 0,
+        gridRmsPx: 0,
+        validationMaxPx: 0,
+        validationRmsPx: 0,
+        coverage: 0.64,
+        samples: [],
+      },
+    );
+    expect(warnings.map((warning) => warning.label)).toEqual(labels);
+  },
+);
 
 it.each([67, 40])(
   'retains a 5.4 px / 1.01 mm holdout on a screen with a %i mm short edge',

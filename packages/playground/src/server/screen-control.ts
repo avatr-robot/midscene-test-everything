@@ -74,9 +74,17 @@ export class ScreenControl {
       const mapped = Boolean(profile?.phoneMapping);
       const measured = hasScreenMapping(profile);
       let reason: ScreenControlReason | undefined;
-      if (!accepted) reason = 'CALIBRATION_REQUIRED';
+      if (!accepted || !binding) reason = 'CALIBRATION_REQUIRED';
       else if (!measured) reason = 'SCREEN_MAPPING_REQUIRED';
-      else if (!mapped) reason = 'MAPPING_REQUIRED';
+      else if (
+        !mapped ||
+        !screen.correction ||
+        !screen.perspectiveTarget ||
+        !this.devices.entries
+          .get(screen.id)
+          ?.camera.isBindingCurrent(binding.vision)
+      )
+        reason = 'MAPPING_REQUIRED';
       result.set(screen.id, {
         id: screen.id,
         calibrationId: calibration?.id,
@@ -87,12 +95,7 @@ export class ScreenControl {
               pixelHeight: profile!.pixelHeight,
             }
           : {}),
-        ready:
-          accepted &&
-          measured &&
-          mapped &&
-          Boolean(screen.correction) &&
-          Boolean(screen.perspectiveTarget),
+        ready: !reason,
         ...(reason ? { reason } : {}),
       });
     }
@@ -148,11 +151,7 @@ export class ScreenControl {
         'Stop the calibration batch before touching the screen manually.',
         409,
       );
-    const calibration = entry.calibration?.phase;
-    if (
-      calibration &&
-      ['queued', 'running', 'cancelling'].includes(calibration)
-    )
+    if (this.devices.hasActiveScreenCalibration)
       throw new RobotArmError(
         'BUSY',
         'Wait for calibration to finish before touching the screen manually.',

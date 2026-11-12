@@ -274,6 +274,14 @@ test('camera-only correction is checked and saved through a released lease', asy
   const checked = [];
   const saved = [];
   const target = { width: 1080, height: 2400, rotation: 0 };
+  const pageLayout = {
+    revision: 1,
+    width: 360,
+    height: 761,
+    topInset: 39,
+    screen: { width: 360, height: 800, devicePixelRatio: 3 },
+    markers: [],
+  };
   const correction = {
     sourceWidth: 1920,
     sourceHeight: 1080,
@@ -290,8 +298,8 @@ test('camera-only correction is checked and saved through a released lease', asy
       assert.equal(id, 'camera');
       owners.add(owner);
       return {
-        checkCorrection: async (value, _jpeg, allowMismatch) => {
-          checked.push({ value, screenId, allowMismatch });
+        checkCorrection: async (value, _jpeg, allowMismatch, layout) => {
+          checked.push({ value, screenId, allowMismatch, layout });
           return { state: 'valid' };
         },
         setPerspective: async (value, nextTarget) =>
@@ -309,9 +317,15 @@ test('camera-only correction is checked and saved through a released lease', asy
     correction,
     target,
     'right-screen',
+    () => pageLayout,
   );
   assert.deepEqual(checked, [
-    { value: correction, screenId: 'right-screen', allowMismatch: false },
+    {
+      value: correction,
+      screenId: 'right-screen',
+      allowMismatch: false,
+      layout: pageLayout,
+    },
   ]);
   assert.deepEqual(saved, [{ correction, target, screenId: 'right-screen' }]);
   assert.equal(owners.size, 0);

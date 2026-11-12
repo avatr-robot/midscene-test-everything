@@ -48,13 +48,21 @@ const itemLabels: Record<string, string> = {
 };
 const describeCause = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause);
+function calibrationStatus(calibrated: boolean, cameraMappingChanged = false) {
+  if (cameraMappingChanged)
+    return {
+      color: 'orange',
+      label: t('Calibration saved · Camera mapping changed'),
+    };
+  return calibrated
+    ? { color: 'green', label: t('Calibrated') }
+    : { color: undefined, label: t('Not calibrated') };
+}
 /** Compact per-screen state for the detected-screen cards. */
 function screenStatus(screen: WorkstationScreenState): {
   color?: string;
   label: string;
 } {
-  if (screen.status === 'ready' && screen.calibrationProfileId)
-    return { color: 'green', label: t('Calibrated') };
   switch (screen.status) {
     case 'unavailable':
       return { color: 'red', label: t('Unavailable') };
@@ -65,7 +73,10 @@ function screenStatus(screen: WorkstationScreenState): {
     case 'unconfigured':
       return { label: t('Not configured') };
     default:
-      return { label: t('Not calibrated') };
+      return calibrationStatus(
+        screen.status === 'ready' && Boolean(screen.calibrationProfileId),
+        screen.status === 'camera-mapping-changed',
+      );
   }
 }
 
@@ -242,7 +253,7 @@ export const CalibrationBatchPanel = forwardRef<
       )
         speakCalibration('autoVerifying', 2);
       else if (
-        action === 'retry' ||
+        (action === 'retry' && !parkingOnly) ||
         action === 'skip' ||
         (action === 'continue' &&
           batch.items[batch.currentIndex]?.status === 'awaiting-placement')
@@ -606,29 +617,33 @@ export const CalibrationBatchPanel = forwardRef<
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Text>{t('Calibration Order')}</Typography.Text>
           <ol>
-            {plan?.screens.map((screen) => (
-              <li key={screen.screenId}>
-                <Typography.Text strong={screen.startsHere}>
-                  {screen.name}
-                </Typography.Text>{' '}
-                <Tag color={screen.calibrated ? 'green' : undefined}>
-                  {t(screen.calibrated ? 'Calibrated' : 'Not calibrated')}
-                </Tag>
-                {screen.startsHere && (
-                  <Tag color="blue">{t('Starts here')}</Tag>
-                )}
-                {screen.expectedCenterMm && (
-                  <div>
-                    <Typography.Text type="secondary">
-                      {t('Expected stylus start: X {0} mm / Y {1} mm', [
-                        screen.expectedCenterMm.x.toFixed(1),
-                        screen.expectedCenterMm.y.toFixed(1),
-                      ])}
-                    </Typography.Text>
-                  </div>
-                )}
-              </li>
-            ))}
+            {plan?.screens.map((screen) => {
+              const status = calibrationStatus(
+                screen.calibrated,
+                screen.cameraMappingChanged,
+              );
+              return (
+                <li key={screen.screenId}>
+                  <Typography.Text strong={screen.startsHere}>
+                    {screen.name}
+                  </Typography.Text>{' '}
+                  <Tag color={status.color}>{status.label}</Tag>
+                  {screen.startsHere && (
+                    <Tag color="blue">{t('Starts here')}</Tag>
+                  )}
+                  {screen.expectedCenterMm && (
+                    <div>
+                      <Typography.Text type="secondary">
+                        {t('Expected stylus start: X {0} mm / Y {1} mm', [
+                          screen.expectedCenterMm.x.toFixed(1),
+                          screen.expectedCenterMm.y.toFixed(1),
+                        ])}
+                      </Typography.Text>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ol>
           <Radio.Group
             aria-label={t('Sampling mode')}

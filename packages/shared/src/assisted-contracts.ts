@@ -81,7 +81,7 @@ export interface WebPoint {
   x: number;
   y: number;
 }
-// Four outer markers fit the page transform. The two inner markers only score it.
+// Outer markers supply the reference fit for scoring the inner check markers.
 export const CALIBRATION_MARKER_CODES = [10, 11, 12, 13, 14, 15] as const;
 export const CALIBRATION_MARKERS = CALIBRATION_MARKER_CODES.map((code, i) => ({
   code,
@@ -235,6 +235,8 @@ export interface CalibrationPageUpdate {
   markersPainted?: boolean;
   markerRequest?: string;
   visibilityProbeAck?: string;
+  /** Painted height in CSS pixels when iOS sizes the first row around system overlays. */
+  visibilityFirstRowHeight?: number;
   touchDiagnosticsVersion?: 2;
   /** Bounded diagnostic history; never used as contact evidence. */
   touchEvents?: PhoneTouchEvent[];
@@ -273,6 +275,8 @@ export interface CalibrationPageUpdate {
   }>;
 }
 export interface CalibrationPageReply {
+  /** Briefly identify the phone selected in Playground. */
+  selectionHint?: true;
   visibilityProbe?: { id: string; phase: 0 | 1 };
   /** Same-camera transition from camera-only preview to a paired Device. */
   pairingToken?: string;
@@ -571,6 +575,8 @@ export interface CalibrationBatchState {
   toolProfileId?: string;
   samplingMode?: CalibrationBatchSamplingMode;
   usesSharedSafePosition?: true;
+  /** Live while the batch searches for the shared Safe Position automatically. */
+  automaticSharedParking?: true;
   sharedSafePosition?: CartesianPose;
   sharedSafePositionVerified?: boolean;
   sharedVisibility?: import('./contracts.js').ScreenVisibilityEvidence;
@@ -623,6 +629,7 @@ export interface CalibrationBatchPlan {
     screenId: string;
     name: string;
     calibrated: boolean;
+    cameraMappingChanged?: boolean;
     startsHere: boolean;
     expectedCenterMm?: WebPoint;
     expectedSource?: 'calibration' | 'estimate';
@@ -650,6 +657,7 @@ export interface WorkstationScreenState {
     | 'unconfigured'
     | 'unavailable'
     | 'mapping-required'
+    | 'camera-mapping-changed'
     | 'calibration-required'
     | 'acceptance-required'
     | 'ready';

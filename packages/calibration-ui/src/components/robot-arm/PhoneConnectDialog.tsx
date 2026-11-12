@@ -71,7 +71,7 @@ export function PhoneConnectDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  /** Continues from a first-screen Add Screen into the marker pass. */
+  /** Continues from Add Screen into the marker pass for this camera. */
   onContinue?: () => void | Promise<void>;
   readiness?: CameraPhoneReadiness;
   /** Cameras a page can be bound to; the current camera is the default. */
@@ -135,7 +135,7 @@ export function PhoneConnectDialog({
   const [savingScreenId, setSavingScreenId] = useState<string>();
   const [screenRenameError, setScreenRenameError] = useState<string>();
   const [restoringPageId, setRestoringPageId] = useState<string>();
-  const [restoreError, setRestoreError] = useState<string>();
+  const [pageActionError, setPageActionError] = useState<string>();
   const openedRef = useRef(false);
   useEffect(() => {
     if (!open) {
@@ -151,7 +151,7 @@ export function PhoneConnectDialog({
     setPageRenameError(undefined);
     setScreenNames({});
     setScreenRenameError(undefined);
-    setRestoreError(undefined);
+    setPageActionError(undefined);
   }, [open]);
   /** The bound screen's current name; the stage and mapping use this name. */
   const boundScreenName = (device: InstallationConnection['devices'][number]) =>
@@ -227,18 +227,24 @@ export function PhoneConnectDialog({
       setSavingScreenId(undefined);
     }
   };
+  const runPageAction = async (action: () => void | Promise<void>) => {
+    setPageActionError(undefined);
+    try {
+      await action();
+    } catch (error) {
+      setPageActionError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
   const restoreHome = async (deviceId: string) => {
     if (!onRestoreHome) return;
     setRestoringPageId(deviceId);
-    setRestoreError(undefined);
-    try {
+    await runPageAction(async () => {
       await onRestoreHome(deviceId);
       message.success(t('Restored the page to its home view.'));
-    } catch (error) {
-      setRestoreError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRestoringPageId(undefined);
-    }
+    });
+    setRestoringPageId(undefined);
   };
   /*
    * A page belongs to the selected camera when it is bound to it. A page that is
@@ -261,15 +267,21 @@ export function PhoneConnectDialog({
    * view is listed as Not connected on its own row and must not be counted as
    * connected in the summary.
    */
+  // Add Screen can start with the newly paired phone even when previously
+  // calibrated screens are offline. The regular status still covers all saved screens.
+  const requiredScreens = onContinue ? undefined : selectedCamera?.screens;
+  const requiredPhones = onContinue
+    ? 1
+    : Math.max(1, selectedCamera?.screenCount ?? 1);
   const readyPhones = pages.filter(
     (device) =>
-      isRequiredPhonePage(device, cameraId, selectedCamera?.screens) &&
+      isRequiredPhonePage(device, cameraId, requiredScreens) &&
       device.visible &&
       device.fullscreen,
   ).length;
   const connectedPhones = pages.filter(
     (device) =>
-      isRequiredPhonePage(device, cameraId, selectedCamera?.screens) &&
+      isRequiredPhonePage(device, cameraId, requiredScreens) &&
       device.visible &&
       device.fullscreen &&
       pageState(device) !== 'waiting',
@@ -296,11 +308,6 @@ export function PhoneConnectDialog({
   const unmatchedScreens = savedScreens.filter(
     (screen) => !matchedScreenIds.has(screen.id),
   );
-  const requiredPhones = Math.max(1, selectedCamera?.screenCount ?? 1);
-  /*
-   * The configured screens decide the count; another page being open is not a
-   * fault, because a multi-screen bench keeps one page per screen.
-   */
   const phonesReady = readyPhones >= requiredPhones;
   const phonesConnected = connectedPhones >= requiredPhones;
   const readyCount = Math.max(readyPhones, requiredPhones);
@@ -399,6 +406,31 @@ export function PhoneConnectDialog({
                 : 'Open the screen page on the phone. It appears here automatically.',
           )}
         </Typography.Paragraph>
+        {publicUrl && (
+          <details
+            className="robot-device-pairing"
+            open={!pages.some((page) => page.visible)}
+          >
+            <summary>{t('Phone page address')}</summary>
+            <div className="robot-device-phone-link">
+              <QRCode value={publicUrl} size={120} type="svg" />
+              <div className="robot-device-phone-address">
+                <Typography.Text>
+                  {t('Scan the QR code to open the calibration page.')}
+                </Typography.Text>
+                <Typography.Paragraph copyable={{ text: publicUrl }}>
+                  <Typography.Link
+                    href={publicUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {publicUrl}
+                  </Typography.Link>
+                </Typography.Paragraph>
+              </div>
+            </div>
+          </details>
+        )}
         {pages.length ? (
           <>
             <ul className="phone-connect-pages">
@@ -454,7 +486,9 @@ export function PhoneConnectDialog({
                             <Button
                               aria-label={t('Reconnect {0}', [device.label])}
                               loading={device.id === connectingDeviceId}
-                              onClick={() => onWake(device.id)}
+                              onClick={() =>
+                                void runPageAction(() => onWake(device.id))
+                              }
                               size="small"
                             >
                               {t('Reconnect page')}
@@ -466,7 +500,9 @@ export function PhoneConnectDialog({
                                 'Remove this offline page with its screen and perspective? This cannot be undone.',
                               )}
                               okText={t('Remove page')}
-                              onConfirm={() => onForget(device.id)}
+                              onConfirm={() =>
+                                runPageAction(() => onForget(device.id))
+                              }
                             >
                               <Button
                                 aria-label={t('Remove page {0}', [
@@ -601,8 +637,8 @@ export function PhoneConnectDialog({
         {pageRenameError ? (
           <Typography.Text type="danger">{pageRenameError}</Typography.Text>
         ) : null}
-        {restoreError ? (
-          <Typography.Text type="danger">{restoreError}</Typography.Text>
+        {pageActionError ? (
+          <Typography.Text type="danger">{pageActionError}</Typography.Text>
         ) : null}
         {screenRenameError ? (
           <Typography.Text type="danger">{screenRenameError}</Typography.Text>
@@ -700,7 +736,7 @@ export function PhoneConnectDialog({
             onClick={() => {
               if (continuing) return;
               setContinuing(true);
-              void Promise.resolve(onContinue()).finally(() =>
+              void runPageAction(onContinue).finally(() =>
                 setContinuing(false),
               );
             }}
@@ -708,30 +744,6 @@ export function PhoneConnectDialog({
           >
             {t('Continue to Calibration')}
           </Button>
-        )}
-        {publicUrl && (
-          <details className="robot-device-pairing">
-            <summary>{t('Phone page address')}</summary>
-            {publicUrl && (
-              <div className="robot-device-phone-link">
-                <QRCode value={publicUrl} size={120} type="svg" />
-                <div className="robot-device-phone-address">
-                  <Typography.Text type="secondary">
-                    {t('Phone page address')}
-                  </Typography.Text>
-                  <Typography.Paragraph copyable={{ text: publicUrl }}>
-                    <Typography.Link
-                      href={publicUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {publicUrl}
-                    </Typography.Link>
-                  </Typography.Paragraph>
-                </div>
-              </div>
-            )}
-          </details>
         )}
       </Space>
     </Modal>

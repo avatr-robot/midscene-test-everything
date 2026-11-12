@@ -162,6 +162,10 @@ export function mountCalibrationPhonePage(
   };
   const message = element('message');
   const pageTitle = element('page-title');
+  const selectionHint = element('selection-hint');
+  element('selection-label').textContent = zh
+    ? '已选中此设备'
+    : 'This device is selected';
   const connection = element('connection');
   const target = element('target');
   const number = element('target-number');
@@ -332,6 +336,23 @@ export function mountCalibrationPhonePage(
         ? screenOrigin.y
         : undefined;
     const { top, bottom } = safeArea;
+    // The missing strip can be at either end in Home Screen mode. Its
+    // height alone is not a measurement of the page origin.
+    if (
+      top === 0 &&
+      bottom === 0 &&
+      /iPhone/i.test(navigator.userAgent) &&
+      displayMode() === 'standalone' &&
+      innerHeight > innerWidth &&
+      innerWidth === Math.min(window.screen.width, window.screen.height) &&
+      (visualViewport?.scale ?? 1) === 1 &&
+      (visualViewport?.offsetTop ?? 0) === 0 &&
+      gap <= innerHeight * 0.1
+    ) {
+      insetReason =
+        measured === undefined ? 'awaiting-origin-tap' : 'touch-origin';
+      return measured;
+    }
     if (top <= 0 && bottom <= 0 && !(measured !== undefined && measured > 0)) {
       insetReason = 'no-safe-area-or-positive-touch-origin';
       return undefined;
@@ -349,7 +370,8 @@ export function mountCalibrationPhonePage(
       type,
       (event) => {
         // Do not revise the accepted mapping from automated calibration touches.
-        if (state && state.view !== 'markers') return;
+        if (state && state.view !== 'markers' && state.view !== 'waiting')
+          return;
         const point =
           'changedTouches' in event ? event.changedTouches[0] : event;
         if (!point) return;
@@ -362,6 +384,7 @@ export function mountCalibrationPhonePage(
           key: viewportKey(),
           y: Math.max(0, screenY - clientY),
         };
+        if (insetReason === 'awaiting-origin-tap') send();
       },
       { passive: true, capture: true },
     );
@@ -619,11 +642,17 @@ export function mountCalibrationPhonePage(
     );
   }
   function paint(next: CalibrationPageReply) {
+    selectionHint.hidden = !next.selectionHint;
     if (next.visibilityProbe?.id !== state?.visibilityProbe?.id) {
       visibilityPainted = undefined;
       const probe = next.visibilityProbe;
       visibilityPattern.style.gridTemplateColumns = `repeat(${policy.visibilityPattern.columns},1fr)`;
-      visibilityPattern.style.gridTemplateRows = `repeat(${policy.visibilityPattern.rows},1fr)`;
+      const { rows } = policy.visibilityPattern;
+      // Keep the checked half of the first row below iOS system overlays.
+      visibilityPattern.style.gridTemplateRows =
+        platform === 'ios'
+          ? `max(calc(100% / ${rows}), calc(2 * env(safe-area-inset-top, 0px))) repeat(${rows - 1},1fr)`
+          : `repeat(${rows},1fr)`;
       if (probe) {
         visibilityTiles.forEach((tile, index) => {
           const column = index % policy.visibilityPattern.columns;
@@ -925,6 +954,18 @@ export function mountCalibrationPhonePage(
       (displayFinished || state?.view === 'completed');
     fullscreenButton.hidden =
       finished || switching || ready || platform === 'ios' || !enter;
+    if (
+      !finished &&
+      ready &&
+      insetReason === 'awaiting-origin-tap' &&
+      (!state || state.view === 'waiting' || state.view === 'markers')
+    ) {
+      fullscreenHelp.hidden = false;
+      fullscreenHelp.textContent = zh
+        ? '请轻点页面一次，以确定网页在屏幕上的位置。'
+        : 'Tap the page once to locate it on the screen.';
+      return;
+    }
     fullscreenHelp.hidden = finished || ready || switching;
     fullscreenHelp.textContent =
       platform === 'ios'
@@ -1019,6 +1060,7 @@ export function mountCalibrationPhonePage(
     }
     const key =
       state?.view === 'markers' &&
+      insetReason !== 'awaiting-origin-tap' &&
       !switching &&
       !document.hidden &&
       fullscreenReady()
@@ -1065,6 +1107,10 @@ export function mountCalibrationPhonePage(
       markersPainted,
       markerRequest: markersPainted ? state?.markerRequest : undefined,
       visibilityProbeAck: visibilityPainted === probeId ? probeId : undefined,
+      visibilityFirstRowHeight:
+        probeId && visibilityPainted === probeId && platform === 'ios'
+          ? visibilityTiles[0].getBoundingClientRect().height
+          : undefined,
       visible: !document.hidden && (visualViewport?.scale || 1) === 1,
       layout: current,
       targetReady: readyTarget,
@@ -1241,6 +1287,7 @@ export function mountCalibrationPhonePage(
       renderCaptureGrid();
       clearMappingTouch();
       state = undefined;
+      selectionHint.hidden = true;
       visibilityPainted = undefined;
       visibilityPattern.style.display = 'none';
       hideGuidance();

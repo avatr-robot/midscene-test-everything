@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import type { CalibrationPageLayout } from '../assisted-contracts.js';
 import type {
   CalibrationVision,
   CalibrationVisionOptions,
@@ -8,6 +9,7 @@ import type {
 import {
   type CameraCorrection,
   RobotArmError,
+  SCREEN_DRIFT_DETECTION_ENABLED,
   type VisionBinding,
   type VisionSnapshot,
 } from '../contracts.js';
@@ -20,10 +22,17 @@ import {
 import type { CameraStream } from './camera-stream.js';
 import { cameraBackend } from './index.js';
 import { jpegSize } from './jpeg-size.js';
-import { PerspectiveMonitor } from './perspective-monitor.js';
+import {
+  PerspectiveMonitor,
+  validatePerspectiveFrame,
+} from './perspective-monitor.js';
 import { PerspectiveTransformer } from './perspective-transformer.js';
 import { checkPerspectiveValidity } from './perspective-validity.js';
-import type { CameraBackend, CameraDevice, CameraFrame } from './types.js';
+import type {
+  CameraBackend,
+  CameraDevice,
+  PerspectiveReferenceFrame,
+} from './types.js';
 import { measuredPerspectiveTarget, validateQuad } from './vision-geometry.js';
 import type { PerspectiveTarget } from './vision-types.js';
 
@@ -120,7 +129,7 @@ export class CameraSession implements CalibrationVision {
   private writeChain = Promise.resolve();
   private readonly transformer = new PerspectiveTransformer();
   /** Supplied by the calibration host for this screen while its phone is paired. */
-  referenceFrame?: () => CameraFrame | undefined;
+  referenceFrame?: () => PerspectiveReferenceFrame | undefined;
   private readonly perspective = new PerspectiveMonitor({
     file: () => `${this.correctionFile}.validity.json`,
     key: () => this.fingerprint(0, 0),
@@ -152,7 +161,7 @@ export class CameraSession implements CalibrationVision {
     if (stored.applied === false) return;
     this.correction = stored.correction;
     if (stored.target) this.target = stored.target;
-    await this.perspective.load();
+    if (SCREEN_DRIFT_DETECTION_ENABLED) await this.perspective.load();
   }
   async forScreen(screenId: string): Promise<CameraSession> {
     const scoped = new CameraSession(
@@ -300,7 +309,7 @@ export class CameraSession implements CalibrationVision {
       fingerprint,
       width: options.width,
       height: options.height,
-      validity: this.perspective.summary(),
+      validity: this.getPerspectiveValidity(),
     };
   }
   private fingerprint(width: number, height: number) {
@@ -319,24 +328,40 @@ export class CameraSession implements CalibrationVision {
   isBindingCurrent(binding: VisionBinding): boolean {
     return Boolean(
       this.correction &&
-        this.perspective.summary()?.state !== 'invalid' &&
+        this.getPerspectiveValidity()?.state !== 'invalid' &&
         binding.cameraId === this.camera.id &&
         binding.fingerprint === this.fingerprint(binding.width, binding.height),
     );
   }
   getPerspectiveValidity() {
-    return this.perspective.summary();
+    return SCREEN_DRIFT_DETECTION_ENABLED
+      ? this.perspective.summary()
+      : undefined;
   }
   checkPerspective(options?: { signal?: AbortSignal; maxAgeMs?: number }) {
-    return this.perspective.check(options);
+    options?.signal?.throwIfAborted();
+    return SCREEN_DRIFT_DETECTION_ENABLED
+      ? this.perspective.check(options)
+      : Promise.resolve(undefined);
   }
-  assertPerspectiveCurrent() {
-    return this.perspective.assertCurrent();
+  async assertPerspectiveCurrent() {
+    if (SCREEN_DRIFT_DETECTION_ENABLED) return this.perspective.assertCurrent();
+    if (!this.correction)
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Correct the camera image before calibration',
+        409,
+      );
+    const frame = this.stream.currentFrame;
+    if (!frame)
+      throw new RobotArmError('VISION_UNAVAILABLE', 'No current camera frame');
+    validatePerspectiveFrame(frame, this.correction);
   }
   async checkCorrection(
     correction: CameraCorrection,
     jpeg?: Buffer,
     allowMismatch = false,
+    pageLayout?: CalibrationPageLayout,
   ) {
     validateCameraCorrection(correction);
     const image = jpeg ?? (await this.rawFrame());
@@ -350,11 +375,15 @@ export class CameraSession implements CalibrationVision {
         'Camera image dimensions changed; repeat correction',
         409,
       );
+    if (!SCREEN_DRIFT_DETECTION_ENABLED) return undefined;
     const result = await checkPerspectiveValidity({
       jpeg: image,
       points: correction.points,
       sourceWidth: size.width,
       sourceHeight: size.height,
+      rotation: correction.rotation,
+      pageLayout:
+        pageLayout ?? (jpeg ? undefined : this.referenceFrame?.()?.pageLayout),
     });
     if (!allowMismatch && result.state === 'invalid')
       throw new RobotArmError(
@@ -446,7 +475,8 @@ export class CameraSession implements CalibrationVision {
     });
   }
   async snapshot(options: CalibrationVisionOptions): Promise<VisionSnapshot> {
-    await this.assertPerspectiveCurrent();
+    // correctedFrame already requests a fresh frame and verifies its dimensions.
+    if (SCREEN_DRIFT_DETECTION_ENABLED) await this.assertPerspectiveCurrent();
     const before = await this.binding(options);
     const correction = this.getCorrection()!;
     const image = await this.correctedFrame(correction, options);

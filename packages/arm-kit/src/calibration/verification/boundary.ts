@@ -36,9 +36,9 @@ export async function runBoundaryVerification(
      */
     returnPose?: CartesianPose;
     /**
-     * Automatic-exploration pace. It is only passed when the fitted calibration
-     * cleared the tighter quality gate; manual verification keeps 500 ms hover
-     * holds. Both modes use the configured action speed and acceleration.
+     * Fast exploration uses shorter hover holds after passing the shared
+     * calibration quality checks. Both modes use the configured action speed
+     * and acceleration.
      */
     fast?: boolean;
     /** Automatic hover verification hands off at corner 1 to the contact group. */

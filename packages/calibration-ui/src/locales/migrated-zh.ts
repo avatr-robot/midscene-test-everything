@@ -601,6 +601,8 @@ const calibrationZh: Record<string, string> = {
   'Waiting for phone': '等待手机连接',
   'Select an online camera to see its preview.':
     '选择已连接的相机，即可查看实时画面。',
+  'Tap the iPhone page once so the camera can locate the screen boundary.':
+    '请轻点 iPhone 上的标定网页一次，再保持手机不动，等待相机识别屏幕边界。',
   'Keep the entire phone visible in the camera preview.':
     '调整相机，让手机完整出现在画面中。',
   'Scan the code with your phone, then keep the opened page visible and fullscreen.':

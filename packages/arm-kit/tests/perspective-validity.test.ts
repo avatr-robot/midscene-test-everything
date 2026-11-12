@@ -1,6 +1,9 @@
 import { describe, expect, it } from '@rstest/core';
+import sharp from 'sharp';
 import {
   type PerspectiveValidityResult,
+  VALIDITY_ALIGN_TOLERANCE_MIN_PX,
+  VALIDITY_WORK_WIDTH,
   checkPerspectiveValidity,
   prepareValidityFrame,
 } from '../src/camera/perspective-validity.js';
@@ -11,6 +14,7 @@ import {
   expand,
   quadOf,
   renderFrame,
+  renderStatusBarFrame,
   rotateQuad,
 } from './fixtures/perspective-frame.js';
 
@@ -190,6 +194,100 @@ describe('perspective validity', () => {
     );
     expect(validity.band.foreignSides).toEqual(['top']);
     expect(validity.state).toBe('invalid');
+  });
+
+  it.each([0, 90] as const)(
+    'verifies a compensated status bar at %i degrees against the visible page',
+    async (rotation) => {
+      const frame = await renderStatusBarFrame(rotation);
+      const original = await checkPerspectiveValidity({
+        ...frame,
+        pageLayout: undefined,
+      });
+      expect(original.state).toBe('invalid');
+      const aligned = await checkPerspectiveValidity(frame);
+      expect(aligned.reasonCode).toBe('ALIGNED');
+      expect(aligned.edges.every((edge) => edge.class === 'on-edge')).toBe(
+        true,
+      );
+      expect(aligned.driftPx).toBeLessThanOrEqual(
+        VALIDITY_ALIGN_TOLERANCE_MIN_PX,
+      );
+      // The estimated corners still describe the full display in working pixels.
+      const scale = VALIDITY_WORK_WIDTH / FRAME_WIDTH;
+      const corner = aligned.proposedPoints!.topLeft;
+      const expected = frame.points.topLeft;
+      expect(
+        Math.hypot(
+          corner.x - expected.x * scale,
+          corner.y - expected.y * scale,
+        ),
+      ).toBeLessThanOrEqual(VALIDITY_ALIGN_TOLERANCE_MIN_PX);
+      const incorrectInset = await checkPerspectiveValidity({
+        ...frame,
+        pageLayout: { ...frame.pageLayout, topInset: 5 },
+      });
+      expect(incorrectInset.state).toBe('invalid');
+      const shifted = await checkPerspectiveValidity({
+        ...frame,
+        points: quadOf({
+          x: expected.x + 13,
+          y: expected.y,
+          width: 360,
+          height: 500,
+        }),
+      });
+      expect(shifted.state).toBe('invalid');
+    },
+  );
+
+  it('projects the page inset through an oblique camera view', async () => {
+    // The near edge is 500 px wide and the far edge is 300 px wide.
+    // At 5% of full display height, the page starts at camera y = 144.4.
+    const jpeg = await sharp(
+      Buffer.from(
+        `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
+        <rect width="1280" height="720" fill="#ddd"/>
+        <polygon points="343,94 857,94 755,656 445,656" fill="#141416"/>
+        <polygon points="358.1,144.4 841.9,144.4 750,650 450,650" fill="#bbb"/>
+      </svg>`,
+      ),
+    )
+      .jpeg()
+      .toBuffer();
+    const frame = {
+      jpeg,
+      sourceWidth: FRAME_WIDTH,
+      sourceHeight: FRAME_HEIGHT,
+      points: {
+        topLeft: { x: 350, y: 100 },
+        topRight: { x: 850, y: 100 },
+        bottomRight: { x: 750, y: 650 },
+        bottomLeft: { x: 450, y: 650 },
+      },
+    };
+    expect((await checkPerspectiveValidity(frame)).state).toBe('invalid');
+    const pageLayout = {
+      revision: 1,
+      width: 360,
+      height: 475,
+      topInset: 25,
+      screen: { width: 360, height: 500, devicePixelRatio: 1 },
+      markers: [],
+    };
+    const aligned = await checkPerspectiveValidity({ ...frame, pageLayout });
+    expect(aligned.reasonCode).toBe('ALIGNED');
+    expect(aligned.edges.every((edge) => edge.class === 'on-edge')).toBe(true);
+    const looseTop = await checkPerspectiveValidity({
+      ...frame,
+      pageLayout,
+      points: {
+        ...frame.points,
+        topLeft: { x: 347, y: 83 },
+        topRight: { x: 853, y: 83 },
+      },
+    });
+    expect(looseTop.state).toBe('invalid');
   });
 
   it('returns the same verdict from a frame it did not decode itself', async () => {

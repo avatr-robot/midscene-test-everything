@@ -21,7 +21,15 @@ export const markerSvg = (id: number) => dictionary.generateSVG(id);
 type Markers = CalibrationPageLayout['markers'];
 
 export function hasMappingMarkerCoverage(fit: number, check: number) {
-  return fit + check >= 4;
+  return (
+    Number.isInteger(fit) &&
+    fit >= 0 &&
+    fit <= 4 &&
+    Number.isInteger(check) &&
+    check >= 0 &&
+    check <= 2 &&
+    fit + check >= 4
+  );
 }
 
 export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
@@ -96,17 +104,23 @@ export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
       'NO_SCREEN_DETECTED',
       'Keep at least four of the six calibration markers visible and in focus.',
     );
-  const webToImage = computeHomography(
-    pairs.flatMap((p) => p.page),
-    pairs.flatMap((p) => p.image),
+  const transform = (observations: typeof pairs) =>
+    computeHomography(
+      observations.flatMap((p) => p.page),
+      observations.flatMap((p) => p.image),
+    );
+  const webToImage = transform(pairs);
+  // Score the inner markers against a fit that has never seen their corners.
+  // The published mapping can still use all uniquely observed corners.
+  const fitInverse = invertHomography(
+    fit.length === pairs.length ? webToImage : transform(fit),
   );
-  const inverse = invertHomography(webToImage);
   const points = pairs.map(({ m, page, image }) => ({
     code: m.code,
     purpose: m.purpose,
     errorCssPx: Math.max(
       ...page.map((p, i) =>
-        pointDistance(p, applyHomography(inverse, image[i])),
+        pointDistance(p, applyHomography(fitInverse, image[i])),
       ),
     ),
   }));

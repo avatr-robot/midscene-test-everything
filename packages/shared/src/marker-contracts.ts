@@ -85,6 +85,8 @@ export interface MarkerCalibrationSession {
   createdAt: number;
   expiresAt: number;
   targets: MarkerCalibrationTarget[];
+  /** Pages released by removing a target remain available for manual pairing. */
+  excludedPageIds?: string[];
 }
 
 export interface MarkerCalibrationTarget {
@@ -141,6 +143,7 @@ export interface MarkerCalibrationDetectionResponse {
 }
 
 export interface ScreenDeviceSummary {
+  awaitingOriginTap?: boolean;
   markersReady?: boolean;
   pageInstanceId?: string;
   /** Robot Vision camera that observes this page, when the console bound it. */

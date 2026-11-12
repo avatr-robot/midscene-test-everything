@@ -1,3 +1,4 @@
+import { supportsFlangeContact } from '@midscene/arm-kit-shared/setup-contracts';
 import type {
   AssistedCalibrationInput,
   AssistedCalibrationSetup,
@@ -50,7 +51,7 @@ function checkedMappingAccuracy(
   )
     throw new RobotArmError(
       'INVALID_MAPPING',
-      'Camera mapping requires distributed fit markers and finite independent check measurements.',
+      'Camera mapping requires four to six visible markers from the page layout and finite corner errors.',
     );
   return accuracy;
 }
@@ -136,7 +137,15 @@ export class CalibrationSetup {
         'Select a camera and corrected output size',
       );
     const robot = this.runtime.profileStore.getRobot(input.robotProfileId);
-    this.runtime.profileStore.getTool(input.toolProfileId);
+    const tool = this.runtime.profileStore.getTool(input.toolProfileId);
+    if (
+      tool.contactFrame === 'flange' &&
+      !supportsFlangeContact(this.runtime.describeCapabilities())
+    )
+      throw new RobotArmError(
+        'INVALID_PROFILE',
+        'This adapter does not support flange contact calibration',
+      );
     if (
       robot.adapterId !== this.runtime.id ||
       robot.connectionIdentity !== this.runtime.connectionIdentity
@@ -281,7 +290,7 @@ export class CalibrationSetup {
     if (!reusable && this.deviceId) {
       const saved = this.runtime.profileStore.calibrationMapping(this.deviceId);
       if (
-        saved &&
+        saved?.accuracyBasis === 'outer-markers' &&
         saved.geometryKey === this.geometryKey &&
         sameLayoutGeometry(saved.mapping.layout, layout)
       ) {
@@ -396,6 +405,7 @@ export class CalibrationSetup {
       )
         await this.runtime.profileStore.saveCalibrationMapping(this.deviceId, {
           geometryKey: this.geometryKey,
+          accuracyBasis: 'outer-markers',
           mapping: this.mapping,
         });
     } catch (error) {

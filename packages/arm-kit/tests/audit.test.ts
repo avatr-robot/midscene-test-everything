@@ -281,13 +281,15 @@ describe('audit trail wired into the runtime', () => {
   it('records an interrupted action with its interruption outcome', async () => {
     const f = await fixture(4, 300);
     try {
-      const running = f.runtime.execute(
-        f.request({ type: 'tap', point: { x: 500, y: 250 } }),
-      );
+      const running = expect(
+        f.runtime.execute(
+          f.request({ type: 'tap', point: { x: 500, y: 250 } }),
+        ),
+      ).rejects.toThrow();
       // Let the motion reach the controller before interrupting it.
       await new Promise((resolve) => setTimeout(resolve, 120));
       await f.runtime.stop();
-      await running.catch(() => undefined);
+      await running;
       await f.auditStore.flush();
 
       const records = f.auditStore.recent(50);
@@ -311,12 +313,14 @@ describe('audit trail wired into the runtime', () => {
   it('records an emergency stop even though it bypasses the lease', async () => {
     const f = await fixture(4, 300);
     try {
-      const running = f.runtime.execute(
-        f.request({ type: 'tap', point: { x: 500, y: 250 } }),
-      );
+      const running = expect(
+        f.runtime.execute(
+          f.request({ type: 'tap', point: { x: 500, y: 250 } }),
+        ),
+      ).rejects.toThrow();
       await new Promise((resolve) => setTimeout(resolve, 120));
       await f.runtime.emergencyStop();
-      await running.catch(() => undefined);
+      await running;
       await f.auditStore.flush();
 
       const records = f.auditStore.recent(50);

@@ -31,6 +31,7 @@ export function ToolSetupStep({
   capabilities,
   axis,
   length,
+  optionalLength,
   disabled,
   fieldError,
   onAxisChange,
@@ -44,6 +45,7 @@ export function ToolSetupStep({
   capabilities?: EffectiveCapabilities;
   axis?: ToolAxis;
   length: number | null;
+  optionalLength: boolean;
   disabled: boolean;
   fieldError?: SetupFieldError;
   onAxisChange: (axis: ToolAxis) => void;
@@ -145,7 +147,9 @@ export function ToolSetupStep({
         />
         <span className="robot-field-help">
           {t(
-            'Measure from the flange origin to the contact tip, including the holder.',
+            optionalLength
+              ? 'Leave blank to calibrate using the flange pose at contact.'
+              : 'Measure from the flange origin to the contact tip, including the holder.',
           )}
         </span>
         {lengthError && (
