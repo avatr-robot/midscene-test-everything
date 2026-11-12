@@ -1,0 +1,12 @@
+{
+  "name": "@midscene/robotics-examples",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx open-device.ts"
+  },
+  "dependencies": {
+    "@midscene/open-device": "workspace:*"
+  }
+}
