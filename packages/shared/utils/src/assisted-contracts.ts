@@ -332,6 +332,8 @@ export interface WebCalibrationMapping {
 export interface CalibrationPreviewPositions {
   reference?: WebPoint;
   cameraBoundary?: WebPoint;
+  cameraBoundaryEnd?: WebPoint;
+  cameraBoundaryLine?: { start: WebPoint; end: WebPoint; allowed: WebPoint };
   safe?: WebPoint;
 }
 /** Configuration prepared before any calibration task exists. */
@@ -379,6 +381,7 @@ export interface WebVerificationEvidence {
 export interface AssistedCalibrationState {
   id: string;
   cameraBoundaryPosition?: CartesianPose;
+  cameraBoundaryEndPosition?: CartesianPose;
   teachingId?: string;
   stage:
     | 'positioning-boundary'

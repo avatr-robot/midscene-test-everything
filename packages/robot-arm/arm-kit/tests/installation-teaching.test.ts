@@ -117,7 +117,10 @@ it('returns from boundary readback noise without commanding a point across the p
       f.runtime.collectAutomaticPoints(binding, (host) =>
         host.move(pose(160.000006, 30.000008, 75)),
       ),
-    ).rejects.toMatchObject({ code: 'CAMERA_BOUNDARY_EXCEEDED' });
+    ).rejects.toMatchObject({
+      code: 'CAMERA_BOUNDARY_EXCEEDED',
+      details: { boundaryExcessMm: expect.closeTo(0.00001, 9) },
+    });
     f.adapter.setPoseForTesting(pose(160.3006, 30.4008, 75));
     for (const point of ['reference', 'cameraBoundary'] as const) {
       await expect(
@@ -208,7 +211,7 @@ it('rejects probe routes crossing a taught camera boundary before submitting mov
   }
 });
 
-it('keeps drag mode while capturing a persistent two-point draft and saves only the current confirmed draft', async () => {
+it('keeps drag mode while capturing a persistent reference and two boundary points and saves only the current confirmed draft', async () => {
   const f = await fixture();
   try {
     const binding = { ...f.binding, cameraId: 'cam' };
@@ -223,10 +226,12 @@ it('keeps drag mode while capturing a persistent two-point draft and saves only 
       y: -50,
       z: 100,
     });
-    f.adapter.setPoseForTesting(pose(100, 20, 100));
+    f.adapter.setPoseForTesting(pose(120, 20, 100));
+    await f.runtime.captureInstallationPoint(binding, 'cameraBoundary');
+    f.adapter.setPoseForTesting(pose(160, 20, 100));
     const boundary = await f.runtime.captureInstallationPoint(
       binding,
-      'cameraBoundary',
+      'cameraBoundaryEnd',
     );
     expect((await f.runtime.state()).state.dragMode).toBe(true);
     const reloaded = new ProfileStore(f.store.filePath);

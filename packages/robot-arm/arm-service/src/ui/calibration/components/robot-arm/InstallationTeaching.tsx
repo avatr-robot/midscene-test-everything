@@ -13,21 +13,29 @@ import type {
 } from '../../teaching-client';
 import { speakCalibration } from '../../voice/calibration';
 import { TeachingDiagram } from './TeachingDiagram';
-const points: InstallationTeachingPoint[] = ['reference', 'cameraBoundary'];
+const points: InstallationTeachingPoint[] = [
+  'reference',
+  'cameraBoundary',
+  'cameraBoundaryEnd',
+];
 const labels = {
   reference: 'Reference Position',
-  cameraBoundary: 'Camera-side Boundary',
+  cameraBoundary: 'Camera-side Boundary A',
+  cameraBoundaryEnd: 'Camera-side Boundary B',
 };
 const teachingVoice = {
   reference: 'teachReference',
   cameraBoundary: 'teachBoundary',
+  cameraBoundaryEnd: 'teachBoundary',
   review: 'confirmCorridor',
 } as const;
 const prompts = {
   reference:
     'Hold the tip 2–5 cm above the screen centre. Free travel stays at this height or above.',
   cameraBoundary:
-    'Move towards the camera at the reference height. Stop before any part of the arm gets close to the camera or stand.',
+    'At the reference height, place the tip at the first point on the intended boundary. Keep the whole arm clear of the camera and stand.',
+  cameraBoundaryEnd:
+    'Move along the intended boundary at the reference height. Record point B at least 20 mm from A.',
 };
 export function InstallationTeaching({
   api,
@@ -35,6 +43,8 @@ export function InstallationTeaching({
   screenName,
   disabled,
   onSaved,
+  onPointRecorded,
+  boundaryPreviewAvailable,
   footer,
   preview,
   externalPreview = false,
@@ -50,6 +60,8 @@ export function InstallationTeaching({
   externalPreview?: boolean;
   illustrationContainer?: HTMLElement | null;
   onSaved?: () => void;
+  onPointRecorded?: () => void;
+  boundaryPreviewAvailable?: boolean;
 }) {
   const [saved, setSaved] = useState<SavedTeaching | null>(null);
   const [enabled, setEnabled] = useState(false);
@@ -233,6 +245,7 @@ export function InstallationTeaching({
               setDraft(next);
               setConfirmed(false);
               setStage(points.find((point) => !next.poses[point]) ?? 'review');
+              onPointRecorded?.();
             }
           })
         }
@@ -256,7 +269,8 @@ export function InstallationTeaching({
               disabled={
                 busy ||
                 disabled ||
-                (point !== 'reference' && !draft?.poses.reference)
+                (point !== 'reference' && !draft?.poses.reference) ||
+                (point === 'cameraBoundaryEnd' && !draft?.poses.cameraBoundary)
               }
               onClick={() => {
                 setStage(point);
@@ -300,6 +314,13 @@ export function InstallationTeaching({
           </>
         ) : (
           <>
+            {boundaryPreviewAvailable === false && (
+              <Typography.Paragraph type="secondary">
+                {t(
+                  'The live boundary overlay requires an existing screen calibration for this camera view. Check the line from A to B directly.',
+                )}
+              </Typography.Paragraph>
+            )}
             <Typography.Paragraph>
               {t(
                 'Free travel stays above the reference height and on the screen side of the boundary.',
@@ -383,7 +404,7 @@ export function InstallationTeaching({
                         t(
                           point === 'reference'
                             ? 'Reference Position'
-                            : 'Camera-side Boundary at Reference Height',
+                            : labels[point],
                         ),
                       ])}
                     </Button>

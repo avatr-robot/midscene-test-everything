@@ -956,9 +956,11 @@ describe('phone-assisted calibration coordinator', () => {
         };
         await f.runtime.captureInstallationPoint(binding, 'reference');
         f.adapter.setPoseForTesting(pose(100, 20, 100));
+        await f.runtime.captureInstallationPoint(binding, 'cameraBoundary');
+        f.adapter.setPoseForTesting(pose(140, 20, 100));
         const draft = await f.runtime.captureInstallationPoint(
           binding,
-          'cameraBoundary',
+          'cameraBoundaryEnd',
         );
         const teaching = await f.runtime.teachInstallation({
           binding,
@@ -1477,6 +1479,18 @@ it('records measured installation reference and camera boundary, requires corrid
       ),
     );
     await f.service.command(f.state.id, 'record-boundary', true);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(
+      pose(
+        reference.positionMm.x + 40,
+        reference.positionMm.y + 50,
+        reference.positionMm.z,
+      ),
+    );
+    await f.service.command(f.state.id, 'record-boundary', true);
     await expect(
       f.service.command(f.state.id, 'save-teaching', false),
     ).rejects.toMatchObject({ code: 'CONFIRMATION_REQUIRED' });
@@ -1560,6 +1574,12 @@ it.each([
         expect((await f.adapter.getState()).dragMode).toBe(true),
       );
       f.adapter.setPoseForTesting(pose(100, 50, 80));
+      await f.service.command(f.state.id, 'record-boundary', true);
+      await f.service.command(f.state.id, 'position-boundary', true);
+      await rstest.waitFor(async () =>
+        expect((await f.adapter.getState()).dragMode).toBe(true),
+      );
+      f.adapter.setPoseForTesting(pose(140, 50, 80));
       await f.service.command(f.state.id, 'record-boundary', true);
       await f.service.command(f.state.id, 'save-teaching', true);
       f.adapter.setPoseForTesting(pose(100, 50.000008, 75));
@@ -1863,17 +1883,30 @@ it('calibrates a vertical MG400 stylus in flange coordinates through automatic a
     );
     f.adapter.setPoseForTesting(pose(100, 50, 60));
     await f.service.command(f.state.id, 'record-boundary', true);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(pose(140, 50, 60));
+    await f.service.command(f.state.id, 'record-boundary', true);
     await f.service.command(f.state.id, 'save-teaching', true);
     // The previous saved boundary cannot authorize an unconfirmed replacement.
     await f.service.command(f.state.id, 'position-boundary', true);
     await rstest.waitFor(async () =>
       expect((await f.adapter.getState()).dragMode).toBe(true),
     );
+    f.adapter.setPoseForTesting(pose(100, 50, 60));
     await f.service.command(f.state.id, 'record-boundary', true);
     await expect(
       f.service.command(f.state.id, 'start-automatic', true),
     ).rejects.toMatchObject({ code: 'INSTALLATION_TEACHING_REQUIRED' });
     expect(adapter.movements).toHaveLength(0);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(pose(140, 50, 60));
+    await f.service.command(f.state.id, 'record-boundary', true);
     await f.service.command(f.state.id, 'save-teaching', true);
     await f.service.command(f.state.id, 'start-automatic', true);
     await rstest.waitFor(

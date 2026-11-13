@@ -1650,6 +1650,19 @@ function GuidedContent({
                       }
                       footer={footer}
                       externalPreview
+                      boundaryPreviewAvailable={Boolean(
+                        config.previewPositions?.cameraBoundaryLine,
+                      )}
+                      onPointRecorded={() => {
+                        void refresh().catch((cause) => {
+                          if (requestedScreen.current === selectedId)
+                            setLoadError(
+                              cause instanceof Error
+                                ? cause.message
+                                : String(cause),
+                            );
+                        });
+                      }}
                       onSaved={() => {
                         setStep(3);
                         void refresh().catch((cause) => {

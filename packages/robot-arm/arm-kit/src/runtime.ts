@@ -4,6 +4,7 @@ import type { MotionTarget } from './application/context.js';
 import {
   assertCameraBoundary,
   cameraBoundaryExcessMm,
+  taughtCameraBoundary,
 } from './application/teaching-constraints.js';
 import type {
   AutomaticCaptureHost,
@@ -73,10 +74,8 @@ import {
   dot,
   flangePose,
   quaternionDistance,
-  rotate,
   scale,
   sub,
-  unit,
 } from './domain.js';
 import type { JogTarget, MotionRequest } from './kernel/contracts.js';
 import type {
@@ -3281,7 +3280,7 @@ export class RobotArmRuntime extends RobotKernel {
     },
     point: import('./contracts.js').InstallationTeachingPoint,
   ) {
-    if (!['reference', 'cameraBoundary'].includes(point))
+    if (!['reference', 'cameraBoundary', 'cameraBoundaryEnd'].includes(point))
       throw new RobotArmError(
         'INVALID_ARGUMENT',
         'Unknown installation position',
@@ -3352,6 +3351,13 @@ export class RobotArmRuntime extends RobotKernel {
           'Record the reference position first',
           409,
         );
+      if (point === 'cameraBoundaryEnd' && !draft.poses.cameraBoundary)
+        throw new RobotArmError(
+          'NOT_READY',
+          'Record boundary point A first',
+          409,
+        );
+      if (point === 'cameraBoundary') delete draft.poses.cameraBoundaryEnd;
       draft.id = randomUUID();
       draft.poses[point] = structuredClone(measured);
       await this.profileStore.saveInstallationTeachingDraft(draft, check);
@@ -3407,35 +3413,21 @@ export class RobotArmRuntime extends RobotKernel {
           'Record installation positions for the current equipment',
           409,
         );
-      const { reference, cameraBoundary } = draft.poses;
-      if (!reference || !cameraBoundary)
+      const { reference, cameraBoundary, cameraBoundaryEnd } = draft.poses;
+      if (!reference || !cameraBoundary || !cameraBoundaryEnd)
         throw new RobotArmError(
           'NOT_READY',
-          'Record the reference and camera-side boundary',
+          'Record the reference and both camera-side boundary points',
           409,
         );
       const tool = this.profileStore.getTool(binding.toolProfileId);
       this.assertAppliedPayload(tool);
-      const a = contactPoint(reference, tool.offsetMm);
-      const b = contactPoint(cameraBoundary, tool.offsetMm);
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const separation = Math.hypot(dx, dy);
-      if (separation < 20)
-        throw new RobotArmError(
-          'INVALID_ARGUMENT',
-          'Record the camera-side boundary at least 20 mm from the reference',
-        );
-      if (
-        distance(
-          unit(rotate(reference.orientation, tool.contactDirection)),
-          unit(rotate(cameraBoundary.orientation, tool.contactDirection)),
-        ) > 0.005
-      )
-        throw new RobotArmError(
-          'INVALID_ARGUMENT',
-          'Keep the stylus contact direction unchanged; rotation around its axis is allowed',
-        );
+      const boundary = taughtCameraBoundary(
+        reference,
+        cameraBoundary,
+        cameraBoundaryEnd,
+        tool,
+      );
       const teaching: import('./contracts.js').InstallationTeaching = {
         ...binding,
         id: randomUUID(),
@@ -3446,11 +3438,8 @@ export class RobotArmRuntime extends RobotKernel {
         ).geometryRevision,
         toolGeometryRevision: tool.geometryRevision,
         referencePose: reference,
-        poses: { reference, cameraBoundary },
-        cameraBoundary: {
-          point: { x: b.x, y: b.y },
-          normal: { x: dx / separation, y: dy / separation },
-        },
+        poses: { reference, cameraBoundary, cameraBoundaryEnd },
+        cameraBoundary: boundary,
         corridorConfirmed: true,
       };
       await this.profileStore.saveInstallationTeaching(teaching);
@@ -3614,8 +3603,8 @@ export class RobotArmRuntime extends RobotKernel {
     const target =
       point === 'reference'
         ? teaching.referencePose
-        : point === 'cameraBoundary'
-          ? teaching.poses.cameraBoundary
+        : point === 'cameraBoundary' || point === 'cameraBoundaryEnd'
+          ? teaching.poses[point]
           : undefined;
     if (!target)
       throw new RobotArmError(

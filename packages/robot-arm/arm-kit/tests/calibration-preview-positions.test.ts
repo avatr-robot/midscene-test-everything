@@ -118,11 +118,14 @@ it('displays the accepted parking pose only for its current camera mapping', asy
       poses: {
         reference: pose(50, -25, 70),
         cameraBoundary: pose(50, -75, 70),
+        cameraBoundaryEnd: pose(100, -75, 70),
       },
       cameraBoundary: { point: { x: 50, y: -75 }, normal: { x: 0, y: -1 } },
       corridorConfirmed: true,
     });
     expect(read()?.cameraBoundary?.y).toBeCloseTo(175);
+    expect(read()?.cameraBoundaryLine?.end.x).toBeCloseTo(200);
+    expect(read()?.cameraBoundaryLine?.allowed.y).toBeLessThan(175);
     current = false;
     expect(read()?.cameraBoundary).toBeUndefined();
     expect(read()?.safe).toBeUndefined();

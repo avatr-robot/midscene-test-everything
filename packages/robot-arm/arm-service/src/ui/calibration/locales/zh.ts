@@ -39,6 +39,31 @@ const calibrationZh: Record<string, string> = {
   'Assign the screen page in Camera Mapping first':
     '请先在相机映射中分配屏幕页面',
   'Record Camera Boundary': '记录相机边界',
+  'Camera-side Boundary A': '相机侧边界 A 点',
+  'Camera-side Boundary B': '相机侧边界 B 点',
+  'Record Boundary A': '记录边界 A 点',
+  'Record Boundary B': '记录边界 B 点',
+  'Teach Boundary A': '示教边界 A 点',
+  'Teach Boundary B': '示教边界 B 点',
+  'Record two points on the intended camera-side boundary.':
+    '在预定的相机侧边界线上记录两个点。',
+  'At the reference height, place the tip at the first point on the intended boundary. Keep the whole arm clear of the camera and stand.':
+    '在参考高度将笔尖移到预定边界的 A 点，确保整条机械臂与相机和支架保持净空。',
+  'Move along the intended boundary at the reference height. Record point B at least 20 mm from A.':
+    '在参考高度沿预定边界移动，记录与 A 点相距至少 20 mm 的 B 点。',
+  'Record boundary point A first': '请先记录边界 A 点',
+  'Record boundary points A and B at least 20 mm apart in XY':
+    '边界 A、B 两点的水平间距至少为 20 mm。',
+  'Keep the reference at least 20 mm from the camera-side boundary line':
+    '参考位与相机侧边界线的水平垂直距离至少为 20 mm。',
+  'Record the reference and both camera-side boundary points':
+    '请记录参考位和相机侧边界的两个点。',
+  'Record the reference and both boundary points, then confirm the clear arm corridor':
+    '请记录参考位和两个边界点，再确认整条机械臂的通行净空。',
+  'The target exceeds the taught camera-side boundary by {0} mm.':
+    '目标越过已示教的相机侧边界 {0} mm。',
+  'The live boundary overlay requires an existing screen calibration for this camera view. Check the line from A to B directly.':
+    '实时边界叠加需要此相机视图中已有的屏幕标定。请直接检查 A 到 B 的边界线。',
   'Save Installation Teaching': '保存安装示教',
   'Teach Camera Boundary': '示教相机边界',
   'Reteach Installation': '重新示教',

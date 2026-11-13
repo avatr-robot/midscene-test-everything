@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getDebug } from '@midscene/shared/logger';
+import { taughtCameraBoundary } from '../application/teaching-constraints.js';
 import type {
   AssistedCalibrationAction,
   AssistedCalibrationInput,
@@ -24,15 +25,7 @@ import {
   isRobotArmError,
   semanticJson,
 } from '../contracts.js';
-import {
-  add,
-  assertPose,
-  contactPoint,
-  distance,
-  rotate,
-  scale,
-  unit,
-} from '../domain.js';
+import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
 import { verifyScreenVisibility } from './camera/visibility.js';
 import type { CalibrationVision } from './camera/vision.js';
@@ -851,6 +844,7 @@ export class CalibrationWorkflow {
       this.beginTask(mapping, s.referencePosition, s.safePosition);
       this.state!.teachingId = s.teachingId;
       this.state!.cameraBoundaryPosition = s.cameraBoundaryPosition;
+      this.state!.cameraBoundaryEndPosition = s.cameraBoundaryEndPosition;
     } catch (error) {
       if (
         isRobotArmError(error) &&
@@ -1067,6 +1061,8 @@ export class CalibrationWorkflow {
             ? teaching.referencePose
             : undefined;
         this.state!.cameraBoundaryPosition = teaching.poses.cameraBoundary;
+        this.state!.cameraBoundaryEndPosition =
+          teaching.poses.cameraBoundaryEnd;
         this.state!.teachingId = teaching.id;
         this.state!.referencePosition =
           this.options.referencePosition?.() ?? this.state!.referencePosition;
@@ -1232,6 +1228,9 @@ export class CalibrationWorkflow {
         this.beginTask(mapping, referencePosition, safePosition);
         this.state!.teachingId = teachingId;
         this.state!.cameraBoundaryPosition = cameraBoundaryPosition;
+        this.state!.cameraBoundaryEndPosition = sameGeometry
+          ? s.cameraBoundaryEndPosition
+          : undefined;
         if (action === 'retry-standard')
           await this.startCollection(this.state!, 'standard', true, confirmed);
       } else if (action === 'position-boundary') {
@@ -1248,7 +1247,10 @@ export class CalibrationWorkflow {
           );
         await this.assertMechanicalFrame();
         this.recordPositionRequested = false;
-        s.cameraBoundaryPosition = undefined;
+        if (s.teachingId || s.cameraBoundaryEndPosition) {
+          s.cameraBoundaryPosition = undefined;
+          s.cameraBoundaryEndPosition = undefined;
+        }
         s.teachingId = undefined;
         s.stage = 'positioning-boundary';
         this.capture = this.recordPosition(false, true)
@@ -1267,9 +1269,14 @@ export class CalibrationWorkflow {
             'Position the arm at the camera-side boundary first',
             409,
           );
+        const recordingEnd = Boolean(s.cameraBoundaryPosition);
         this.recordPositionRequested = true;
         await this.capture;
-        if (!s.cameraBoundaryPosition)
+        if (
+          !(recordingEnd
+            ? s.cameraBoundaryEndPosition
+            : s.cameraBoundaryPosition)
+        )
           throw new RobotArmError(
             'NOT_READY',
             s.error ?? 'Boundary was not recorded',
@@ -1281,11 +1288,12 @@ export class CalibrationWorkflow {
           s.stage !== 'ready' ||
           !s.referencePosition ||
           !s.cameraBoundaryPosition ||
+          !s.cameraBoundaryEndPosition ||
           this.capture
         )
           throw new RobotArmError(
             'CONFIRMATION_REQUIRED',
-            'Record both positions and confirm the clear arm corridor',
+            'Record the reference and both boundary points, then confirm the clear arm corridor',
             409,
           );
         await this.assertMechanicalFrame();
@@ -1294,24 +1302,13 @@ export class CalibrationWorkflow {
         );
         const reference = s.referencePosition;
         const boundary = s.cameraBoundaryPosition;
-        const a = contactPoint(reference, tool.offsetMm);
-        const b = contactPoint(boundary, tool.offsetMm);
-        const separation = Math.hypot(b.x - a.x, b.y - a.y);
-        if (separation < 20)
-          throw new RobotArmError(
-            'INVALID_ARGUMENT',
-            'Record the camera-side boundary at least 20 mm from the reference',
-          );
-        if (
-          distance(
-            unit(rotate(reference.orientation, tool.contactDirection)),
-            unit(rotate(boundary.orientation, tool.contactDirection)),
-          ) > 0.005
-        )
-          throw new RobotArmError(
-            'INVALID_ARGUMENT',
-            'Keep the stylus contact direction unchanged',
-          );
+        const boundaryEnd = s.cameraBoundaryEndPosition;
+        const cameraBoundary = taughtCameraBoundary(
+          reference,
+          boundary,
+          boundaryEnd,
+          tool,
+        );
         const teaching = {
           id: randomUUID(),
           recordedAt: new Date().toISOString(),
@@ -1324,14 +1321,12 @@ export class CalibrationWorkflow {
           ).geometryRevision,
           toolGeometryRevision: tool.geometryRevision,
           referencePose: reference,
-          poses: { reference, cameraBoundary: boundary },
-          cameraBoundary: {
-            point: { x: b.x, y: b.y },
-            normal: {
-              x: (b.x - a.x) / separation,
-              y: (b.y - a.y) / separation,
-            },
+          poses: {
+            reference,
+            cameraBoundary: boundary,
+            cameraBoundaryEnd: boundaryEnd,
           },
+          cameraBoundary,
           corridorConfirmed: true as const,
         };
         await this.runtime.configure(() =>
@@ -1358,6 +1353,7 @@ export class CalibrationWorkflow {
         // screen only needs a sampling start within the shared installation.
         if (s.referencePosition || !s.teachingId) {
           s.cameraBoundaryPosition = undefined;
+          s.cameraBoundaryEndPosition = undefined;
           s.teachingId = undefined;
         }
         s.referencePosition = undefined;
@@ -1750,7 +1746,8 @@ export class CalibrationWorkflow {
         if (!this.fittedGeometry) s.referencePosition = undefined;
         s.stage = this.fittedGeometry ? 'return-ready' : 'ready';
       } else if (recordBoundary) {
-        s.cameraBoundaryPosition = pose;
+        if (s.cameraBoundaryPosition) s.cameraBoundaryEndPosition = pose;
+        else s.cameraBoundaryPosition = pose;
         s.stage = 'ready';
       } else {
         s.referencePosition = pose;

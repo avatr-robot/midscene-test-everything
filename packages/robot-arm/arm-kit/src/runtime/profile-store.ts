@@ -290,6 +290,8 @@ export class ProfileStore {
       assertPose(t.referencePose);
       assertPose(t.poses?.reference);
       assertPose(t.poses?.cameraBoundary);
+      if (t.poses.cameraBoundaryEnd !== undefined)
+        assertPose(t.poses.cameraBoundaryEnd);
       const n = t.cameraBoundary?.normal;
       const p = t.cameraBoundary?.point;
       if (

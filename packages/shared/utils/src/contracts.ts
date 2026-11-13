@@ -605,7 +605,10 @@ export interface PlaneQuality {
   minorSpanMm: number;
   majorSpanMm: number;
 }
-export type InstallationTeachingPoint = 'reference' | 'cameraBoundary';
+export type InstallationTeachingPoint =
+  | 'reference'
+  | 'cameraBoundary'
+  | 'cameraBoundaryEnd';
 /** Measured mounting, shared by screens on the same robot/tool/camera. */
 export interface InstallationTeaching {
   invalidatedReason?: string;
@@ -618,7 +621,9 @@ export interface InstallationTeaching {
   robotGeometryRevision: number;
   toolGeometryRevision: number;
   referencePose: CartesianPose;
-  poses: Record<InstallationTeachingPoint, CartesianPose>;
+  poses: Record<'reference' | 'cameraBoundary', CartesianPose> & {
+    cameraBoundaryEnd?: CartesianPose;
+  };
   cameraBoundary: { point: ScreenPoint; normal: ScreenPoint };
   corridorConfirmed: true;
 }

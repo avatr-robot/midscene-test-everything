@@ -1,4 +1,4 @@
-import { Button, Checkbox, Popconfirm, Radio, Typography } from 'antd';
+import { Button, Checkbox, Popconfirm, Radio, Space, Typography } from 'antd';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CalibrationRequestError } from '../../client';
@@ -283,15 +283,23 @@ export function WebCalibrationWorkspace({
       loading={busy}
       onClick={() => command('record-boundary', true)}
     >
-      {t('Record Camera Boundary')}
+      {t(s?.cameraBoundaryPosition ? 'Record Boundary B' : 'Record Boundary A')}
     </Button>
-  ) : stage === 'ready' && !s.teachingId && s.cameraBoundaryPosition ? (
+  ) : stage === 'ready' && !s.teachingId && s.cameraBoundaryEndPosition ? (
     <Button
       type="primary"
       disabled={busy || !confirmed}
       onClick={() => command('save-teaching', true)}
     >
       {t('Save Installation Teaching')}
+    </Button>
+  ) : stage === 'ready' && s.referencePosition && !s.teachingId ? (
+    <Button
+      type="primary"
+      disabled={busy || !readyToCapture}
+      onClick={() => command('position-boundary', true)}
+    >
+      {t(s.cameraBoundaryPosition ? 'Teach Boundary B' : 'Teach Boundary A')}
     </Button>
   ) : stage === 'ready' ? (
     <Button
@@ -478,17 +486,9 @@ export function WebCalibrationWorkspace({
                   {t(
                     s.teachingId
                       ? 'Saved installation teaching is shared by screens on this camera.'
-                      : 'Record the camera-side boundary once to enable automatic camera avoidance.',
+                      : 'Record two points on the intended camera-side boundary.',
                   )}
                 </Typography.Paragraph>
-                {!s.teachingId && !s.cameraBoundaryPosition && (
-                  <Button
-                    disabled={busy || !readyToCapture}
-                    onClick={() => command('position-boundary', true)}
-                  >
-                    {t('Teach Camera Boundary')}
-                  </Button>
-                )}
                 {s.teachingId && (
                   <Button
                     disabled={busy || !readyToCapture}
@@ -497,22 +497,35 @@ export function WebCalibrationWorkspace({
                     {t('Reteach Installation')}
                   </Button>
                 )}
-                {s.cameraBoundaryPosition && !s.teachingId && (
-                  <Checkbox
-                    checked={confirmed}
-                    onChange={(e) => setConfirmed(e.target.checked)}
-                  >
-                    {t(
-                      'The phone is securely fixed, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.',
-                    )}
-                  </Checkbox>
+                {s.cameraBoundaryEndPosition && !s.teachingId && (
+                  <Space direction="vertical">
+                    <Button
+                      disabled={busy || !readyToCapture}
+                      onClick={() => {
+                        setConfirmed(false);
+                        command('position-boundary', true);
+                      }}
+                    >
+                      {t('Teach Boundary A')}
+                    </Button>
+                    <Checkbox
+                      checked={confirmed}
+                      onChange={(e) => setConfirmed(e.target.checked)}
+                    >
+                      {t(
+                        'The phone is securely fixed, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.',
+                      )}
+                    </Checkbox>
+                  </Space>
                 )}
               </div>
             )}
           {stage === 'positioning-boundary' && (
             <Typography.Paragraph>
               {t(
-                'Move straight from the reference towards the camera and stop at a safe boundary. Leave clearance for the whole arm, then release it before recording.',
+                s?.cameraBoundaryPosition
+                  ? 'Move along the intended boundary at the reference height. Record point B at least 20 mm from A.'
+                  : 'At the reference height, place the tip at the first point on the intended boundary. Keep the whole arm clear of the camera and stand.',
               )}
             </Typography.Paragraph>
           )}
@@ -573,48 +586,42 @@ export function WebCalibrationWorkspace({
                       )}
                 </Typography.Paragraph>
               )}
-              {stage === 'ready' &&
-                s?.referencePosition &&
-                (s.teachingId || !s.cameraBoundaryPosition) && (
-                  <>
-                    <Radio.Group
-                      value={mode}
-                      onChange={(e) => {
-                        setMode(e.target.value);
-                        setConfirmed(false);
-                      }}
-                    >
-                      <Radio.Button value="slide">{t('Fast')}</Radio.Button>
-                      <Radio.Button value="standard">
-                        {t('Regular')}
-                      </Radio.Button>
-                    </Radio.Group>
-                    <Typography.Paragraph>
-                      {t(
-                        'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.',
-                      )}
-                    </Typography.Paragraph>
-                    <Checkbox
-                      checked={confirmed}
-                      onChange={(e) => {
-                        setConfirmed(e.target.checked);
-                        if (e.target.checked)
-                          speakCalibration(
-                            mode === 'slide'
-                              ? 'slideClearance'
-                              : 'samplingReady',
-                            2,
-                          );
-                      }}
-                    >
-                      {t(
-                        mode === 'standard'
-                          ? 'I confirm the setup and clear workspace for sampling and automatic boundary verification.'
-                          : 'I confirm the screen is securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.',
-                      )}
-                    </Checkbox>
-                  </>
-                )}
+              {stage === 'ready' && s?.referencePosition && s.teachingId && (
+                <>
+                  <Radio.Group
+                    value={mode}
+                    onChange={(e) => {
+                      setMode(e.target.value);
+                      setConfirmed(false);
+                    }}
+                  >
+                    <Radio.Button value="slide">{t('Fast')}</Radio.Button>
+                    <Radio.Button value="standard">{t('Regular')}</Radio.Button>
+                  </Radio.Group>
+                  <Typography.Paragraph>
+                    {t(
+                      'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.',
+                    )}
+                  </Typography.Paragraph>
+                  <Checkbox
+                    checked={confirmed}
+                    onChange={(e) => {
+                      setConfirmed(e.target.checked);
+                      if (e.target.checked)
+                        speakCalibration(
+                          mode === 'slide' ? 'slideClearance' : 'samplingReady',
+                          2,
+                        );
+                    }}
+                  >
+                    {t(
+                      mode === 'standard'
+                        ? 'I confirm the setup and clear workspace for sampling and automatic boundary verification.'
+                        : 'I confirm the screen is securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.',
+                    )}
+                  </Checkbox>
+                </>
+              )}
               {s && <ExplorationProgress session={s} />}
               {(stage === 'safety' || stage === 'returning') && (
                 <Typography.Paragraph>
