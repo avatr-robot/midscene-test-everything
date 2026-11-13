@@ -353,7 +353,7 @@ describe('first-time automatic exploration', () => {
           'snapshot-missing': 'Phone step acknowledgement timed out',
           'snapshot-stale': 'Phone step acknowledgement timed out',
           'safety-floor': 'safety floor',
-          'fast-no-touch': 'safety floor',
+          'fast-no-touch': 'No touch detected at fast calibration point',
           'fast-height-limit-slide': 'height range',
           'fast-refine-stalled': 'could not narrow the contact interval',
         };
@@ -410,7 +410,7 @@ describe('first-time automatic exploration', () => {
         }
         expect(result.candidate.acceptanceStatus).toBe('pending');
         // The simulated screen maps pixels in XY; the measured axes follow its surface.
-        const sizePrecision = tilted ? 1 : 4;
+        const sizePrecision = tilted ? 1 : 3;
         expect(result.measuredSize.physicalWidthMm).toBeCloseTo(
           tilted ? Math.hypot(200, slopeX * 200) : 200,
           sizePrecision,

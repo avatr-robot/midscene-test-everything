@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, describe, expect, it, rstest } from '@rstest/core';
 import { createCalibrationClient } from '../../arm-service/src/ui/calibration/client.js';
 import {
+  CALIBRATION_PHONE_POLICY,
   calibrationCaptureTargets,
   calibrationPageMarkers,
   mappingQualityWarnings,
@@ -581,7 +582,7 @@ describe('phone-assisted calibration coordinator', () => {
             stage: 'interrupted',
             errorDetails: { code: 'PHONE_STEP_TIMEOUT' },
           }),
-        { timeout: 10000 },
+        { timeout: 2 * CALIBRATION_PHONE_POLICY.stepAcknowledgementMs + 3000 },
       );
       expect(f.adapter.movements).toHaveLength(1);
       expect(audit).toHaveBeenCalledWith(
@@ -591,14 +592,14 @@ describe('phone-assisted calibration coordinator', () => {
             code: 'PHONE_STEP_TIMEOUT',
             details: expect.objectContaining({
               phase: 'result',
-              purpose: 'search',
+              purpose: 'coarse-search',
             }),
           }),
           detail: expect.objectContaining({
             phoneConnected: true,
             phoneObservations: expect.arrayContaining([
               expect.objectContaining({
-                purpose: 'search',
+                purpose: 'coarse-search',
                 outcome: 'PHONE_STEP_TIMEOUT',
                 replies: [
                   expect.objectContaining({

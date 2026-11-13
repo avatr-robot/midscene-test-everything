@@ -3472,7 +3472,10 @@ export class RobotArmRuntime extends RobotKernel {
           'Record boundary point A first',
           409,
         );
-      if (point === 'cameraBoundary') delete draft.poses.cameraBoundaryEnd;
+      if (point === 'cameraBoundary') {
+        const { cameraBoundaryEnd: _previousEnd, ...poses } = draft.poses;
+        draft.poses = poses;
+      }
       draft.id = randomUUID();
       draft.poses[point] = structuredClone(measured);
       await this.profileStore.saveInstallationTeachingDraft(draft, check);
