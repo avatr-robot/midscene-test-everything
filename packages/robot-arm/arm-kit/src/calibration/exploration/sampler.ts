@@ -48,6 +48,7 @@ const PLANE_PROBE_APPROACH_MM = 2;
 const PLANE_PROBE_MIN_DEPTH_MM = 4;
 const PLANE_PROBE_MARGIN_MM = 1;
 const PLANE_CORNER_RETRY_INSET_MM = 3;
+const FAST_INSET_RETRIES = 3;
 const PLANE_CORNER_MAX_BELOW_PREDICTED_MM = 2;
 const PLANE_CORNER_NEAR_STEP_MM = 0.25;
 const PLANE_CORNER_REPRESS_STEP_MM = 0.25;
@@ -856,6 +857,39 @@ export async function runAutoExploration(
         plane.normal.z
       );
     };
+    const probeWithInsetRetries = async (
+      { x, y }: ScreenPoint2,
+      probe: (point: ScreenPoint2, inset: boolean) => Promise<TouchPoint>,
+      accepts: (touch: TouchPoint) => boolean,
+    ) => {
+      const dx = first.contact.x - x;
+      const dy = first.contact.y - y;
+      const distance = Math.hypot(dx, dy);
+      const retries = Math.min(
+        FAST_INSET_RETRIES,
+        Math.max(0, Math.ceil(distance / PLANE_CORNER_RETRY_INSET_MM) - 1),
+      );
+      for (let attempt = 0; ; attempt++) {
+        const fraction =
+          attempt === 0
+            ? 0
+            : (attempt * PLANE_CORNER_RETRY_INSET_MM) / distance;
+        try {
+          const touch = await probe(
+            { x: x + dx * fraction, y: y + dy * fraction },
+            attempt > 0,
+          );
+          if (accepts(touch) || attempt === retries) return touch;
+        } catch (error) {
+          if (
+            attempt === retries ||
+            !(error instanceof RobotArmError) ||
+            error.details?.confirmedNoTouch !== true
+          )
+            throw error;
+        }
+      }
+    };
     let holdoutHeightMm = 0;
     for (const [index, target] of corners.entries()) {
       setPhase(host, session, {
@@ -934,35 +968,17 @@ export async function runAutoExploration(
           );
         }
       };
-      let touch: TouchPoint;
-      try {
-        touch = await probeCorner({ x, y }, false);
-      } catch (error) {
-        // A confirmed miss during search or final press may be a cutout or
-        // a small lateral mapping error.
-        // Recompute the local probe limit inside the same hard Z window.
-        if (
-          !(error instanceof RobotArmError) ||
-          error.details?.confirmedNoTouch !== true
-        )
-          throw error;
-        const dx = first.contact.x - x;
-        const dy = first.contact.y - y;
-        const distance = Math.hypot(dx, dy);
-        if (distance <= PLANE_CORNER_RETRY_INSET_MM) throw error;
-        const fraction = PLANE_CORNER_RETRY_INSET_MM / distance;
-        touch = await probeCorner(
-          { x: x + dx * fraction, y: y + dy * fraction },
-          true,
-        );
-      }
-      if (index === corners.length - 1) {
-        const holdoutPlane = fitSamplePlane(measured, preferred);
-        holdoutHeightMm = Math.abs(
-          heightAt(holdoutPlane, touch.contact.x, touch.contact.y) -
-            touch.contact.z,
-        );
-      }
+      const touch = await probeWithInsetRetries(
+        { x, y },
+        probeCorner,
+        ({ contact }) => {
+          if (index !== corners.length - 1) return true;
+          holdoutHeightMm = Math.abs(
+            heightAt(plane, contact.x, contact.y) - contact.z,
+          );
+          return holdoutHeightMm <= MAX_FAST_HOLDOUT_MM;
+        },
+      );
       measured.push(touch.contact);
       grid.push({ ...touch, target });
       await recordSample(touch, 'fit', 'stepped');
@@ -1035,23 +1051,37 @@ export async function runAutoExploration(
       }
       const method = touch ? 'slide' : 'stepped';
       if (!touch) {
-        const approach = predicted + APPROACH_LIFT_MM;
-        const floor = pressedZ - TOUCH_SAFETY_MARGIN_MM;
-        touch = await touchAt(
-          x,
-          y,
-          approach,
-          `Grid ${target.id}`,
-          approach - floor,
-          false,
-          floor,
+        const probeValidation = async (point: ScreenPoint2, inset = false) => {
+          const pointZ = heightAt(fitted.plane, point.x, point.y);
+          const approach = pointZ + APPROACH_LIFT_MM;
+          const floor = Math.max(
+            pressedZ - TOUCH_SAFETY_MARGIN_MM,
+            pointZ - PRESS_MM - TOUCH_SAFETY_MARGIN_MM,
+          );
+          return touchAt(
+            point.x,
+            point.y,
+            approach,
+            `Grid ${target.id}${inset ? ' inset retry' : ''}`,
+            approach - floor,
+            false,
+            floor,
+          );
+        };
+        const measureHeight = ({ contact }: TouchPoint) => {
+          const predictedZMm = heightAt(fitted.plane, contact.x, contact.y);
+          return {
+            predictedZMm,
+            heightErrorMm: Math.abs(contact.z - predictedZMm),
+          };
+        };
+        touch = await probeWithInsetRetries(
+          { x, y },
+          probeValidation,
+          (sample) =>
+            measureHeight(sample).heightErrorMm <= MAX_FAST_HOLDOUT_MM,
         );
-        const predictedZMm = heightAt(
-          fitted.plane,
-          touch.contact.x,
-          touch.contact.y,
-        );
-        const heightErrorMm = Math.abs(touch.contact.z - predictedZMm);
+        const { predictedZMm, heightErrorMm } = measureHeight(touch);
         if (index === 0 && touch.heightIntervalMm && session.auto) {
           const [lower, upper] = touch.heightIntervalMm;
           session.auto.independentHeightCheck = {

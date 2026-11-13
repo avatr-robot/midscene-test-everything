@@ -1393,7 +1393,7 @@ it('exposes received touch diagnostics without treating history as active contac
   }
 });
 
-it.each([1.25, 2.5])(
+it.each([1.875, 3.5])(
   'preserves reviewable height error within the physical compensation range (%s mm)',
   async (heightError) => {
     const f = await setup();
@@ -1427,9 +1427,9 @@ it.each([1.25, 2.5])(
       await rstest.waitFor(
         () => {
           const state = f.service.status()!;
-          if (heightError > 2) {
+          if (heightError > 3) {
             expect(state.stage).toBe('interrupted');
-            expect(state.error).toMatch(/2 mm compensation limit/);
+            expect(state.error).toMatch(/3 mm compensation limit/);
           } else {
             expect(state.stage).toBe('boundary-review');
             expect(state.explorationQuality?.warnings).toContainEqual(
