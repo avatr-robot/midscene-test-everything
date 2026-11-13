@@ -5,6 +5,45 @@ import { RobotDriverBoundary } from '../src/kernel/driver-boundary.js';
 import { ProfileStore } from '../src/runtime/profile-store.js';
 import { fixture, pose } from './fixtures.js';
 
+it.each(['lift', 'traverse', 'lower'] as const)(
+  'rechecks and retries a stationary %s within the same calibration',
+  async (leg) => {
+    const f = await fixture();
+    const startPose = await f.adapter.getPose();
+    const target = pose(110, -50, 100);
+    const move = rstest
+      .spyOn(RobotDriverBoundary.prototype, 'moveLinear')
+      .mockRejectedValueOnce(
+        new RobotArmError(
+          'CALIBRATION_MOTION_NOT_STARTED',
+          'The calibration move did not start',
+          409,
+          { startPose },
+        ),
+      );
+    try {
+      await f.runtime.collectAutomaticPoints(f.binding, async (host) => {
+        await host.move(target, {
+          referenceTravel: {
+            attemptId: 'stationary-approach',
+            direction: 'approach',
+            leg,
+          },
+        });
+      });
+      expect(move).toHaveBeenCalledTimes(2);
+      expect(move.mock.calls[0]?.[1]).toMatchObject({
+        detectStartFailure: true,
+      });
+      expect(f.adapter.movements).toEqual([target]);
+      expect((await f.runtime.state()).requiresOperatorRecovery).toBe(false);
+    } finally {
+      move.mockRestore();
+      await f.cleanup();
+    }
+  },
+);
+
 it('rebuilds the calibration approach after a disconnect known to precede dispatch', async () => {
   const f = await fixture();
   const move = rstest
@@ -101,7 +140,7 @@ it('returns from boundary readback noise without commanding a point across the p
       { ...binding, motion },
       'reference',
     );
-    expect(move.mock.calls.map(([p]) => p.positionMm.z)).toEqual([90, 90, 90]);
+    expect(move.mock.calls.map(([p]) => p.positionMm.z)).toEqual([90, 90]);
     expect(move.mock.calls[0][0].positionMm.x).toBeCloseTo(160, 9);
     expect(move.mock.calls[0][0].positionMm.y).toBeCloseTo(30, 9);
     for (const [, options] of move.mock.calls) {
@@ -112,12 +151,21 @@ it('returns from boundary readback noise without commanding a point across the p
     }
     expect(f.adapter.movements.at(-1)).toEqual(reference);
     move.mockClear();
+    await f.runtime.positionInstallationPoint(
+      { ...binding, motion },
+      'reference',
+    );
+    expect(move).not.toHaveBeenCalled();
+
     // Even a much smaller excess is rejected for a requested target.
     await expect(
       f.runtime.collectAutomaticPoints(binding, (host) =>
         host.move(pose(160.000006, 30.000008, 75)),
       ),
-    ).rejects.toMatchObject({ code: 'CAMERA_BOUNDARY_EXCEEDED' });
+    ).rejects.toMatchObject({
+      code: 'CAMERA_BOUNDARY_EXCEEDED',
+      details: { boundaryExcessMm: expect.closeTo(0.00001, 9) },
+    });
     f.adapter.setPoseForTesting(pose(160.3006, 30.4008, 75));
     for (const point of ['reference', 'cameraBoundary'] as const) {
       await expect(
@@ -208,7 +256,7 @@ it('rejects probe routes crossing a taught camera boundary before submitting mov
   }
 });
 
-it('keeps drag mode while capturing a persistent two-point draft and saves only the current confirmed draft', async () => {
+it('keeps drag mode while capturing a persistent reference and two boundary points and saves only the current confirmed draft', async () => {
   const f = await fixture();
   try {
     const binding = { ...f.binding, cameraId: 'cam' };
@@ -223,10 +271,12 @@ it('keeps drag mode while capturing a persistent two-point draft and saves only 
       y: -50,
       z: 100,
     });
-    f.adapter.setPoseForTesting(pose(100, 20, 100));
+    f.adapter.setPoseForTesting(pose(120, 20, 100));
+    await f.runtime.captureInstallationPoint(binding, 'cameraBoundary');
+    f.adapter.setPoseForTesting(pose(160, 20, 100));
     const boundary = await f.runtime.captureInstallationPoint(
       binding,
-      'cameraBoundary',
+      'cameraBoundaryEnd',
     );
     expect((await f.runtime.state()).state.dragMode).toBe(true);
     const reloaded = new ProfileStore(f.store.filePath);

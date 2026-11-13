@@ -3,13 +3,19 @@ import {
   cameraBoundaryExcessMm,
 } from '../application/teaching-constraints.js';
 import type { AutomaticCaptureHost } from '../assisted-contracts.js';
+import { RobotArmError, isRobotArmError } from '../contracts.js';
 import type {
   CartesianPose,
   InstallationTeaching,
   ScreenMotionSettings,
   ToolProfile,
 } from '../contracts.js';
-import { contactPoint, flangePose } from '../domain.js';
+import {
+  contactPoint,
+  distance,
+  flangePose,
+  quaternionDistance,
+} from '../domain.js';
 
 // Match the 0.5 mm measured arrival tolerance for the start of the route only.
 const BOUNDARY_READBACK_NOISE_MM = 0.5;
@@ -21,6 +27,7 @@ export async function moveToTaughtPosition(
   target: CartesianPose,
   motion: Pick<ScreenMotionSettings, 'actionSpeed' | 'actionAcceleration'>,
   minimumTipZMm = Number.NEGATIVE_INFINITY,
+  travel?: { attemptId: string; direction: 'approach' | 'return' },
 ) {
   const current = await host.read();
   const from = contactPoint(current, tool.offsetMm);
@@ -51,5 +58,32 @@ export async function moveToTaughtPosition(
     acceleration: motion.actionAcceleration,
   };
   await host.preflight(route, options);
-  for (const pose of route) await host.move(pose, options);
+  let reached = current;
+  for (const [index, leg] of (
+    ['lift', 'traverse', 'lower'] as const
+  ).entries()) {
+    const pose = route[index];
+    try {
+      if (
+        distance(reached.positionMm, pose.positionMm) <= 1e-6 &&
+        quaternionDistance(reached.orientation, pose.orientation) <= 1e-6 &&
+        // An out-of-bounds readback still needs the corrective lift.
+        !(index === 0 && excess > CAMERA_BOUNDARY_EPSILON_MM)
+      )
+        continue;
+      // A successful move already confirms arrival at this waypoint. Use
+      // the requested pose to collapse an identical following waypoint.
+      await host.move(pose, {
+        ...options,
+        referenceTravel: travel && { ...travel, leg },
+      });
+      reached = pose;
+    } catch (error) {
+      if (!isRobotArmError(error)) throw error;
+      throw new RobotArmError(error.code, error.message, error.status, {
+        ...error.details,
+        taughtPositionLeg: leg,
+      });
+    }
+  }
 }

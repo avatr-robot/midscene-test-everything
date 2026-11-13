@@ -1,3 +1,4 @@
+import { isPayloadReadbackPending } from '@midscene/robotics-shared/contracts';
 import {
   Alert,
   Badge,
@@ -175,11 +176,16 @@ export function RobotStatusBar({
   const paused = Boolean(state?.paused || data?.state.softwarePaused);
   const has = (id: string) => capabilities?.controls.includes(id);
   const payloadStatus = data?.state.payloadApplication?.status;
+  const payloadReadbackPending = isPayloadReadbackPending(
+    data?.state.payloadApplication,
+  );
   const needsPayloadSync =
-    payloadStatus === 'pending' || payloadStatus === 'unconfirmed';
+    !payloadReadbackPending &&
+    (payloadStatus === 'pending' || payloadStatus === 'unconfirmed');
   const showPayloadStatus = Boolean(
     data?.tool &&
       state?.enabled &&
+      !payloadReadbackPending &&
       payloadStatus !== 'applied' &&
       payloadStatus !== 'not-required',
   );

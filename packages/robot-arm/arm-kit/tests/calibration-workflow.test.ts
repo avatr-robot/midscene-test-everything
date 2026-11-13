@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { afterEach, describe, expect, it, rstest } from '@rstest/core';
 import { createCalibrationClient } from '../../arm-service/src/ui/calibration/client.js';
 import {
+  CALIBRATION_PHONE_POLICY,
   calibrationCaptureTargets,
   calibrationPageMarkers,
   mappingQualityWarnings,
@@ -581,7 +582,7 @@ describe('phone-assisted calibration coordinator', () => {
             stage: 'interrupted',
             errorDetails: { code: 'PHONE_STEP_TIMEOUT' },
           }),
-        { timeout: 10000 },
+        { timeout: 2 * CALIBRATION_PHONE_POLICY.stepAcknowledgementMs + 3000 },
       );
       expect(f.adapter.movements).toHaveLength(1);
       expect(audit).toHaveBeenCalledWith(
@@ -591,14 +592,14 @@ describe('phone-assisted calibration coordinator', () => {
             code: 'PHONE_STEP_TIMEOUT',
             details: expect.objectContaining({
               phase: 'result',
-              purpose: 'search',
+              purpose: 'coarse-search',
             }),
           }),
           detail: expect.objectContaining({
             phoneConnected: true,
             phoneObservations: expect.arrayContaining([
               expect.objectContaining({
-                purpose: 'search',
+                purpose: 'coarse-search',
                 outcome: 'PHONE_STEP_TIMEOUT',
                 replies: [
                   expect.objectContaining({
@@ -956,9 +957,11 @@ describe('phone-assisted calibration coordinator', () => {
         };
         await f.runtime.captureInstallationPoint(binding, 'reference');
         f.adapter.setPoseForTesting(pose(100, 20, 100));
+        await f.runtime.captureInstallationPoint(binding, 'cameraBoundary');
+        f.adapter.setPoseForTesting(pose(140, 20, 100));
         const draft = await f.runtime.captureInstallationPoint(
           binding,
-          'cameraBoundary',
+          'cameraBoundaryEnd',
         );
         const teaching = await f.runtime.teachInstallation({
           binding,
@@ -1391,7 +1394,7 @@ it('exposes received touch diagnostics without treating history as active contac
   }
 });
 
-it.each([1.25, 2.5])(
+it.each([1.875, 3.5])(
   'preserves reviewable height error within the physical compensation range (%s mm)',
   async (heightError) => {
     const f = await setup();
@@ -1425,9 +1428,9 @@ it.each([1.25, 2.5])(
       await rstest.waitFor(
         () => {
           const state = f.service.status()!;
-          if (heightError > 2) {
+          if (heightError > 3) {
             expect(state.stage).toBe('interrupted');
-            expect(state.error).toMatch(/2 mm compensation limit/);
+            expect(state.error).toMatch(/3 mm compensation limit/);
           } else {
             expect(state.stage).toBe('boundary-review');
             expect(state.explorationQuality?.warnings).toContainEqual(
@@ -1472,6 +1475,18 @@ it('records measured installation reference and camera boundary, requires corrid
     f.adapter.setPoseForTesting(
       pose(
         reference.positionMm.x,
+        reference.positionMm.y + 50,
+        reference.positionMm.z,
+      ),
+    );
+    await f.service.command(f.state.id, 'record-boundary', true);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(
+      pose(
+        reference.positionMm.x + 40,
         reference.positionMm.y + 50,
         reference.positionMm.z,
       ),
@@ -1561,6 +1576,12 @@ it.each([
       );
       f.adapter.setPoseForTesting(pose(100, 50, 80));
       await f.service.command(f.state.id, 'record-boundary', true);
+      await f.service.command(f.state.id, 'position-boundary', true);
+      await rstest.waitFor(async () =>
+        expect((await f.adapter.getState()).dragMode).toBe(true),
+      );
+      f.adapter.setPoseForTesting(pose(140, 50, 80));
+      await f.service.command(f.state.id, 'record-boundary', true);
       await f.service.command(f.state.id, 'save-teaching', true);
       f.adapter.setPoseForTesting(pose(100, 50.000008, 75));
       const move = rstest.spyOn(f.adapter, 'moveLinear');
@@ -1607,12 +1628,11 @@ it.each([
         'contact',
         'avoiding-camera',
       ]);
-      expect(move.mock.calls.slice(0, 3).map(([p]) => p)).toEqual([
+      expect(move.mock.calls.slice(0, 2).map(([p]) => p)).toEqual([
         pose(100, 50, 80),
         pose(100, -50, 80),
-        pose(100, -50, 80),
       ]);
-      for (const [, options] of move.mock.calls.slice(0, 3)) {
+      for (const [, options] of move.mock.calls.slice(0, 2)) {
         expect(options).toMatchObject({
           speed: f.screen.actionSpeed,
           acceleration: f.screen.actionAcceleration,
@@ -1863,17 +1883,30 @@ it('calibrates a vertical MG400 stylus in flange coordinates through automatic a
     );
     f.adapter.setPoseForTesting(pose(100, 50, 60));
     await f.service.command(f.state.id, 'record-boundary', true);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(pose(140, 50, 60));
+    await f.service.command(f.state.id, 'record-boundary', true);
     await f.service.command(f.state.id, 'save-teaching', true);
     // The previous saved boundary cannot authorize an unconfirmed replacement.
     await f.service.command(f.state.id, 'position-boundary', true);
     await rstest.waitFor(async () =>
       expect((await f.adapter.getState()).dragMode).toBe(true),
     );
+    f.adapter.setPoseForTesting(pose(100, 50, 60));
     await f.service.command(f.state.id, 'record-boundary', true);
     await expect(
       f.service.command(f.state.id, 'start-automatic', true),
     ).rejects.toMatchObject({ code: 'INSTALLATION_TEACHING_REQUIRED' });
     expect(adapter.movements).toHaveLength(0);
+    await f.service.command(f.state.id, 'position-boundary', true);
+    await rstest.waitFor(async () =>
+      expect((await f.adapter.getState()).dragMode).toBe(true),
+    );
+    f.adapter.setPoseForTesting(pose(140, 50, 60));
+    await f.service.command(f.state.id, 'record-boundary', true);
     await f.service.command(f.state.id, 'save-teaching', true);
     await f.service.command(f.state.id, 'start-automatic', true);
     await rstest.waitFor(

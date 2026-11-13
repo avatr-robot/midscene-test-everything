@@ -48,6 +48,12 @@ export type MotionAcceleration =
 export interface MotionOptions {
   speed?: MotionSpeed;
   acceleration?: MotionAcceleration;
+  /** Capture a bounded driver timeline for a diagnostic move. */
+  traceCompletion?: boolean;
+  /** Detect a confirmed stationary start failure on a calibration approach. */
+  detectStartFailure?: boolean;
+  /** Optional diagnostic comparison against a newly received load sample. */
+  freshPayloadReadbackKg?: number;
   /**
    * How many consecutive fresh samples must confirm arrival before a driver
    * reports terminal completion. Every extra sample of a contact move is spent
@@ -71,6 +77,7 @@ export interface MotionResult {
   status: 'completed' | 'stopped' | 'cancelled' | 'failed';
   completedAt: string;
   submittedAt?: number;
+  completionTrace?: Record<string, unknown>;
   /**
    * Host-clock milliseconds of the first fresh sample that showed the target
    * reached, when the driver can observe arrival before its own terminal
@@ -286,6 +293,21 @@ export interface PayloadApplicationState {
   reason?: PayloadInvalidationReason | 'parameters-changed';
   applied?: AppliedToolPayload;
   snapshot?: PayloadApplicationSnapshot;
+}
+/** The controller can restore this evidence through its normal readback. */
+export function isPayloadReadbackPending(
+  state: PayloadApplicationState | undefined,
+): boolean {
+  return (
+    state?.status === 'unconfirmed' &&
+    [
+      'connection-lost',
+      'readback-unavailable',
+      'disconnected',
+      'state-unavailable',
+      'controller-restarted',
+    ].includes(state.reason ?? '')
+  );
 }
 export interface EnableRequest {
   robotProfileId: string;
@@ -570,6 +592,16 @@ export interface CalibrationVerification {
 }
 export interface AutoCalibrationEvidence {
   planeSource?: string;
+  tiltDeg?: number;
+  heightRangeMm?: number;
+  holdoutHeightMm?: number;
+  independentHeightCheck?: {
+    predictedZMm: number;
+    heightIntervalMm: [number, number];
+    errorMm: number;
+    predictionInInterval: boolean;
+    elapsedMs: number;
+  };
   planeRmseMm: number;
   gridRmsPx: number;
   gridRmsMm: number;
@@ -595,7 +627,10 @@ export interface PlaneQuality {
   minorSpanMm: number;
   majorSpanMm: number;
 }
-export type InstallationTeachingPoint = 'reference' | 'cameraBoundary';
+export type InstallationTeachingPoint =
+  | 'reference'
+  | 'cameraBoundary'
+  | 'cameraBoundaryEnd';
 /** Measured mounting, shared by screens on the same robot/tool/camera. */
 export interface InstallationTeaching {
   invalidatedReason?: string;
@@ -608,7 +643,9 @@ export interface InstallationTeaching {
   robotGeometryRevision: number;
   toolGeometryRevision: number;
   referencePose: CartesianPose;
-  poses: Record<InstallationTeachingPoint, CartesianPose>;
+  poses: Record<'reference' | 'cameraBoundary', CartesianPose> & {
+    cameraBoundaryEnd?: CartesianPose;
+  };
   cameraBoundary: { point: ScreenPoint; normal: ScreenPoint };
   corridorConfirmed: true;
 }

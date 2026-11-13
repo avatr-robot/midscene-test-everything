@@ -332,6 +332,8 @@ export interface WebCalibrationMapping {
 export interface CalibrationPreviewPositions {
   reference?: WebPoint;
   cameraBoundary?: WebPoint;
+  cameraBoundaryEnd?: WebPoint;
+  cameraBoundaryLine?: { start: WebPoint; end: WebPoint; allowed: WebPoint };
   safe?: WebPoint;
 }
 /** Configuration prepared before any calibration task exists. */
@@ -379,6 +381,7 @@ export interface WebVerificationEvidence {
 export interface AssistedCalibrationState {
   id: string;
   cameraBoundaryPosition?: CartesianPose;
+  cameraBoundaryEndPosition?: CartesianPose;
   teachingId?: string;
   stage:
     | 'positioning-boundary'
@@ -462,6 +465,12 @@ export interface AssistedCalibrationState {
   target?: { id: string; point: WebPoint };
   result?: CalibrationProfile;
 }
+export interface AutomaticCaptureMotionTiming {
+  beforeSubmitMs: number;
+  adapterCompletionMs: number;
+  stableMs: number;
+}
+
 export interface AutomaticCaptureHost {
   preflight?(
     poses: CartesianPose[],
@@ -480,8 +489,14 @@ export interface AutomaticCaptureHost {
       speed?: MotionSpeed;
       acceleration?: MotionAcceleration;
       timeoutMs?: number;
+      onTiming?(timing: AutomaticCaptureMotionTiming): void;
+      referenceTravel?: {
+        attemptId: string;
+        direction: 'approach' | 'return';
+        leg: 'lift' | 'traverse' | 'lower';
+      };
     },
-  ): Promise<void>;
+  ): Promise<CartesianPose | undefined>;
 }
 
 export interface AssistedCaptureHost {
@@ -577,6 +592,7 @@ export interface CalibrationBatchState {
   robotProfileId?: string;
   toolProfileId?: string;
   samplingMode?: CalibrationBatchSamplingMode;
+  compliantSetupConfirmed?: true;
   usesSharedSafePosition?: true;
   /** Live while the batch searches for the shared Safe Position automatically. */
   automaticSharedParking?: true;

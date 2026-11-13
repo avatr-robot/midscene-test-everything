@@ -51,7 +51,13 @@ export function screenOutlineLabelPlacement(
   };
 }
 
-function ScreenOutline({ outline }: { outline: ScreenOutlineEntry }) {
+function ScreenOutline({
+  outline,
+  screenCorners,
+}: {
+  outline: ScreenOutlineEntry;
+  screenCorners?: readonly { x: number; y: number }[];
+}) {
   const { name, correction, active, validity } = outline;
   const { sourceWidth: width, sourceHeight: height, points } = correction;
   const layer = useRef<HTMLDivElement>(null);
@@ -95,6 +101,7 @@ function ScreenOutline({ outline }: { outline: ScreenOutlineEntry }) {
       <CalibrationPositionMarkers
         correction={correction}
         positions={outline.previewPositions}
+        screenCorners={screenCorners}
       />
       {name && (
         <span
@@ -124,7 +131,21 @@ export function ScreenOutlines({
     <>
       {outlines.map((outline) =>
         outline.correction.sourceWidth && outline.correction.sourceHeight ? (
-          <ScreenOutline key={outline.id} outline={outline} />
+          <ScreenOutline
+            key={outline.id}
+            outline={outline}
+            screenCorners={
+              outline.previewPositions?.cameraBoundaryLine
+                ? outlines.flatMap(({ correction, validity }) =>
+                    validity !== 'invalid' &&
+                    correction.sourceWidth === outline.correction.sourceWidth &&
+                    correction.sourceHeight === outline.correction.sourceHeight
+                      ? Object.values(correction.points)
+                      : [],
+                  )
+                : undefined
+            }
+          />
         ) : null,
       )}
     </>

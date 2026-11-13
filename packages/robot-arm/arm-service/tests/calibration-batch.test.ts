@@ -379,6 +379,7 @@ it('runs a fast batch with automatic acceptance and parks after both screens', a
     cameraId: 'cam',
     planVersion: plan.version,
     horizontalConfirmed: true,
+    compliantSetupConfirmed: true,
     samplingMode: 'slide',
   });
   await rstest.waitFor(() => expect(f.batch.read()?.status).toBe('completed'));

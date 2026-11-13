@@ -24,7 +24,7 @@ import {
   useState,
 } from 'react';
 import type { BatchClient as RobotArmApi } from '../../batch-client';
-import { t } from '../../i18n';
+import { calibrationErrorText, t } from '../../i18n';
 import { batchAnnouncements, speakCalibration } from '../../voice/calibration';
 
 const active = (batch: CalibrationBatchState | null | undefined) =>
@@ -236,6 +236,7 @@ export const CalibrationBatchPanel = forwardRef<
         cameraId,
         auto: true,
         horizontalConfirmed: true,
+        compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
         samplingMode,
         ...(manualAcceptance ? { acceptance: 'manual' as const } : {}),
         ...(plan.transfer ? { corridorConfirmed: true as const } : {}),
@@ -423,7 +424,7 @@ export const CalibrationBatchPanel = forwardRef<
                   item.note && <div>{t(item.note)}</div>}
                 {item.error && (
                   <Typography.Paragraph type="danger">
-                    {t(item.error)}
+                    {calibrationErrorText(item.error)}
                   </Typography.Paragraph>
                 )}
                 {item.runIds.length > 0 && (
@@ -457,7 +458,7 @@ export const CalibrationBatchPanel = forwardRef<
                     <br />
                   </>
                 )}
-                {t(batch.error)}
+                {calibrationErrorText(batch.error)}
                 {batch.visibilityMissingScreens?.length
                   ? ` (${batch.visibilityMissingScreens.join(' · ')})`
                   : null}
@@ -592,7 +593,7 @@ export const CalibrationBatchPanel = forwardRef<
             batch?.items.some((item) => item.error === error))
         ) && (
           <Typography.Paragraph type="danger" role="alert">
-            {t(error)}
+            {calibrationErrorText(error)}
           </Typography.Paragraph>
         )}
       <Modal
@@ -662,7 +663,7 @@ export const CalibrationBatchPanel = forwardRef<
           >
             {t(
               samplingMode === 'slide'
-                ? 'All screens are fixed horizontally and the tool has elastic compliance.'
+                ? 'All screens are securely fixed and the tool has elastic compliance.'
                 : 'All screens are secured; the measured plane allows limited tilt. The tool has elastic compliance.',
             )}
           </Checkbox>

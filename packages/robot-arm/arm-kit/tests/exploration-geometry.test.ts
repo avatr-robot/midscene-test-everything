@@ -47,9 +47,9 @@ describe('automatic calibration geometry', () => {
         { x: 50, y: -25, z: 30 - depthMm },
       ];
       expect(maxSurfaceResidualMm(candidate, contacts(1.75))).toBeCloseTo(0);
-      // A 0.75 mm local residual cannot excuse a measured 2.5 mm deviation.
-      expect(() => maxSurfaceResidualMm(candidate, contacts(2.5))).toThrow(
-        '2 mm compensation limit',
+      expect(maxSurfaceResidualMm(candidate, contacts(2.5))).toBeCloseTo(0.75);
+      expect(() => maxSurfaceResidualMm(candidate, contacts(3.01))).toThrow(
+        '3 mm compensation limit',
       );
       expect(maxSurfaceResidualMm(candidate, contacts(0.5))).toBeCloseTo(1.25);
     } finally {
@@ -337,7 +337,7 @@ describe('automatic calibration geometry', () => {
       await f.cleanup();
     }
   });
-  it('rejects a measured local excursion above 2 mm even when the plane ignores it', async () => {
+  it('rejects a measured local excursion above 3 mm even when the plane ignores it', async () => {
     const f = await fixture();
     try {
       const samples = [0, 0.5, 1].flatMap((u) =>
@@ -345,7 +345,7 @@ describe('automatic calibration geometry', () => {
           robot: {
             x: 200 * u,
             y: -100 * v,
-            z: 30 + (u === 0.5 && v === 0.5 ? 2.2 : 0),
+            z: 30 + (u === 0.5 && v === 0.5 ? 3.2 : 0),
           },
           screen: { x: 999 * u, y: 499 * v },
         })),
@@ -365,7 +365,7 @@ describe('automatic calibration geometry', () => {
             screenGeometryRevision: 1,
           },
         }),
-      ).toThrow('2 mm compensation limit');
+      ).toThrow('3 mm compensation limit');
     } finally {
       await f.cleanup();
     }

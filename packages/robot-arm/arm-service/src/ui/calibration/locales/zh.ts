@@ -39,6 +39,31 @@ const calibrationZh: Record<string, string> = {
   'Assign the screen page in Camera Mapping first':
     '请先在相机映射中分配屏幕页面',
   'Record Camera Boundary': '记录相机边界',
+  'Camera-side Boundary A': '相机侧边界 A 点',
+  'Camera-side Boundary B': '相机侧边界 B 点',
+  'Record Boundary A': '记录边界 A 点',
+  'Record Boundary B': '记录边界 B 点',
+  'Teach Boundary A': '示教边界 A 点',
+  'Teach Boundary B': '示教边界 B 点',
+  'Record two points on the intended camera-side boundary.':
+    '在预定的相机侧边界线上记录两个点。',
+  'At the reference height, place the tip at the first point on the intended boundary. Keep the whole arm clear of the camera and stand.':
+    '在参考高度将笔尖移到预定边界的 A 点，确保整条机械臂与相机和支架保持净空。',
+  'Move along the intended boundary at the reference height. Record point B at least 20 mm from A.':
+    '在参考高度沿预定边界移动，记录与 A 点相距至少 20 mm 的 B 点。',
+  'Record boundary point A first': '请先记录边界 A 点',
+  'Record boundary points A and B at least 20 mm apart in XY':
+    '边界 A、B 两点的水平间距至少为 20 mm。',
+  'Keep the reference at least 20 mm from the camera-side boundary line':
+    '参考位与相机侧边界线的水平垂直距离至少为 20 mm。',
+  'Record the reference and both camera-side boundary points':
+    '请记录参考位和相机侧边界的两个点。',
+  'Record the reference and both boundary points, then confirm the clear arm corridor':
+    '请记录参考位和两个边界点，再确认整条机械臂的通行净空。',
+  'The target exceeds the taught camera-side boundary by {0} mm.':
+    '目标越过已示教的相机侧边界 {0} mm。',
+  'The live boundary overlay requires an existing screen calibration for this camera view. Check the line from A to B directly.':
+    '实时边界叠加需要此相机视图中已有的屏幕标定。请直接检查 A 到 B 的边界线。',
   'Save Installation Teaching': '保存安装示教',
   'Teach Camera Boundary': '示教相机边界',
   'Reteach Installation': '重新示教',
@@ -46,8 +71,8 @@ const calibrationZh: Record<string, string> = {
     '已保存的安装示教由当前相机的各块屏幕共用。',
   'Record the camera-side boundary once to enable automatic camera avoidance.':
     '记录一次相机侧边界，即可在边界验证后自动移动到相机安全位。',
-  'The phone is horizontal, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.':
-    '确认手机水平、触控笔竖直，参考位一侧整条机械臂的路径不会碰到相机，且没有其他障碍物。',
+  'The phone is securely fixed, the stylus is vertical, and the full arm has camera clearance on the reference side of the boundary. There are no other obstacles.':
+    '确认手机已固定、触控笔竖直，参考位一侧整条机械臂的路径不会碰到相机，且没有其他障碍物。',
   'Move straight from the reference towards the camera and stop at a safe boundary. Leave clearance for the whole arm, then release it before recording.':
     '从参考位朝相机方向直线移动，在仍安全的位置停下。为整条机械臂留足间隙，松手后记录。',
   'Moving to the camera-avoidance position': '正在移动到相机避让安全位',
@@ -2268,6 +2293,11 @@ export const zh: Record<string, string> = {
   Regular: '普通',
   'Confirm retry': '确认重试',
   'Retry in regular mode?': '切换到普通模式重新采样？',
+  'No touch detected at fast calibration point {0} within the safe depth':
+    '快速标定第 {0} 个采样点在安全深度内未检测到触摸',
+  'Fast calibration point {0} did not sustain touch within the safe depth':
+    '快速标定第 {0} 个采样点在安全深度内未能维持稳定触摸',
+  'Retry in regular mode': '用普通模式重试',
   'Fast probing': '快速探测',
   'No touch was detected before the safety height {0} mm. Sampling stopped.':
     '下降至安全高度 {0} mm 时仍未检测到触摸，采样已停止。',

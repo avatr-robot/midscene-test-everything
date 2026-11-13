@@ -11,28 +11,83 @@ const markers = [
   },
   { kind: 'safe', label: 'Safe Parking Position', color: '#ffcc66' },
   { kind: 'cameraBoundary', label: 'Camera-side Boundary', color: '#eab0ff' },
+  {
+    kind: 'cameraBoundaryEnd',
+    label: 'Camera-side Boundary B',
+    color: '#eab0ff',
+  },
 ] as const;
+
+function boundaryOverlay(
+  line: NonNullable<CalibrationPreviewPositions['cameraBoundaryLine']>,
+  width: number,
+  height: number,
+) {
+  const { start, end, allowed } = line;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const side = (p: { x: number; y: number }) =>
+    dx * (p.y - start.y) - dy * (p.x - start.x);
+  const sign = Math.sign(side(allowed));
+  if (!sign) return;
+  const frame = [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: width, y: height },
+    { x: 0, y: height },
+  ];
+  const crossings: typeof frame = [];
+  const forbidden = frame.flatMap((p, index) => {
+    const q = frame[(index + 1) % frame.length];
+    const a = sign * side(p);
+    const b = sign * side(q);
+    const polygon = a <= 0 ? [p] : [];
+    if (a <= 0 !== b <= 0) {
+      const fraction = a / (a - b);
+      const hit = {
+        x: p.x + (q.x - p.x) * fraction,
+        y: p.y + (q.y - p.y) * fraction,
+      };
+      crossings.push(hit);
+      polygon.push(hit);
+    }
+    return polygon;
+  });
+  return {
+    crossings,
+    forbidden,
+    isForbidden: (p: { x: number; y: number }) => sign * side(p) < 0,
+  };
+}
 
 export function CalibrationPositionMarkers({
   correction,
   positions,
+  screenCorners,
 }: {
   correction: CameraCorrection;
   positions?: CalibrationPreviewPositions;
+  screenCorners?: readonly { x: number; y: number }[];
 }) {
   useLanguage();
   const { sourceWidth: width, sourceHeight: height } = correction;
   const layer = useRef<SVGSVGElement>(null);
   const [pixelSize, setPixelSize] = useState<number>();
+  const boundary = positions?.cameraBoundaryLine;
+  const overlay = boundary && boundaryOverlay(boundary, width, height);
   const located = markers.flatMap((marker) => {
     const point = positions?.[marker.kind];
     if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y))
       return [];
     const outside =
       point.x < 0 || point.x >= width || point.y < 0 || point.y >= height;
-    return [{ ...marker, point, outside }];
+    const label =
+      marker.kind === 'cameraBoundary' && positions?.cameraBoundaryEnd
+        ? 'Camera-side Boundary A'
+        : marker.label;
+    return [{ ...marker, label, point, outside }];
   });
-  const visible = Boolean(width && height && located.length);
+  const visible = Boolean(width && height && (located.length || overlay));
   useLayoutEffect(() => {
     const element = layer.current;
     if (!element) return;
@@ -58,9 +113,44 @@ export function CalibrationPositionMarkers({
       role="img"
       aria-label={t('Calibration positions')}
     >
+      {overlay && (
+        <g aria-label={t('Forbidden side')}>
+          <polygon
+            points={overlay.forbidden.map((p) => `${p.x},${p.y}`).join(' ')}
+            fill="#ff4d4f"
+            fillOpacity="0.16"
+          />
+          {overlay.crossings.length === 2 && (
+            <line
+              x1={overlay.crossings[0].x}
+              y1={overlay.crossings[0].y}
+              x2={overlay.crossings[1].x}
+              y2={overlay.crossings[1].y}
+              stroke="#eab0ff"
+              strokeWidth={2 * unit}
+              strokeDasharray={`${6 * unit} ${4 * unit}`}
+            />
+          )}
+          {(screenCorners ?? Object.values(correction.points)).map((point) =>
+            overlay.isForbidden(point) ? (
+              <circle
+                key={`${point.x},${point.y}`}
+                cx={point.x}
+                cy={point.y}
+                r={4 * unit}
+                fill="#ff4d4f"
+                stroke="#fff"
+                strokeWidth={unit}
+              />
+            ) : null,
+          )}
+        </g>
+      )}
       {located.map(({ kind, label, color, point: p, outside }) => {
         const safe = kind === 'safe';
-        const atEdge = outside && kind === 'cameraBoundary';
+        const boundaryPoint =
+          kind === 'cameraBoundary' || kind === 'cameraBoundaryEnd';
+        const atEdge = outside && boundaryPoint;
         const point = atEdge
           ? {
               x: Math.min(width - 10 * unit, Math.max(10 * unit, p.x)),
@@ -89,7 +179,7 @@ export function CalibrationPositionMarkers({
                 stroke="#152333"
                 strokeWidth="1.5"
               >
-                {kind === 'cameraBoundary' ? (
+                {boundaryPoint ? (
                   <path d="M0 -6L6 5H-6Z" />
                 ) : safe ? (
                   <path d="M0 -6L6 0 0 6 -6 0Z" />

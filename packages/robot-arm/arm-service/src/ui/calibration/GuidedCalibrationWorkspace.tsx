@@ -7,6 +7,7 @@ import type {
 import {
   type CameraCorrection,
   SCREEN_DRIFT_DETECTION_ENABLED,
+  isPayloadReadbackPending,
 } from '@midscene/robotics-shared/contracts';
 import { markerCaptureRecommended } from '@midscene/robotics-shared/marker-contracts';
 import type {
@@ -113,12 +114,14 @@ export function GuidedCalibrationWorkspace({
   onClose,
   onScreenChange,
   initialStep = 0,
+  reviewInstallationOnOpen = false,
 }: {
   id: string;
   cameraId: string;
   onClose(screenId?: string): void;
   onScreenChange?(id: string): void;
   initialStep?: 0 | 1;
+  reviewInstallationOnOpen?: boolean;
 }) {
   return (
     <ConfigProvider theme={armUiTheme}>
@@ -130,6 +133,7 @@ export function GuidedCalibrationWorkspace({
             onClose={onClose}
             onScreenChange={onScreenChange}
             initialStep={initialStep}
+            reviewInstallationOnOpen={reviewInstallationOnOpen}
           />
         </CalibrationLanguageProvider>
       </App>
@@ -142,12 +146,14 @@ function GuidedContent({
   onClose,
   onScreenChange,
   initialStep,
+  reviewInstallationOnOpen,
 }: {
   id: string;
   cameraId: string;
   onClose(screenId?: string): void;
   onScreenChange?(id: string): void;
   initialStep: 0 | 1;
+  reviewInstallationOnOpen: boolean;
 }) {
   useLanguage();
   const { message } = App.useApp();
@@ -447,7 +453,7 @@ function GuidedContent({
             resumeCalibration.current = screenId;
           setStep(1);
         } else {
-          setStep(next.installationTaught ? 3 : 2);
+          setStep(next.installationTaught && !reviewInstallationOnOpen ? 3 : 2);
         }
       }
       if (running.status === 'fulfilled') setBatch(running.value);
@@ -465,16 +471,28 @@ function GuidedContent({
         ['queued', 'running', 'cancelling'].includes(singleStatus.phase);
       const completed = !inBatch && singleStatus.phase === 'completed';
       setSingle(busy || completed ? { ...singleStatus, screenId } : undefined);
-      if (busy || inBatch || (completed && openingScreen && initialStep !== 1))
+      if (
+        busy ||
+        inBatch ||
+        (completed &&
+          openingScreen &&
+          initialStep !== 1 &&
+          next.installationTaught &&
+          !reviewInstallationOnOpen)
+      )
         setStep(3);
       else if (
-        !completed &&
-        next.mappingReady === false &&
-        currentStep.current === 3
+        currentStep.current === 3 &&
+        (!next.installationTaught ||
+          (!completed && next.mappingReady === false))
       ) {
-        if (next.correction && next.perspectiveValidity?.state !== 'invalid')
-          resumeCalibration.current = screenId;
-        setStep(1);
+        if (next.mappingReady === false) {
+          if (next.correction && next.perspectiveValidity?.state !== 'invalid')
+            resumeCalibration.current = screenId;
+          setStep(1);
+        } else {
+          setStep(2);
+        }
       }
       setSingleFailure(
         singleStatus.phase === 'error' &&
@@ -483,7 +501,13 @@ function GuidedContent({
           : undefined,
       );
     },
-    [batchClient, cameraId, initialStep, selectScreen],
+    [
+      batchClient,
+      cameraId,
+      initialStep,
+      reviewInstallationOnOpen,
+      selectScreen,
+    ],
   );
   const refresh = useCallback(
     (signal = AbortSignal.timeout(15000)) => refreshScreen(selectedId, signal),
@@ -1016,7 +1040,7 @@ function GuidedContent({
       return;
     if (config.mappingReady) {
       resumeCalibration.current = undefined;
-      setStep(config.installationTaught ? 3 : 2);
+      setStep(config.installationTaught && !reviewInstallationOnOpen ? 3 : 2);
       return;
     }
     if (!phoneFullscreen || restoringMapping.current === base) return;
@@ -1034,6 +1058,7 @@ function GuidedContent({
       });
   }, [
     step,
+    reviewInstallationOnOpen,
     markerOpen,
     perspectiveEditor,
     batchActive,
@@ -1087,6 +1112,10 @@ function GuidedContent({
   ]);
   const startSingle = useCallback(async () => {
     if (startingSingle.current) return;
+    if (!config?.installationTaught) {
+      setStep(2);
+      return;
+    }
     const opening = markerRequest<SingleStatus>(`${base}/start`, {});
     startingSingle.current = opening;
     ++refreshSequence.current;
@@ -1102,7 +1131,7 @@ function GuidedContent({
       startingSingle.current = undefined;
     }
     await refresh();
-  }, [base, refresh, selectedId]);
+  }, [base, config?.installationTaught, refresh, selectedId]);
   const soleScreen =
     savedScreens.length === 1 && savedScreens[0].id === selectedId;
   useEffect(() => {
@@ -1117,6 +1146,7 @@ function GuidedContent({
       batchActive ||
       closing ||
       !config?.ready ||
+      !config.installationTaught ||
       outlineBlocked
     )
       return;
@@ -1134,6 +1164,7 @@ function GuidedContent({
     batchActive,
     closing,
     config?.ready,
+    config?.installationTaught,
     outlineBlocked,
     lease,
     startSingle,
@@ -1153,7 +1184,11 @@ function GuidedContent({
     pause: 'Resume the robot to continue calibration.',
     interruption: 'Waiting for the controller to confirm it is ready.',
   };
-  const powerControl = config && !config.ready && (
+  const payloadReadbackPending =
+    config?.armState?.state.enabled &&
+    !config.armState.recoveryRequired &&
+    isPayloadReadbackPending(config.armState.payloadApplication);
+  const powerControl = config && !config.ready && !payloadReadbackPending && (
     <CalibrationPowerButton
       key={base}
       config={config}
@@ -1177,7 +1212,7 @@ function GuidedContent({
     (next === 0 || Boolean(config?.input)) &&
     (next < 2 || Boolean(config?.correction && controller.setup.mapping)) &&
     (next < 2 || !outlineBlocked) &&
-    (next < 3 || Boolean(controller.setup.teaching));
+    (next < 3 || Boolean(config?.installationTaught));
   const screenOptions = step === 1 ? knownScreens : savedScreens;
   const showScreenPicker =
     !batchActive &&
@@ -1186,7 +1221,12 @@ function GuidedContent({
       (step === 3 && !soleScreen && screenOptions.length > 0));
   const batchAction = savedScreens.length > 1 && (
     <Button
-      disabled={!config?.ready || outlineBlocked || singleBusy}
+      disabled={
+        !config?.ready ||
+        !config.installationTaught ||
+        outlineBlocked ||
+        singleBusy
+      }
       onClick={() => batchPanel.current?.open()}
     >
       {t('Calibrate multiple screens')}
@@ -1323,6 +1363,7 @@ function GuidedContent({
                   screens={states}
                   disabled={
                     !config?.ready ||
+                    !config.installationTaught ||
                     outlineBlocked ||
                     controller.busy ||
                     singleBusy
@@ -1579,7 +1620,12 @@ function GuidedContent({
                       onClear={config.correction ? clearCorrection : undefined}
                       onContinue={() =>
                         setStep(
-                          !config.input ? 0 : config.installationTaught ? 3 : 2,
+                          !config.input
+                            ? 0
+                            : config.installationTaught &&
+                                !reviewInstallationOnOpen
+                              ? 3
+                              : 2,
                         )
                       }
                       refresh={refresh}
@@ -1588,9 +1634,13 @@ function GuidedContent({
                 {step === 2 && teaching && (
                   <>
                     <Space wrap>
-                      {controller.setup.teaching && (
+                      {config.installationTaught && (
                         <Button onClick={() => setStep(3)}>
-                          {t('Next Step')}
+                          {t(
+                            reviewInstallationOnOpen
+                              ? 'Use Saved Teaching'
+                              : 'Next Step',
+                          )}
                         </Button>
                       )}
                       {powerControl}
@@ -1605,6 +1655,19 @@ function GuidedContent({
                       }
                       footer={footer}
                       externalPreview
+                      boundaryPreviewAvailable={Boolean(
+                        config.previewPositions?.cameraBoundaryLine,
+                      )}
+                      onPointRecorded={() => {
+                        void refresh().catch((cause) => {
+                          if (requestedScreen.current === selectedId)
+                            setLoadError(
+                              cause instanceof Error
+                                ? cause.message
+                                : String(cause),
+                            );
+                        });
+                      }}
                       onSaved={() => {
                         setStep(3);
                         void refresh().catch((cause) => {
@@ -1634,7 +1697,9 @@ function GuidedContent({
                                   config.armState.recoveryReason ??
                                     'interruption'
                                 ]
-                              : 'Prepare the robot and tool payload before collecting points.',
+                              : payloadReadbackPending
+                                ? 'Reconfirming the tool payload…'
+                                : 'Prepare the robot and tool payload before collecting points.',
                         )}
                         action={
                           !(
@@ -1693,7 +1758,11 @@ function GuidedContent({
                         <Button
                           type="primary"
                           loading={singleQueued}
-                          disabled={!config.ready || singleQueued}
+                          disabled={
+                            !config.ready ||
+                            !config.installationTaught ||
+                            singleQueued
+                          }
                           onClick={() => {
                             if (outlineBlocked || !controller.setup.mapping)
                               void checkCameraBeforeCalibration();

@@ -20,6 +20,36 @@ export function t(
   );
 }
 export function calibrationErrorText(message: string): string {
+  const unstableCorner =
+    /^Fast calibration point (\d+) did not sustain touch within the safe depth/.exec(
+      message,
+    );
+  if (unstableCorner)
+    return (
+      t(
+        'Fast calibration point {0} did not sustain touch within the safe depth',
+        [unstableCorner[1]],
+      ) + message.slice(unstableCorner[0].length)
+    );
+  const missedCorner =
+    /^No touch detected at fast calibration point (\d+) within the safe depth/.exec(
+      message,
+    );
+  if (missedCorner)
+    return (
+      t(
+        'No touch detected at fast calibration point {0} within the safe depth',
+        [missedCorner[1]],
+      ) + message.slice(missedCorner[0].length)
+    );
+  const boundary =
+    /^Target crosses the taught camera-side boundary by ([\d.]+) mm$/.exec(
+      message,
+    );
+  if (boundary)
+    return t('The target exceeds the taught camera-side boundary by {0} mm.', [
+      boundary[1],
+    ]);
   const lostContact =
     /^(?:Refined press at Z|The refined press at Z) (-?[\d.]+) mm (?:did not maintain touch|did not produce a confirmed touch) after retry$/.exec(
       message,
@@ -68,7 +98,9 @@ export function calibrationErrorText(message: string): string {
 }
 export function CalibrationLanguageProvider({
   children,
-}: { children: ReactNode }) {
+}: {
+  children: ReactNode;
+}) {
   const language = useCalibrationLanguage((s) => s.language);
   return (
     <ConfigProvider locale={language === 'zh' ? zhCN : enUS}>

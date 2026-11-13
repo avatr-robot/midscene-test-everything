@@ -44,7 +44,7 @@ it('preserves regional heights outside a later local repair and reserves its cle
 });
 it('rejects malformed persisted regional models before contact or clearance planning', () => {
   for (const invalid of [
-    { ...surface(), limitMm: 3 },
+    { ...surface(), limitMm: 3.01 },
     { ...surface(), samples: surface().samples.slice(0, 3) },
     { ...surface(), widthMm: Number.NaN },
     {

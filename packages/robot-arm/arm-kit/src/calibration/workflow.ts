@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getDebug } from '@midscene/shared/logger';
+import { taughtCameraBoundary } from '../application/teaching-constraints.js';
 import type {
   AssistedCalibrationAction,
   AssistedCalibrationInput,
@@ -24,15 +25,7 @@ import {
   isRobotArmError,
   semanticJson,
 } from '../contracts.js';
-import {
-  add,
-  assertPose,
-  contactPoint,
-  distance,
-  rotate,
-  scale,
-  unit,
-} from '../domain.js';
+import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
 import { verifyScreenVisibility } from './camera/visibility.js';
 import type { CalibrationVision } from './camera/vision.js';
@@ -62,6 +55,7 @@ const recoverableSamplingErrors = new Set([
   'TOUCH_NOT_RELEASED',
   'TOUCH_RELEASE_NOT_FOUND',
   'TOUCH_SAFETY_LIMIT',
+  'VISION_UNAVAILABLE',
 ]);
 
 type Fit = Pick<
@@ -765,6 +759,7 @@ export class CalibrationWorkflow {
         phoneConnected: this.phone.connected(),
         phoneDiagnostics: this.phoneStatus().diagnostics,
         phoneObservations: this.measurements?.phoneObservations,
+        coarsePhoneObservations: this.measurements?.coarsePhoneObservations,
         capture: snapshot?.capture,
         points: snapshot?.points,
         verificationAttempts: s.verificationAttempts,
@@ -850,6 +845,7 @@ export class CalibrationWorkflow {
       this.beginTask(mapping, s.referencePosition, s.safePosition);
       this.state!.teachingId = s.teachingId;
       this.state!.cameraBoundaryPosition = s.cameraBoundaryPosition;
+      this.state!.cameraBoundaryEndPosition = s.cameraBoundaryEndPosition;
     } catch (error) {
       if (
         isRobotArmError(error) &&
@@ -1066,6 +1062,8 @@ export class CalibrationWorkflow {
             ? teaching.referencePose
             : undefined;
         this.state!.cameraBoundaryPosition = teaching.poses.cameraBoundary;
+        this.state!.cameraBoundaryEndPosition =
+          teaching.poses.cameraBoundaryEnd;
         this.state!.teachingId = teaching.id;
         this.state!.referencePosition =
           this.options.referencePosition?.() ?? this.state!.referencePosition;
@@ -1114,17 +1112,34 @@ export class CalibrationWorkflow {
     const s = this.require();
     const stage = s.stage;
     const stopRevision = this.runtime.stopRevision;
-    await this.options.vision.assertPerspectiveCurrent?.();
-    if (
-      this.state !== s ||
-      s.stage !== stage ||
-      stopRevision !== this.runtime.stopRevision
-    )
-      throw new RobotArmError(
-        'ACTION_STOPPED',
-        'Calibration changed or stopped during outline verification',
-        409,
-      );
+    const assertCurrentAttempt = () => {
+      if (
+        this.state !== s ||
+        s.stage !== stage ||
+        stopRevision !== this.runtime.stopRevision
+      )
+        throw new RobotArmError(
+          'ACTION_STOPPED',
+          'Calibration changed or stopped during outline verification',
+          409,
+        );
+    };
+    for (let attempt = 0; ; attempt++) {
+      assertCurrentAttempt();
+      try {
+        await this.options.vision.assertPerspectiveCurrent?.();
+        break;
+      } catch (error) {
+        if (
+          attempt >= 2 ||
+          !isRobotArmError(error) ||
+          error.code !== 'VISION_UNAVAILABLE'
+        )
+          throw error;
+        await delay(300 * (attempt + 1));
+      }
+    }
+    assertCurrentAttempt();
     if (requirePhone) this.phone.assertConnected();
     if (
       !s.mapping ||
@@ -1231,6 +1246,9 @@ export class CalibrationWorkflow {
         this.beginTask(mapping, referencePosition, safePosition);
         this.state!.teachingId = teachingId;
         this.state!.cameraBoundaryPosition = cameraBoundaryPosition;
+        this.state!.cameraBoundaryEndPosition = sameGeometry
+          ? s.cameraBoundaryEndPosition
+          : undefined;
         if (action === 'retry-standard')
           await this.startCollection(this.state!, 'standard', true, confirmed);
       } else if (action === 'position-boundary') {
@@ -1247,7 +1265,10 @@ export class CalibrationWorkflow {
           );
         await this.assertMechanicalFrame();
         this.recordPositionRequested = false;
-        s.cameraBoundaryPosition = undefined;
+        if (s.teachingId || s.cameraBoundaryEndPosition) {
+          s.cameraBoundaryPosition = undefined;
+          s.cameraBoundaryEndPosition = undefined;
+        }
         s.teachingId = undefined;
         s.stage = 'positioning-boundary';
         this.capture = this.recordPosition(false, true)
@@ -1266,9 +1287,14 @@ export class CalibrationWorkflow {
             'Position the arm at the camera-side boundary first',
             409,
           );
+        const recordingEnd = Boolean(s.cameraBoundaryPosition);
         this.recordPositionRequested = true;
         await this.capture;
-        if (!s.cameraBoundaryPosition)
+        if (
+          !(recordingEnd
+            ? s.cameraBoundaryEndPosition
+            : s.cameraBoundaryPosition)
+        )
           throw new RobotArmError(
             'NOT_READY',
             s.error ?? 'Boundary was not recorded',
@@ -1280,11 +1306,12 @@ export class CalibrationWorkflow {
           s.stage !== 'ready' ||
           !s.referencePosition ||
           !s.cameraBoundaryPosition ||
+          !s.cameraBoundaryEndPosition ||
           this.capture
         )
           throw new RobotArmError(
             'CONFIRMATION_REQUIRED',
-            'Record both positions and confirm the clear arm corridor',
+            'Record the reference and both boundary points, then confirm the clear arm corridor',
             409,
           );
         await this.assertMechanicalFrame();
@@ -1293,24 +1320,13 @@ export class CalibrationWorkflow {
         );
         const reference = s.referencePosition;
         const boundary = s.cameraBoundaryPosition;
-        const a = contactPoint(reference, tool.offsetMm);
-        const b = contactPoint(boundary, tool.offsetMm);
-        const separation = Math.hypot(b.x - a.x, b.y - a.y);
-        if (separation < 20)
-          throw new RobotArmError(
-            'INVALID_ARGUMENT',
-            'Record the camera-side boundary at least 20 mm from the reference',
-          );
-        if (
-          distance(
-            unit(rotate(reference.orientation, tool.contactDirection)),
-            unit(rotate(boundary.orientation, tool.contactDirection)),
-          ) > 0.005
-        )
-          throw new RobotArmError(
-            'INVALID_ARGUMENT',
-            'Keep the stylus contact direction unchanged',
-          );
+        const boundaryEnd = s.cameraBoundaryEndPosition;
+        const cameraBoundary = taughtCameraBoundary(
+          reference,
+          boundary,
+          boundaryEnd,
+          tool,
+        );
         const teaching = {
           id: randomUUID(),
           recordedAt: new Date().toISOString(),
@@ -1323,14 +1339,12 @@ export class CalibrationWorkflow {
           ).geometryRevision,
           toolGeometryRevision: tool.geometryRevision,
           referencePose: reference,
-          poses: { reference, cameraBoundary: boundary },
-          cameraBoundary: {
-            point: { x: b.x, y: b.y },
-            normal: {
-              x: (b.x - a.x) / separation,
-              y: (b.y - a.y) / separation,
-            },
+          poses: {
+            reference,
+            cameraBoundary: boundary,
+            cameraBoundaryEnd: boundaryEnd,
           },
+          cameraBoundary,
           corridorConfirmed: true as const,
         };
         await this.runtime.configure(() =>
@@ -1357,6 +1371,7 @@ export class CalibrationWorkflow {
         // screen only needs a sampling start within the shared installation.
         if (s.referencePosition || !s.teachingId) {
           s.cameraBoundaryPosition = undefined;
+          s.cameraBoundaryEndPosition = undefined;
           s.teachingId = undefined;
         }
         s.referencePosition = undefined;
@@ -1749,7 +1764,8 @@ export class CalibrationWorkflow {
         if (!this.fittedGeometry) s.referencePosition = undefined;
         s.stage = this.fittedGeometry ? 'return-ready' : 'ready';
       } else if (recordBoundary) {
-        s.cameraBoundaryPosition = pose;
+        if (s.cameraBoundaryPosition) s.cameraBoundaryEndPosition = pose;
+        else s.cameraBoundaryPosition = pose;
         s.stage = 'ready';
       } else {
         s.referencePosition = pose;
@@ -1808,7 +1824,14 @@ export class CalibrationWorkflow {
               knownScreenTravelHeight(this.runtime.profileStore.list(), input),
               this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
             ),
+            { attemptId: s.id, direction: reason },
           );
+        } catch (error) {
+          if (!isRobotArmError(error)) throw error;
+          throw new RobotArmError(error.code, error.message, error.status, {
+            ...error.details,
+            referenceTravel: reason,
+          });
         } finally {
           s.referenceTravel = undefined;
           this.changed();
@@ -1832,8 +1855,9 @@ export class CalibrationWorkflow {
             check: checkCollecting,
             move: async (pose, options) => {
               lastMoveConfirmed = false;
-              await host.move(pose, options);
+              const actual = await host.move(pose, options);
               lastMoveConfirmed = true;
+              return actual;
             },
           },
           reference,
@@ -1892,6 +1916,17 @@ export class CalibrationWorkflow {
       // reference before waiting for a review of the new geometry.
       if (lastMoveConfirmed && s.explorationQuality?.warnings?.length)
         await travelToReference('return');
+      if (measurements.coarsePhoneObservations.length)
+        void this.runtime.auditStore?.record({
+          kind: 'calibration',
+          id: s.id,
+          outcome: 'completed',
+          detail: structuredClone({
+            stage: 'automatic-sampling',
+            deviceId: this.options.deviceId,
+            coarsePhoneObservations: measurements.coarsePhoneObservations,
+          }),
+        });
     };
     const task = this.runtime.collectAutomaticPoints(collectionInput, collect);
     this.captureOperationId = this.runtime.current()?.requestId;
@@ -2020,21 +2055,15 @@ export class CalibrationWorkflow {
       screen,
     };
     const robot = this.runtime.profileStore.getRobot(input.robotProfileId);
-    const result = fitExploration(
-      collection,
-      tool,
-      this.runtime.capabilities,
-      {
-        id: randomUUID(),
-        robotProfileId: robot.id,
-        toolProfileId: tool.id,
-        screenProfileId: s.id,
-        robotGeometryRevision: robot.geometryRevision,
-        toolGeometryRevision: tool.geometryRevision,
-        screenGeometryRevision: 1,
-      },
-      s.explorationMode !== 'standard',
-    );
+    const result = fitExploration(collection, tool, this.runtime.capabilities, {
+      id: randomUUID(),
+      robotProfileId: robot.id,
+      toolProfileId: tool.id,
+      screenProfileId: s.id,
+      robotGeometryRevision: robot.geometryRevision,
+      toolGeometryRevision: tool.geometryRevision,
+      screenGeometryRevision: 1,
+    });
     const candidate = result.candidate;
     const fit: Fit = {
       kind: candidate.kind,
@@ -2361,7 +2390,6 @@ export class CalibrationWorkflow {
     const state = this.status();
     const c = state?.calibration;
     const evidence = c?.auto?.evidence;
-    const fast = state?.explorationMode === 'slide';
     const reasons: string[] = [];
     if (
       state?.stage !== 'review' ||
@@ -2385,7 +2413,7 @@ export class CalibrationWorkflow {
       quality.inliers > quality.total ||
       !Array.isArray(evidence.samples) ||
       evidence.samples.length < 7 ||
-      evidence.planeSource !== (fast ? 'assumed-horizontal' : 'measured') ||
+      evidence.planeSource !== 'measured' ||
       !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
       (evidence.surfaceMaxMm ?? 0) > SAMPLED_SURFACE_LIMIT_MM
     )

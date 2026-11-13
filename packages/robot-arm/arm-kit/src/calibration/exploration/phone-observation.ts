@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import {
+  type AutomaticCaptureMotionTiming,
   CALIBRATION_PHONE_POLICY,
   CALIBRATION_RELATIVE_SLACK,
   type CalibrationPageUpdate,
@@ -10,6 +11,9 @@ import { RobotArmError } from '../../contracts.js';
 import type { ProbePurpose } from './types.js';
 
 const CONFIRM_INTERVAL_MS = 100;
+const COARSE_NO_TOUCH_CONFIRM_INTERVAL_MS = 50;
+const BRIEF_CONTACT_GAP_MS = 150;
+const MAX_BRIEF_CONTACT_GAPS = 2;
 type Step = NonNullable<CalibrationPointProgress['step']>;
 type Feedback = NonNullable<CalibrationPageUpdate['stepFeedback']>;
 type Reading = { revision: number; point?: WebPoint };
@@ -19,10 +23,13 @@ export interface PhoneProbeEvidence {
   targetId: string;
   purpose: ProbePurpose;
   requestedTipZMm: number;
+  measuredTipZMm?: number;
+  motionTiming?: AutomaticCaptureMotionTiming;
   startedAt: string;
   elapsedMs: number;
   outcome: string;
   changes: number;
+  recoveredContactGaps?: number;
   lastContactChange?: {
     id: string;
     phase: Step['phase'];
@@ -55,7 +62,15 @@ export class StationaryPhoneObservation {
   private firstReply?: Reading;
   private current?: Reading;
   private pointerId?: string;
-  private failure?: 'multiple_contacts' | 'pointer_cancelled' | 'unstable';
+  private jitterPx = 0;
+  private allowBriefContactGaps = false;
+  private contactGap?: { point: WebPoint; startedAt: number };
+  private recoveredContactGaps = 0;
+  private failure?:
+    | 'multiple_contacts'
+    | 'pointer_cancelled'
+    | 'intermittent_contact'
+    | 'unstable';
 
   constructor(
     sampleId: string,
@@ -64,6 +79,8 @@ export class StationaryPhoneObservation {
     requestedTipZMm: number,
     sequence: number,
     receivedAt: number,
+    measuredTipZMm?: number,
+    motionTiming?: AutomaticCaptureMotionTiming,
   ) {
     this.sequence = sequence;
     this.receivedAt = receivedAt;
@@ -72,6 +89,8 @@ export class StationaryPhoneObservation {
       targetId,
       purpose,
       requestedTipZMm,
+      measuredTipZMm,
+      motionTiming,
       startedAt: new Date().toISOString(),
       elapsedMs: 0,
       outcome: 'interrupted',
@@ -83,6 +102,7 @@ export class StationaryPhoneObservation {
     return {
       ...this.evidence,
       elapsedMs: Math.round(performance.now() - this.started),
+      recoveredContactGaps: this.recoveredContactGaps || undefined,
     };
   }
 
@@ -110,8 +130,11 @@ export class StationaryPhoneObservation {
 
     const point = reply.outcome === 'touched' ? reply.point : undefined;
     const pointerId = point ? update.contact?.id : undefined;
-    if (reply.outcome === 'unknown')
-      this.failure ??= reply.reason ?? 'unstable';
+    if (
+      reply.outcome === 'unknown' &&
+      (!this.failure || this.failure === 'intermittent_contact')
+    )
+      this.failure = reply.reason ?? 'unstable';
     if (reply.outcome === 'touched' && !point) this.failure = 'unstable';
     if (point && this.pointerId && pointerId && pointerId !== this.pointerId)
       this.failure = 'unstable';
@@ -129,13 +152,34 @@ export class StationaryPhoneObservation {
         elapsedMs: Math.round(this.receivedAt - this.started),
         outcome: reply.outcome,
       };
-      // A press that appeared and vanished at a fixed Z is not evidence for a deeper descent.
+      // Keep transient contact distinct so refinement can use its existing bracket.
       if (
         (earlyRelease || !point) &&
         this.evidence.purpose !== 'release' &&
         this.evidence.purpose !== 'preflight'
+      ) {
+        if (
+          this.allowBriefContactGaps &&
+          !point &&
+          this.current?.point &&
+          this.recoveredContactGaps < MAX_BRIEF_CONTACT_GAPS
+        ) {
+          this.contactGap = {
+            point: this.current.point,
+            startedAt: this.receivedAt,
+          };
+        } else this.failure ??= 'intermittent_contact';
+      }
+    }
+    if (point && this.contactGap) {
+      const { point: before, startedAt } = this.contactGap;
+      this.contactGap = undefined;
+      if (
+        this.receivedAt - startedAt <= BRIEF_CONTACT_GAP_MS &&
+        Math.hypot(point.x - before.x, point.y - before.y) <= this.jitterPx
       )
-        this.failure ??= 'unstable';
+        this.recoveredContactGaps++;
+      else this.failure ??= 'intermittent_contact';
     }
     this.pointerId = pointerId;
     this.current = {
@@ -166,16 +210,19 @@ export class StationaryPhoneObservation {
     publish: () => void,
     shortEdgeCssPx: number,
     settleMs = 0,
+    allowBriefContactGaps = this.evidence.purpose === 'search',
   ): Promise<WebPoint | undefined> {
     const deadline =
       this.started + CALIBRATION_PHONE_POLICY.stepAcknowledgementMs;
-    const jitterPx =
+    this.jitterPx =
       Math.max(1, shortEdgeCssPx * 0.0075) * (1 + CALIBRATION_RELATIVE_SLACK);
+    this.allowBriefContactGaps = allowBriefContactGaps;
     const matches = (a: Reading, b: Reading) => {
       if (a.revision !== b.revision) return false;
       if (!a.point || !b.point) return a.point === b.point;
       return (
-        Math.hypot(a.point.x - b.point.x, a.point.y - b.point.y) <= jitterPx
+        Math.hypot(a.point.x - b.point.x, a.point.y - b.point.y) <=
+        this.jitterPx
       );
     };
     const fail = (code: string, message: string): never => {
@@ -190,10 +237,16 @@ export class StationaryPhoneObservation {
         lastUpdateAgeMs: Math.round(performance.now() - this.receivedAt),
         lastUpdateSequence: this.sequence,
         lastFeedbackId: this.lastFeedbackId,
+        reason: this.failure,
       });
     };
     const check = () => {
       host.check();
+      if (
+        this.contactGap &&
+        performance.now() - this.contactGap.startedAt > BRIEF_CONTACT_GAP_MS
+      )
+        this.failure ??= 'intermittent_contact';
       if (this.failure === 'multiple_contacts')
         fail('TOUCH_AMBIGUOUS', 'Expected zero or one mapped touch');
       if (this.failure === 'pointer_cancelled')
@@ -201,7 +254,10 @@ export class StationaryPhoneObservation {
           'PHONE_TOUCH_UNSTABLE',
           'The phone cancelled the active pointer. Touch at this position is unknown.',
         );
-      if (this.failure === 'unstable')
+      if (
+        this.failure === 'unstable' ||
+        this.failure === 'intermittent_contact'
+      )
         fail(
           'PHONE_TOUCH_UNSTABLE',
           'Phone contact changed while the robot was stationary. This position could not be measured.',
@@ -219,7 +275,7 @@ export class StationaryPhoneObservation {
       this.step = { id, phase, contactMode: 'current' };
       this.issued.set(`${id}/${phase}`, {});
       publish();
-      while (!this.firstReply) {
+      while (!this.firstReply || this.contactGap) {
         check();
         await delay(20, undefined, { signal: host.signal });
       }
@@ -230,16 +286,25 @@ export class StationaryPhoneObservation {
       const id = this.evidence.sampleId;
       let previous = await read(id, 'prepare');
       // Two independent browser reads while the arm is still. A late change gets one recheck.
-      for (const nextId of [id, `${id}-confirm`]) {
+      for (let index = 0; index < 2 + this.recoveredContactGaps * 2; index++) {
+        const nextId =
+          index === 0 ? id : `${id}-confirm${index === 1 ? '' : `-${index}`}`;
         // Allow a full phone report cycle before accepting absence at a depth limit or expected touch.
         const awaitingContact =
           !previous.point &&
           ['search-limit', 'press', 'slide'].includes(this.evidence.purpose);
+        const coarseNoTouch =
+          nextId === id &&
+          this.evidence.purpose === 'coarse-search' &&
+          !previous.point &&
+          this.evidence.changes === 0;
         const now = performance.now();
         const waitMs = Math.max(
           awaitingContact
             ? CALIBRATION_PHONE_POLICY.heartbeatMs
-            : CONFIRM_INTERVAL_MS,
+            : coarseNoTouch
+              ? COARSE_NO_TOUCH_CONFIRM_INTERVAL_MS
+              : CONFIRM_INTERVAL_MS,
           this.started + settleMs - now,
         );
         await delay(Math.max(0, Math.min(waitMs, deadline - now)), undefined, {

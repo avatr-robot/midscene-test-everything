@@ -26,7 +26,11 @@ const layout = {
 const point = { x: 110, y: 250 };
 type Feedback = NonNullable<CalibrationPageUpdate['stepFeedback']>;
 
-function start(purpose: ProbePurpose = 'search', settleMs = 0) {
+function start(
+  purpose: ProbePurpose = 'search',
+  settleMs = 0,
+  allowBriefContactGaps?: boolean,
+) {
   let sequence = 4;
   const observation = new StationaryPhoneObservation(
     'sample',
@@ -43,6 +47,7 @@ function start(purpose: ProbePurpose = 'search', settleMs = 0) {
     publish,
     400,
     settleMs,
+    allowBriefContactGaps,
   );
   void result.catch(() => {});
   const report = (
@@ -96,12 +101,37 @@ it('waits at the same pose through a 3 s ACK delay and rejects stale and wrong-t
   expect(f.observation.step).toBeUndefined();
 });
 
-it('confirms a late contact on a third fresh read at the same pose', async () => {
-  const f = start();
+it.each([
+  ['coarse-search', 'ready', 50],
+  ['coarse-search', 'touched', 100],
+  ['search', 'ready', 100],
+] as const)(
+  'waits the expected interval for %s with first reply %s',
+  async (purpose, firstReply, intervalMs) => {
+    const f = start(purpose);
+    f.report(firstReply);
+    // The observation polls every 20 ms to receive the first reply.
+    await rstest.advanceTimersByTimeAsync(20 + intervalMs - 1);
+    expect(f.observation.step?.phase).toBe('prepare');
+    await rstest.advanceTimersByTimeAsync(1);
+    expect(f.observation.step?.phase).toBe('result');
+    f.report(firstReply === 'ready' ? 'no_touch' : 'touched');
+    await rstest.advanceTimersByTimeAsync(20);
+    await expect(f.result).resolves.toEqual(
+      firstReply === 'ready' ? undefined : point,
+    );
+  },
+);
+
+it('restores the full interval when coarse search detects a late contact', async () => {
+  const f = start('coarse-search');
   f.report('ready');
-  await rstest.advanceTimersByTimeAsync(120);
+  await rstest.advanceTimersByTimeAsync(70);
+  expect(f.observation.step?.phase).toBe('result');
   f.report('touched');
-  await rstest.advanceTimersByTimeAsync(120);
+  await rstest.advanceTimersByTimeAsync(119);
+  expect(f.observation.step?.id).toBe('sample');
+  await rstest.advanceTimersByTimeAsync(1);
   expect(f.observation.step?.id).toBe('sample-confirm');
   f.report('touched', { id: 'sample' });
   expect(f.observation.diagnostics().replies).toHaveLength(2);
@@ -171,6 +201,47 @@ it('keeps a release before the first browser paint from confirming a clear searc
   expect(f.observation.diagnostics().changes).toBe(1);
   expect(f.observation.diagnostics().replies[0].releasedBeforeAck).toBe(true);
 });
+
+it.each(['search', 'press'] as const)(
+  'requires two fresh touch readings after a brief %s contact gap',
+  async (purpose) => {
+    const f = start(purpose, 0, purpose === 'press' ? true : undefined);
+    f.report('touched');
+    await rstest.advanceTimersByTimeAsync(20);
+    f.report('ready');
+    await rstest.advanceTimersByTimeAsync(17);
+    const recovered = { x: point.x + 0.5, y: point.y };
+    f.report('touched', { point: recovered });
+    await rstest.advanceTimersByTimeAsync(83);
+    f.report('touched', { point: recovered });
+    await rstest.advanceTimersByTimeAsync(120);
+    expect(f.observation.step?.id).toBe('sample-confirm');
+    f.report('touched', { point: recovered });
+    await rstest.advanceTimersByTimeAsync(20);
+    await expect(f.result).resolves.toEqual(recovered);
+    expect(f.observation.diagnostics().recoveredContactGaps).toBe(1);
+  },
+);
+
+it.each(['no return', 'distant return'] as const)(
+  'rejects a search contact gap with %s',
+  async (kind) => {
+    const f = start();
+    f.report('touched');
+    await rstest.advanceTimersByTimeAsync(20);
+    f.report('ready');
+    await rstest.advanceTimersByTimeAsync(17);
+    if (kind === 'distant return')
+      f.report('touched', { point: { x: point.x + 5, y: point.y } });
+    await rstest.advanceTimersByTimeAsync(83);
+    if (kind === 'no return') f.report('no_touch');
+    await rstest.advanceTimersByTimeAsync(80);
+    await expect(f.result).rejects.toMatchObject({
+      code: 'PHONE_TOUCH_UNSTABLE',
+      details: { reason: 'intermittent_contact' },
+    });
+  },
+);
 
 it('confirms a delayed release on two independent clear reads', async () => {
   const f = start('release');

@@ -4,6 +4,7 @@ import type { MotionTarget } from './application/context.js';
 import {
   assertCameraBoundary,
   cameraBoundaryExcessMm,
+  taughtCameraBoundary,
 } from './application/teaching-constraints.js';
 import type {
   AutomaticCaptureHost,
@@ -61,6 +62,7 @@ import {
   assertToolPayload,
   calibrationAccepted,
   evaluatePayloadApplication,
+  isPayloadReadbackPending,
   isRobotArmError,
   semanticJson,
 } from './contracts.js';
@@ -73,10 +75,8 @@ import {
   dot,
   flangePose,
   quaternionDistance,
-  rotate,
   scale,
   sub,
-  unit,
 } from './domain.js';
 import type { JogTarget, MotionRequest } from './kernel/contracts.js';
 import type {
@@ -157,14 +157,6 @@ const JOG_STOP_ATTEMPTS = 3;
 const PAYLOAD_RECONFIRM_TIMEOUT_MS = 3000;
 /** Poll interval while waiting for that re-confirmation. */
 const PAYLOAD_RECONFIRM_POLL_MS = 100;
-/** Evidence the adapter rebuilds from the controller without any operator action. */
-const RECONFIRMABLE_PAYLOAD_REASONS = [
-  'connection-lost',
-  'readback-unavailable',
-  'disconnected',
-  'state-unavailable',
-  'controller-restarted',
-];
 function payloadApplicationOf(error: RobotArmError) {
   return error.details?.payloadApplication as
     | PayloadApplicationState
@@ -174,9 +166,7 @@ function payloadApplicationOf(error: RobotArmError) {
 function payloadEvidenceGap(error: RobotArmError) {
   return (
     error.code === 'TOOL_PAYLOAD_NOT_APPLIED' &&
-    RECONFIRMABLE_PAYLOAD_REASONS.includes(
-      payloadApplicationOf(error)?.reason ?? '',
-    )
+    isPayloadReadbackPending(payloadApplicationOf(error))
   );
 }
 /** Feedback a reconnect repairs without an operator stop or recovery. */
@@ -326,6 +316,9 @@ export class RobotArmRuntime extends RobotKernel {
       input.onPayloadRecheck?.(waiting);
     };
     let marked = false;
+    let referenceAttemptId: string | undefined;
+    let retriedStationaryStart = false;
+    const stopRevision = this.stopRevision;
     try {
       const host: Parameters<typeof work>[0] = {
         signal,
@@ -356,6 +349,8 @@ export class RobotArmRuntime extends RobotKernel {
           return structuredClone(pose);
         },
         move: async (pose, probeOptions) => {
+          const startedAt = performance.now();
+          let submittedAt = startedAt;
           let submitted = false;
           const checkSubmission = () => {
             check();
@@ -373,6 +368,22 @@ export class RobotArmRuntime extends RobotKernel {
           if (teaching) assertCameraBoundary(pose, teaching, { tool });
           assertOrientation(pose, this.capabilities);
           const options = captureMotion(probeOptions);
+          const travel = probeOptions?.referenceTravel;
+          const detectStartFailure =
+            !calibrationSessionId && travel?.direction === 'approach';
+          const trace =
+            this.auditStore &&
+            (detectStartFailure || travel?.leg === 'traverse')
+              ? travel
+              : undefined;
+          if (detectStartFailure) options.detectStartFailure = true;
+          const extraReadback =
+            travel?.direction === 'approach' &&
+            travel.leg === 'traverse' &&
+            process.env.MIDSCENE_ARM_DIAGNOSTIC_PAYLOAD_READBACK === '1';
+          if (trace) options.traceCompletion = true;
+          if (extraReadback)
+            options.freshPayloadReadbackKg = tool.payload?.massKg;
           await this.adapter.preflightCartesian(
             'linear',
             pose,
@@ -382,7 +393,7 @@ export class RobotArmRuntime extends RobotKernel {
           checkSubmission();
           const previousMotionSubmitted = this.motionSubmitted;
           try {
-            await this.motionExecutor.move(
+            const result = await this.motionExecutor.move(
               pose,
               robot.workspace,
               options,
@@ -399,12 +410,38 @@ export class RobotArmRuntime extends RobotKernel {
                     );
                 },
                 submitted: () => {
+                  submittedAt = performance.now();
                   submitted = true;
                   this.motionSubmitted = true;
                 },
               },
             );
+            if (trace)
+              this.audit('calibration', trace.attemptId, 'completed', {
+                stage: 'reference-travel',
+                direction: trace.direction,
+                leg: trace.leg,
+                extraReadback,
+                operationId,
+                completionTrace: result.completionTrace,
+              });
           } catch (error) {
+            if (trace) {
+              referenceAttemptId = trace.attemptId;
+              this.audit(
+                'calibration',
+                trace.attemptId,
+                'failed',
+                {
+                  stage: 'reference-travel',
+                  direction: trace.direction,
+                  leg: trace.leg,
+                  extraReadback,
+                  operationId,
+                },
+                error,
+              );
+            }
             // A failed acceptance is ambiguous unless the driver confirms it
             // never reached the motion channel. Preserve any earlier motion.
             if (
@@ -414,6 +451,7 @@ export class RobotArmRuntime extends RobotKernel {
               this.motionSubmitted = previousMotionSubmitted;
             throw error;
           }
+          const adapterCompletedAt = performance.now();
           const actual = await this.motionExecutor.stable(
             pose,
             5000,
@@ -431,6 +469,12 @@ export class RobotArmRuntime extends RobotKernel {
               'The measured probe position did not reach the requested small step',
               409,
             );
+          probeOptions?.onTiming?.({
+            beforeSubmitMs: Math.round(submittedAt - startedAt),
+            adapterCompletionMs: Math.round(adapterCompletedAt - submittedAt),
+            stableMs: Math.round(performance.now() - adapterCompletedAt),
+          });
+          return actual;
         },
       };
       const collect = async () => {
@@ -456,6 +500,60 @@ export class RobotArmRuntime extends RobotKernel {
               }
               return await work(host);
             } catch (error) {
+              if (
+                !retriedStationaryStart &&
+                !calibrationSessionId &&
+                isRobotArmError(error) &&
+                error.code === 'CALIBRATION_MOTION_NOT_STARTED'
+              ) {
+                const guard = () => {
+                  this.assertStopRevision(stopRevision);
+                  check();
+                  if (this.operatorStop || this.recoveryRequired)
+                    throw new RobotArmError(
+                      'RECOVERY_REQUIRED',
+                      'Controller recovery requires confirmation',
+                      409,
+                    );
+                };
+                retriedStationaryStart = true;
+                guard();
+                await this.controlledStop();
+                guard();
+                await checkRecovery(this.adapter, this.softwarePaused, guard);
+                const stoppedPose = await this.adapter.getPose();
+                const stablePose = await this.motionExecutor.stable(
+                  stoppedPose,
+                  5000,
+                  guard,
+                  (ms) => this.hold(ms),
+                );
+                const startPose = error.details?.startPose as
+                  | CartesianPose
+                  | undefined;
+                if (
+                  !startPose ||
+                  distance(stablePose.positionMm, startPose.positionMm) > 0.5 ||
+                  quaternionDistance(
+                    stablePose.orientation,
+                    startPose.orientation,
+                  ) > 0.01
+                )
+                  throw new RobotArmError(
+                    'MOTION_INTERRUPTED',
+                    'The robot pose changed before the stop was confirmed',
+                    409,
+                  );
+                await this.ready(tool, setPayloadRecheck);
+                guard();
+                if (referenceAttemptId)
+                  this.audit('calibration', referenceAttemptId, 'completed', {
+                    stage: 'reference-travel-recovery',
+                    operationId,
+                    retrying: true,
+                  });
+                continue;
+              }
               if (
                 !input.onPayloadRecheck ||
                 calibrationSessionId ||
@@ -512,6 +610,8 @@ export class RobotArmRuntime extends RobotKernel {
               isRobotArmError(error) &&
               (error.code === 'MOTION_INTERRUPTED' ||
                 error.code === 'MOTION_TIMEOUT' ||
+                error.code === 'CALIBRATION_MOTION_NOT_STARTED' ||
+                error.code === 'COMMAND_TIMEOUT' ||
                 isTransientFeedbackLoss(error)) &&
               // An evidence gap is a configuration precondition, not an
               // interruption: no command was travelling when it was reported,
@@ -519,7 +619,28 @@ export class RobotArmRuntime extends RobotKernel {
               !payloadEvidenceGap(error)
             )
               this.requireRecovery('interruption');
-            await this.controlledStop().catch(() => undefined);
+            if (referenceAttemptId) {
+              const recoveryDetail: Record<string, unknown> = {
+                stage: 'reference-travel-recovery',
+                operationId,
+                startedAt: Date.now(),
+              };
+              try {
+                await this.controlledStop();
+                this.audit('calibration', referenceAttemptId, 'completed', {
+                  ...recoveryDetail,
+                  stopConfirmedAt: Date.now(),
+                });
+              } catch (stopError) {
+                this.audit(
+                  'calibration',
+                  referenceAttemptId,
+                  'failed',
+                  recoveryDetail,
+                  stopError,
+                );
+              }
+            } else await this.controlledStop().catch(() => undefined);
           }
         } else await this.stopPromise;
         if (this.operation?.requestId === operationId)
@@ -1444,7 +1565,9 @@ export class RobotArmRuntime extends RobotKernel {
         'TOOL_PAYLOAD_NOT_APPLIED',
         payloadApplication.reason === 'parameters-changed'
           ? 'The controller tool payload differs from the saved tool payload. Sync the saved payload before motion.'
-          : 'Tool payload is not confirmed for the saved tool. Apply it according to the adapter requirements before motion.',
+          : isPayloadReadbackPending(payloadApplication)
+            ? 'Waiting for the controller to reconfirm the tool payload.'
+            : 'Tool payload is not confirmed for the saved tool. Apply it according to the adapter requirements before motion.',
         409,
         { payloadApplication },
       );
@@ -2849,6 +2972,7 @@ export class RobotArmRuntime extends RobotKernel {
     this.audit('control', randomUUID(), 'completed', {
       control: 'recover',
       automatic: true,
+      operationId: interruptedId,
       recoveryReason: reason,
     });
   }
@@ -3271,7 +3395,7 @@ export class RobotArmRuntime extends RobotKernel {
     },
     point: import('./contracts.js').InstallationTeachingPoint,
   ) {
-    if (!['reference', 'cameraBoundary'].includes(point))
+    if (!['reference', 'cameraBoundary', 'cameraBoundaryEnd'].includes(point))
       throw new RobotArmError(
         'INVALID_ARGUMENT',
         'Unknown installation position',
@@ -3342,6 +3466,16 @@ export class RobotArmRuntime extends RobotKernel {
           'Record the reference position first',
           409,
         );
+      if (point === 'cameraBoundaryEnd' && !draft.poses.cameraBoundary)
+        throw new RobotArmError(
+          'NOT_READY',
+          'Record boundary point A first',
+          409,
+        );
+      if (point === 'cameraBoundary') {
+        const { cameraBoundaryEnd: _previousEnd, ...poses } = draft.poses;
+        draft.poses = poses;
+      }
       draft.id = randomUUID();
       draft.poses[point] = structuredClone(measured);
       await this.profileStore.saveInstallationTeachingDraft(draft, check);
@@ -3397,35 +3531,21 @@ export class RobotArmRuntime extends RobotKernel {
           'Record installation positions for the current equipment',
           409,
         );
-      const { reference, cameraBoundary } = draft.poses;
-      if (!reference || !cameraBoundary)
+      const { reference, cameraBoundary, cameraBoundaryEnd } = draft.poses;
+      if (!reference || !cameraBoundary || !cameraBoundaryEnd)
         throw new RobotArmError(
           'NOT_READY',
-          'Record the reference and camera-side boundary',
+          'Record the reference and both camera-side boundary points',
           409,
         );
       const tool = this.profileStore.getTool(binding.toolProfileId);
       this.assertAppliedPayload(tool);
-      const a = contactPoint(reference, tool.offsetMm);
-      const b = contactPoint(cameraBoundary, tool.offsetMm);
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const separation = Math.hypot(dx, dy);
-      if (separation < 20)
-        throw new RobotArmError(
-          'INVALID_ARGUMENT',
-          'Record the camera-side boundary at least 20 mm from the reference',
-        );
-      if (
-        distance(
-          unit(rotate(reference.orientation, tool.contactDirection)),
-          unit(rotate(cameraBoundary.orientation, tool.contactDirection)),
-        ) > 0.005
-      )
-        throw new RobotArmError(
-          'INVALID_ARGUMENT',
-          'Keep the stylus contact direction unchanged; rotation around its axis is allowed',
-        );
+      const boundary = taughtCameraBoundary(
+        reference,
+        cameraBoundary,
+        cameraBoundaryEnd,
+        tool,
+      );
       const teaching: import('./contracts.js').InstallationTeaching = {
         ...binding,
         id: randomUUID(),
@@ -3436,11 +3556,8 @@ export class RobotArmRuntime extends RobotKernel {
         ).geometryRevision,
         toolGeometryRevision: tool.geometryRevision,
         referencePose: reference,
-        poses: { reference, cameraBoundary },
-        cameraBoundary: {
-          point: { x: b.x, y: b.y },
-          normal: { x: dx / separation, y: dy / separation },
-        },
+        poses: { reference, cameraBoundary, cameraBoundaryEnd },
+        cameraBoundary: boundary,
         corridorConfirmed: true,
       };
       await this.profileStore.saveInstallationTeaching(teaching);
@@ -3604,8 +3721,8 @@ export class RobotArmRuntime extends RobotKernel {
     const target =
       point === 'reference'
         ? teaching.referencePose
-        : point === 'cameraBoundary'
-          ? teaching.poses.cameraBoundary
+        : point === 'cameraBoundary' || point === 'cameraBoundaryEnd'
+          ? teaching.poses[point]
           : undefined;
     if (!target)
       throw new RobotArmError(

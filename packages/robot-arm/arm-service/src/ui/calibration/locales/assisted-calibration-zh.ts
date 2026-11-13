@@ -1,4 +1,5 @@
 export const assistedCalibrationZh: Record<string, string> = {
+  'Use Saved Teaching': '沿用已保存的示教',
   'Calibration saved · Camera mapping changed': '标定已保存，相机映射已变更',
   'Phone step acknowledgement timed out. Touch at this position is unknown.':
     '手机未在时限内确认本步，当前位置的接触状态未知。请检查标定页和连接后重试。',
@@ -38,8 +39,8 @@ export const assistedCalibrationZh: Record<string, string> = {
   'Continue to boundary verification': '继续边界验证',
   'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.':
     '采样拟合后自动执行悬停与接触边界验证，再记录安全位置、检查并保存。',
-  'I confirm the screen is horizontal and secured, the setup is ready, and the workspace is clear for sampling and automatic boundary verification.':
-    '我已确认屏幕水平固定、配置就绪、工作区净空，可以开始采样和自动边界验证。',
+  'I confirm the screen is securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.':
+    '我已确认屏幕固定、触控笔尖有弹性缓冲且工作区净空，可以开始采样和自动边界验证。',
   'The screen is horizontal and securely fixed.': '屏幕已水平放置并固定。',
   'I confirm the setup and clear workspace for sampling and automatic boundary verification.':
     '我已确认配置及工作区净空，允许采样与自动边界验证。',

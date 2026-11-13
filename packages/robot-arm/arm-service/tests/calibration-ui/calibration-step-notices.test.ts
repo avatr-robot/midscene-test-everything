@@ -29,6 +29,7 @@ it('offers automatic collection before recording the safe position', () => {
   value.session = {
     id: 'retry',
     stage: 'ready',
+    teachingId: 'saved',
     phoneConnected: true,
     referencePosition: {
       frame: 'base',
@@ -64,7 +65,7 @@ it('offers automatic collection before recording the safe position', () => {
   expect(
     radios.filter((input) => input.includes('type="checkbox"')),
   ).toHaveLength(1);
-  expect(html).toContain('屏幕水平固定、配置就绪、工作区净空');
+  expect(html).toContain('屏幕固定、触控笔尖有弹性缓冲且工作区净空');
   expect(html).toContain('自动执行悬停与接触边界验证');
   expect(html).not.toContain('Record Safe Position');
   expect(html).not.toContain('15 点');
@@ -331,7 +332,7 @@ it.each([
 );
 
 it.each(['slide', 'standard', 'fast'] as const)(
-  'offers a confirmed regular retry only after sliding collection fails (%s)',
+  'offers a regular-mode retry only after sliding collection fails (%s)',
   (explorationMode) => {
     const value = controller();
     value.session = {
@@ -349,12 +350,13 @@ it.each(['slide', 'standard', 'fast'] as const)(
           onActivated: async () => {},
         }),
       );
-    expect(render().includes('确认重试')).toBe(explorationMode === 'slide');
+    const retryLabel = '用普通模式重试';
+    expect(render().includes(retryLabel)).toBe(explorationMode === 'slide');
     value.session.errorDetails = { code: 'MOTION_INTERRUPTED', status: 409 };
     expect(render()).toContain('重新开始标定');
-    expect(render()).not.toContain('确认重试');
+    expect(render()).not.toContain(retryLabel);
     value.session.errorDetails = undefined;
     value.session.collectionFailed = false;
-    expect(render()).not.toContain('确认重试');
+    expect(render()).not.toContain(retryLabel);
   },
 );

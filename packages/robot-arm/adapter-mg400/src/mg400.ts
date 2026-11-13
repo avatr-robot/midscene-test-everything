@@ -29,6 +29,7 @@ import {
   isRobotArmError,
   quaternionDistance,
   robotSetupDefaults,
+  sameToolPayload,
   validateMotionOptions,
   yawQuaternion,
 } from '@midscene/arm-kit/adapter-development';
@@ -524,6 +525,7 @@ export function buildMg400MotionCommand(
 }
 /** One in-flight response per channel. A timeout quarantines the socket; never reuse a late reply. */
 class TextChannel {
+  connectedAt?: number;
   private epoch = 0;
   private socket?: Socket;
   private opening?: Promise<void>;
@@ -580,6 +582,7 @@ class TextChannel {
           );
           return;
         }
+        this.connectedAt = Date.now();
         resolve();
       });
       socket.on('data', (chunk: string) => {
@@ -741,6 +744,7 @@ class TextChannel {
     this.opening = undefined;
     const socket = this.socket;
     this.socket = undefined;
+    this.connectedAt = undefined;
     this.buffer = '';
     const p = this.pending;
     this.pending = undefined;
@@ -855,6 +859,8 @@ export class Mg400Adapter implements RobotArmAdapter {
   private generation = 0;
   private safetyGeneration = 0;
   private active = false;
+  private motionReconnectAfterDrag = false;
+  private postDragResetAt?: number;
   /**
    * Stop or emergency-stop work in flight. Automatic reconnection must not
    * reopen channels underneath a safety control that is closing and replacing
@@ -1100,6 +1106,10 @@ export class Mg400Adapter implements RobotArmAdapter {
       port: this.config.feedbackPort,
       staleAfterMs: this.config.feedbackStaleAfterMs,
       onStatusChange: options.onFeedbackStatus,
+      onFrame: (frame) => {
+        if (frame.dragStatus !== 0 || frame.mode === MG400_DRAG_MODE)
+          this.motionReconnectAfterDrag = true;
+      },
     });
   }
   private connectionLost(): void {
@@ -1485,6 +1495,11 @@ export class Mg400Adapter implements RobotArmAdapter {
         control();
       }
       assertIdle(await this.getStateFresh());
+      if (this.motionReconnectAfterDrag) {
+        control();
+        await this.reconnectMotionAfterDrag(control);
+        assertIdle(await this.getStateFresh());
+      }
       control();
       faultAt = this.lastFaultSampleAt;
       // GetPose(User=0,Tool=0), or measured-joint FK, is authoritative.
@@ -1525,6 +1540,7 @@ export class Mg400Adapter implements RobotArmAdapter {
             await this.checkReachability(target.pose);
             control();
           }
+          this.assertMotionChannelReadyAfterDrag();
           this.invalidateStateSample();
           this.lastCommandAt = Date.now();
           const submittedAt = this.lastCommandAt;
@@ -1886,12 +1902,14 @@ export class Mg400Adapter implements RobotArmAdapter {
     // `Clear faults` impossible to satisfy, because ClearError() cannot leave
     // the paused state on its own.
     const enabled = feedback ? feedback.enabled : isMg400ModeEnabled(mode);
+    const dragMode = mode === MG400_DRAG_MODE || Boolean(feedback?.dragStatus);
+    if (dragMode) this.motionReconnectAfterDrag = true;
     if (!enabled) this.payloadApplication.observeDisabled(payloadGeneration);
     return {
       connected: true,
       enabled,
       moving: feedback ? feedback.running : isMg400ModeMoving(mode),
-      dragMode: feedback ? feedback.dragStatus !== 0 : mode === MG400_DRAG_MODE,
+      dragMode,
       mode: String(mode),
       paused: isMg400ModePaused(mode),
       pose: await this.readMeasuredPose(),
@@ -2194,6 +2212,22 @@ export class Mg400Adapter implements RobotArmAdapter {
     }
   }
   async exitDragMode() {
+    if (this.active || this.safetyControls > 0)
+      throw new RobotArmError(
+        'BUSY',
+        'MG400 has an outstanding motion or safety control',
+        409,
+      );
+    this.active = true;
+    const generation = this.generation;
+    const check = () => {
+      if (generation !== this.generation)
+        throw new RobotArmError(
+          'QUERY_INTERRUPTED',
+          'MG400 drag exit was interrupted',
+          409,
+        );
+    };
     // An operator may already have exited with the physical drag button. Some
     // firmware rejects StopDrag in normal mode, so use measured controller
     // state rather than the calibration's saved flag.
@@ -2204,29 +2238,98 @@ export class Mg400Adapter implements RobotArmAdapter {
       !state.paused &&
       !state.faults.length &&
       ['4', '5'].includes(state.mode);
-    const state = await this.getStateFresh();
-    if (!state.dragMode) {
-      if (exited(state)) return;
-      throw new RobotArmError(
-        'DRAG_UNCONFIRMED',
-        'Cannot confirm an idle controller outside Drag Mode',
-        409,
-        { mode: state.mode },
-      );
-    }
     try {
-      await this.transition('StopDrag()', exited);
-    } catch (error) {
-      // A physical exit can also race the query above. Only an explicit vendor
-      // rejection can be reconciled; timeouts and transport errors still fail.
+      const state = await this.getStateFresh();
+      check();
+      if (state.dragMode) {
+        try {
+          await this.transition(
+            'StopDrag()',
+            exited,
+            undefined,
+            undefined,
+            check,
+          );
+        } catch (error) {
+          // The operator can exit physically between the query and StopDrag.
+          if (
+            !isRobotArmError(error) ||
+            error.details?.vendorCode !== -1 ||
+            !exited(await this.getStateFresh())
+          )
+            throw error;
+        }
+      } else if (!exited(state)) {
+        throw new RobotArmError(
+          'DRAG_UNCONFIRMED',
+          'Cannot confirm an idle controller outside Drag Mode',
+          409,
+          { mode: state.mode },
+        );
+      }
+      check();
+      // Some controllers acknowledge the first MovL on the pre-drag socket
+      // without starting it. Replace only that socket before allowing motion.
+      await this.reconnectMotionAfterDrag(check);
+      await this.confirm(
+        'motion readiness after Drag Mode',
+        exited,
+        LIFECYCLE_TIMEOUT_MS,
+        50,
+        check,
+      );
+    } finally {
+      this.active = false;
+    }
+  }
+  private async reconnectMotionAfterDrag(check: () => void) {
+    this.motionReconnectAfterDrag = true;
+    this.postDragResetAt = undefined;
+    if (process.env.MIDSCENE_ARM_POST_DRAG_RESET !== '0') {
+      const state = await this.getStateFresh();
+      check();
       if (
-        isRobotArmError(error) &&
-        error.details?.vendorCode === -1 &&
-        exited(await this.getStateFresh())
+        this.safetyControls ||
+        !state.connected ||
+        state.dragMode ||
+        state.moving ||
+        state.paused ||
+        state.faults.length ||
+        !['4', '5'].includes(state.mode)
       )
-        return;
+        throw new RobotArmError(
+          'DRAG_UNCONFIRMED',
+          'MG400 must be idle and fault-free before the post-drag reset',
+          409,
+          { mode: state.mode },
+        );
+      this.invalidateStateSample();
+      this.lastCommandAt = Date.now();
+      await this.dashboard.send('ResetRobot()');
+      check();
+      this.postDragResetAt = Date.now();
+    }
+    this.invalidateStateSample();
+    this.motion.close(undefined, true);
+    try {
+      await this.motion.connect();
+    } catch (error) {
+      this.scheduleReconnect();
       throw error;
     }
+    const waitMs = Number(process.env.MIDSCENE_ARM_POST_DRAG_WAIT_MS ?? 1000);
+    if (Number.isInteger(waitMs) && waitMs > 0 && waitMs <= 5000)
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    check();
+    this.motionReconnectAfterDrag = false;
+  }
+  private assertMotionChannelReadyAfterDrag() {
+    if (this.motionReconnectAfterDrag)
+      throw new RobotArmError(
+        'DRAG_UNCONFIRMED',
+        'MG400 motion connection needs to be refreshed after Drag Mode',
+        409,
+      );
   }
   async pause() {
     this.softwarePaused = true;
@@ -2477,6 +2580,25 @@ export class Mg400Adapter implements RobotArmAdapter {
     );
     const command =
       jointCommand ?? buildMg400MotionCommand(name, pose, options);
+    const trace: Record<string, unknown> | undefined =
+      options?.traceCompletion || options?.detectStartFailure
+        ? { command, target: pose, motionConnectedAt: this.motion.connectedAt }
+        : undefined;
+    const feedbackSample = () => {
+      const frame = this.feedback.current();
+      return {
+        at: Date.now(),
+        feedback: this.feedback.status(),
+        frame: frame && {
+          ...frame,
+          controllerTimestampMs: frame.controllerTimestampMs.toString(),
+        },
+        dashboard: this.stateSample && {
+          at: this.stateSample.at,
+          state: this.stateSample.state,
+        },
+      };
+    };
     // Screen contact asks for a single fresh arrival sample: Sync already proves
     // the motion finished, and every further sample is spent with the tool
     // already pressing the glass.
@@ -2485,11 +2607,82 @@ export class Mg400Adapter implements RobotArmAdapter {
       throw new RobotArmError('BUSY', 'MG400 has an outstanding motion', 409);
     this.active = true;
     const generation = this.generation;
+    const safetyGeneration = this.safetyGeneration;
+    const assertContinuity = () => {
+      if (generation !== this.generation)
+        throw new RobotArmError(
+          'DISCONNECTED',
+          'MG400 connection changed before motion could be confirmed',
+          503,
+          { command },
+        );
+    };
     let dispatchAttempted = false;
+    let feedbackTimer: ReturnType<typeof setInterval> | undefined;
+    let lastFeedbackSample: ReturnType<typeof feedbackSample> | undefined;
+    const sampleFeedback = () => {
+      const sample = feedbackSample();
+      if (sample.frame) lastFeedbackSample = sample;
+      return sample;
+    };
+    const finishTrace = () => {
+      clearInterval(feedbackTimer);
+      if (trace) {
+        trace.finishedAt = Date.now();
+        trace.lastFreshFeedback = lastFeedbackSample;
+        trace.finalFeedback = feedbackSample();
+      }
+    };
     try {
+      if (options?.freshPayloadReadbackKg !== undefined) {
+        const requestedAt = Date.now();
+        if (trace) trace.extraPayloadReadback = { requestedAt };
+        const frame = await this.feedback.waitForFrame(1000, requestedAt);
+        if (trace)
+          trace.extraPayloadReadback = {
+            requestedAt,
+            receivedAt: frame.receivedAt,
+            expectedKg: options.freshPayloadReadbackKg,
+            reportedKg: frame.loadKg,
+          };
+        if (
+          !sameToolPayload(
+            { massKg: frame.loadKg },
+            { massKg: options.freshPayloadReadbackKg },
+          )
+        )
+          throw new RobotArmError(
+            'TOOL_PAYLOAD_NOT_APPLIED',
+            'Fresh MG400 load readback differs from the saved tool payload',
+            409,
+          );
+      }
       // Fresh on purpose: dispatching a motion is a physical go/no-go decision,
       // so it must not be taken from a bounded sample that may predate a fault.
-      const s = await this.getStateFresh();
+      let s = await this.getStateFresh();
+      if (
+        this.motionReconnectAfterDrag &&
+        s.enabled &&
+        !s.dragMode &&
+        !s.moving &&
+        !s.paused &&
+        !s.faults.length &&
+        !this.softwarePaused &&
+        !this.safetyControls
+      ) {
+        const check = () => {
+          if (generation !== this.generation)
+            throw new RobotArmError(
+              'ACTION_STOPPED',
+              'Motion was stopped before dispatch',
+              409,
+            );
+        };
+        check();
+        await this.reconnectMotionAfterDrag(check);
+        s = await this.getStateFresh();
+        if (trace) trace.motionConnectedAt = this.motion.connectedAt;
+      }
       if (
         !s.enabled ||
         s.moving ||
@@ -2521,31 +2714,98 @@ export class Mg400Adapter implements RobotArmAdapter {
           'Motion was stopped before dispatch',
           409,
         );
+      this.assertMotionChannelReadyAfterDrag();
       this.invalidateStateSample();
       this.lastCommandAt = Date.now();
       const submittedAt = this.lastCommandAt;
+      if (trace) {
+        trace.before = { state: s, payload: this.payloadApplication.read() };
+        trace.postDragResetAt = this.postDragResetAt;
+        trace.submittedAt = submittedAt;
+        trace.beforeFeedback = sampleFeedback();
+      }
+      const startFrame = this.feedback.current();
       dispatchAttempted = true;
       await this.motion.send(command);
+      let startFailure: Promise<never> | undefined;
+      if (trace) {
+        const acknowledgedAt = Date.now();
+        trace.acknowledgedAt = acknowledgedAt;
+        trace.vendorCode = 0;
+        const samples = [sampleFeedback()];
+        trace.samples = samples;
+        startFailure = new Promise<never>((_, reject) => {
+          let stationarySinceDispatch = Boolean(
+            options?.detectStartFailure &&
+              startFrame &&
+              s.pose &&
+              distance(s.pose.positionMm, pose.positionMm) > 0.5,
+          );
+          let previousClock = startFrame?.controllerTimestampMs;
+          let distinctFrames = 0;
+          feedbackTimer = setInterval(() => {
+            const sample = sampleFeedback();
+            if (samples.length < 16) samples.push(sample);
+            if (!stationarySinceDispatch || !startFrame) return;
+            const frame = sample.frame;
+            if (
+              !frame ||
+              frame.receivedAt < acknowledgedAt ||
+              frame.mode !== 5 ||
+              !frame.enabled ||
+              frame.running ||
+              frame.runQueuedCmd ||
+              frame.dragStatus !== 0 ||
+              frame.pauseCmdFlag ||
+              frame.errorActive ||
+              frame.toolVectorActual
+                .slice(0, 3)
+                .some(
+                  (value, i) =>
+                    Math.abs(value - startFrame.toolVectorActual[i]) > 0.1,
+                ) ||
+              frame.jointActualDegrees.some(
+                (value, i) =>
+                  Math.abs(value - startFrame.jointActualDegrees[i]) > 0.1,
+              )
+            ) {
+              stationarySinceDispatch = false;
+              return;
+            }
+            const clock = BigInt(frame.controllerTimestampMs);
+            if (previousClock !== undefined && clock > previousClock)
+              distinctFrames++;
+            previousClock = clock;
+            if (
+              frame.receivedAt - acknowledgedAt >= 3000 &&
+              distinctFrames >= 10
+            )
+              reject(
+                new RobotArmError(
+                  'CALIBRATION_MOTION_NOT_STARTED',
+                  'MG400 acknowledged the calibration move but remained stationary',
+                  409,
+                  { command, startPose: s.pose },
+                ),
+              );
+          }, 200);
+        });
+        feedbackTimer?.unref();
+      }
       const terminal = (async (): Promise<MotionResult> => {
         try {
-          await this.motion.send('Sync()', this.config.motionTimeoutMs);
-          if (generation !== this.generation) {
-            await this.stopOutcome;
-            return { status: 'stopped', completedAt: new Date().toISOString() };
-          }
+          if (trace) trace.syncStartedAt = Date.now();
+          const sync = this.motion.send('Sync()', this.config.motionTimeoutMs);
+          await (startFailure ? Promise.race([sync, startFailure]) : sync);
+          if (trace) trace.syncRepliedAt = Date.now();
+          assertContinuity();
           // The dashboard mode can lag behind the motion-channel Sync reply.
           // Wait only for that transition; never retry the physical command.
           const stateDeadline =
             Date.now() + Math.min(this.config.motionTimeoutMs, 1000);
           while (true) {
             const state = await this.getStateFresh();
-            if (generation !== this.generation) {
-              await this.stopOutcome;
-              return {
-                status: 'stopped',
-                completedAt: new Date().toISOString(),
-              };
-            }
+            assertContinuity();
             const unsafe =
               state.faults.length > 0 ||
               !state.enabled ||
@@ -2572,19 +2832,14 @@ export class Mg400Adapter implements RobotArmAdapter {
           // timing can anchor a press window to it.
           let arrivedAt: number | undefined;
           while (Date.now() < deadline) {
-            if (generation !== this.generation) {
-              await this.stopOutcome;
-              return {
-                status: 'stopped',
-                completedAt: new Date().toISOString(),
-              };
-            }
+            assertContinuity();
             const sample = jointTarget
               ? {
                   ...this.pollSample(),
                   values: await this.readMeasuredJoints(),
                 }
               : await this.readPoseSample(true);
+            assertContinuity();
             const current = 'values' in sample ? sample.values : sample.pose;
             const close = Array.isArray(current)
               ? current.every((v, i) => Math.abs(v - jointTarget![i]) <= 0.5)
@@ -2617,6 +2872,7 @@ export class Mg400Adapter implements RobotArmAdapter {
                 completedAt: new Date().toISOString(),
                 arrivedAt,
                 submittedAt,
+                ...(trace ? { completionTrace: trace } : {}),
                 ...(Array.isArray(current) ? {} : { pose: current }),
               };
             await new Promise((resolve) => setTimeout(resolve, 50));
@@ -2627,22 +2883,36 @@ export class Mg400Adapter implements RobotArmAdapter {
             504,
           );
         } catch (e) {
-          if (generation !== this.generation) {
+          // Transport failures also invalidate the generation. Preserve the
+          // original error unless a safety control actually stopped the move.
+          if (safetyGeneration !== this.safetyGeneration) {
             await this.stopOutcome;
-            return { status: 'stopped', completedAt: new Date().toISOString() };
+            return {
+              status: 'stopped',
+              completedAt: new Date().toISOString(),
+              ...(trace ? { completionTrace: trace } : {}),
+            };
           }
+          if (trace && isRobotArmError(e))
+            throw new RobotArmError(e.code, e.message, e.status, {
+              ...e.details,
+              completionTrace: trace,
+            });
           throw e;
         } finally {
+          finishTrace();
           this.active = false;
         }
       })();
       return createMotionHandle(randomUUID(), terminal);
     } catch (e) {
+      finishTrace();
       this.active = false;
-      if (!dispatchAttempted && isRobotArmError(e))
+      if ((!dispatchAttempted || trace) && isRobotArmError(e))
         throw new RobotArmError(e.code, e.message, e.status, {
           ...e.details,
-          beforeMotionSubmission: true,
+          ...(!dispatchAttempted ? { beforeMotionSubmission: true } : {}),
+          ...(trace ? { completionTrace: trace } : {}),
         });
       throw e;
     }

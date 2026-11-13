@@ -102,6 +102,10 @@ body[data-display-ready="false"] #capture-grid {
   font: 28px / 1 sans-serif;
 }
 
+body[data-stage="collect"] .approach-target {
+  display: none;
+}
+
 #verification-guide {
   position: fixed;
   z-index: 1;

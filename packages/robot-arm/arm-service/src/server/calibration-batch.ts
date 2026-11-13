@@ -616,6 +616,7 @@ export class CalibrationBatch {
     cameraId: string;
     planVersion: string;
     horizontalConfirmed: boolean;
+    compliantSetupConfirmed?: boolean;
     corridorConfirmed?: boolean;
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual' | 'automatic';
@@ -642,11 +643,12 @@ export class CalibrationBatch {
         );
       if (
         input.horizontalConfirmed !== true ||
+        (samplingMode === 'slide' && input.compliantSetupConfirmed !== true) ||
         (plan.transfer && input.corridorConfirmed !== true)
       )
         throw new RobotArmError(
           'CONFIRMATION_REQUIRED',
-          'Confirm fixed screens and the full arm corridor before starting',
+          'Confirm fixed screens, a compliant tip for Fast, and the full arm corridor before starting',
           409,
         );
       const selected = this.selection(input.cameraId);
@@ -666,6 +668,7 @@ export class CalibrationBatch {
         status: 'running',
         currentIndex: 0,
         samplingMode,
+        compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
         usesSharedSafePosition: true,
         sharedSafePosition:
           sharedSafePosition &&
@@ -1285,6 +1288,16 @@ export class CalibrationBatch {
         this.stopRevision = this.runtime.stopRevision;
         this.launch(launchRevision, true);
       } else if (action === 'retry' || action === 'skip') {
+        if (
+          !parkingOnly &&
+          state.samplingMode === 'slide' &&
+          !state.compliantSetupConfirmed
+        )
+          throw new RobotArmError(
+            'CONFIRMATION_REQUIRED',
+            'Start a new Fast batch to confirm the compliant tool and secured screens.',
+            409,
+          );
         if (
           (!row && !parkingOnly) ||
           (parkingOnly && action !== 'retry') ||

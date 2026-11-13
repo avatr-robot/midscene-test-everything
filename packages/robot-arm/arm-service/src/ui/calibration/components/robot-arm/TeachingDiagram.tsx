@@ -21,7 +21,7 @@ export function TeachingDiagram({
 }: { stage: InstallationTeachingPoint }) {
   useLanguage();
   const id = useId().replace(/:/g, '');
-  const boundary = stage === 'cameraBoundary';
+  const boundary = stage !== 'reference';
   const title = boundary
     ? 'Camera-side boundary — top view'
     : 'Reference travel height — side view';
@@ -143,19 +143,29 @@ export function TeachingDiagram({
             strokeWidth="2"
             strokeDasharray="8 6"
           />
-          <circle
-            cx="320"
-            cy="179"
-            r="7"
-            fill="#c5737c"
-            stroke="white"
-            strokeWidth="3"
-          />
-          <path
-            d="M320 299V202"
-            className="setup-art-dim"
-            markerEnd={`url(#${id}-arrow)`}
-          />
+          {[
+            { x: 166, label: 'A' },
+            { x: 486, label: 'B' },
+          ].map(({ x, label }) => (
+            <g key={label}>
+              <circle
+                cx={x}
+                cy="179"
+                r="7"
+                fill="#c5737c"
+                stroke="white"
+                strokeWidth="3"
+              />
+              <text
+                x={x}
+                y="202"
+                textAnchor="middle"
+                className="setup-art-small"
+              >
+                {label}
+              </text>
+            </g>
+          ))}
           <circle
             cx="320"
             cy="309"

@@ -7,7 +7,7 @@ import { dot, scale, sub } from '../domain.js';
 
 // Absolute bound from the frozen plane; repeated repairs cannot deepen it.
 export const SURFACE_LIMIT_MM = 5;
-export const SAMPLED_SURFACE_LIMIT_MM = 2;
+export const SAMPLED_SURFACE_LIMIT_MM = 3;
 export function assertSurface(
   surface: ScreenSurfaceCompensation | undefined,
 ): void {
