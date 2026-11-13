@@ -24,7 +24,7 @@ Add the device and follow the setup steps in its manager. Then run `pnpm dev:pla
 
 The maximum measured screen-surface deviation from the fitted plane is 3 mm.
 
-In fast calibration, a confirmed missed touch or a measured height error over 1 mm at an independent check point can trigger up to three inset retries. The retry locations are 3, 6, and 9 mm from the original point toward the first contact. Each retry uses the existing probe-depth and height-error limits.
+In fast calibration, a confirmed missed touch or a measured height error over 1.5 mm at an independent check point can trigger up to three inset retries. The retry locations are 3, 6, and 9 mm from the original point toward the first contact. Each retry uses the existing probe-depth and height-error limits.
 
 If the MG400 acknowledges a lift, traverse, or descent toward the calibration reference and fresh feedback shows it stayed idle and stationary, the service clears the controller's motion queue, confirms recovery, and retries the approach once. It keeps the current screen and sampling mode. A manual stop or emergency stop still requires operator recovery.
 
