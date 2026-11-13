@@ -167,6 +167,7 @@ export interface Mg400RealtimeChannelOptions {
   maxReconnectDelayMs?: number;
   /** Called whenever the reported feedback status actually changes. */
   onStatusChange?: (status: RobotArmFeedbackStatus) => void;
+  onFrame?: (frame: Mg400RealtimeFeedback) => void;
 }
 
 /**
@@ -186,6 +187,7 @@ export class Mg400RealtimeChannel {
   private readonly reconnectDelayMs: number;
   private readonly maxReconnectDelayMs: number;
   private readonly onStatusChange?: (status: RobotArmFeedbackStatus) => void;
+  private readonly onFrame?: (frame: Mg400RealtimeFeedback) => void;
   private readonly framer = new Mg400RealtimeFramer();
   private socket?: Socket;
   private opening = false;
@@ -215,6 +217,7 @@ export class Mg400RealtimeChannel {
         'Invalid MG400 feedback staleness window',
       );
     this.onStatusChange = options.onStatusChange;
+    this.onFrame = options.onFrame;
   }
   /** Disabled channels report a downgrade and never open a socket. */
   private get disabled(): boolean {
@@ -262,11 +265,14 @@ export class Mg400RealtimeChannel {
     this.report();
   }
   /** Resolve once a fresh frame is available, or reject after the timeout. */
-  async waitForFrame(timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS) {
+  async waitForFrame(
+    timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
+    after = Number.NEGATIVE_INFINITY,
+  ) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const frame = this.current();
-      if (frame) return frame;
+      if (frame && frame.receivedAt > after) return frame;
       if (Date.now() >= deadline)
         throw new RobotArmError(
           'FEEDBACK_UNAVAILABLE',
@@ -382,6 +388,7 @@ export class Mg400RealtimeChannel {
     for (const frame of this.framer.push(chunk)) {
       try {
         this.latest = decodeMg400RealtimeFrame(frame);
+        this.onFrame?.(this.latest);
         this.decodeFailureReported = false;
         this.lastError = undefined;
         this.armStaleWatchdog();

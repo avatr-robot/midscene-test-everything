@@ -1806,7 +1806,14 @@ export class CalibrationWorkflow {
               knownScreenTravelHeight(this.runtime.profileStore.list(), input),
               this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
             ),
+            { attemptId: s.id, direction: reason },
           );
+        } catch (error) {
+          if (!isRobotArmError(error)) throw error;
+          throw new RobotArmError(error.code, error.message, error.status, {
+            ...error.details,
+            referenceTravel: reason,
+          });
         } finally {
           s.referenceTravel = undefined;
           this.changed();

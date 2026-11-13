@@ -325,6 +325,9 @@ export class RobotArmRuntime extends RobotKernel {
       input.onPayloadRecheck?.(waiting);
     };
     let marked = false;
+    let referenceAttemptId: string | undefined;
+    let retriedStationaryStart = false;
+    const stopRevision = this.stopRevision;
     try {
       const host: Parameters<typeof work>[0] = {
         signal,
@@ -374,6 +377,22 @@ export class RobotArmRuntime extends RobotKernel {
           if (teaching) assertCameraBoundary(pose, teaching, { tool });
           assertOrientation(pose, this.capabilities);
           const options = captureMotion(probeOptions);
+          const travel = probeOptions?.referenceTravel;
+          const detectStartFailure =
+            !calibrationSessionId && travel?.direction === 'approach';
+          const trace =
+            this.auditStore &&
+            (detectStartFailure || travel?.leg === 'traverse')
+              ? travel
+              : undefined;
+          if (detectStartFailure) options.detectStartFailure = true;
+          const extraReadback =
+            travel?.direction === 'approach' &&
+            travel.leg === 'traverse' &&
+            process.env.MIDSCENE_ARM_DIAGNOSTIC_PAYLOAD_READBACK === '1';
+          if (trace) options.traceCompletion = true;
+          if (extraReadback)
+            options.freshPayloadReadbackKg = tool.payload?.massKg;
           await this.adapter.preflightCartesian(
             'linear',
             pose,
@@ -383,7 +402,7 @@ export class RobotArmRuntime extends RobotKernel {
           checkSubmission();
           const previousMotionSubmitted = this.motionSubmitted;
           try {
-            await this.motionExecutor.move(
+            const result = await this.motionExecutor.move(
               pose,
               robot.workspace,
               options,
@@ -406,7 +425,32 @@ export class RobotArmRuntime extends RobotKernel {
                 },
               },
             );
+            if (trace)
+              this.audit('calibration', trace.attemptId, 'completed', {
+                stage: 'reference-travel',
+                direction: trace.direction,
+                leg: trace.leg,
+                extraReadback,
+                operationId,
+                completionTrace: result.completionTrace,
+              });
           } catch (error) {
+            if (trace) {
+              referenceAttemptId = trace.attemptId;
+              this.audit(
+                'calibration',
+                trace.attemptId,
+                'failed',
+                {
+                  stage: 'reference-travel',
+                  direction: trace.direction,
+                  leg: trace.leg,
+                  extraReadback,
+                  operationId,
+                },
+                error,
+              );
+            }
             // A failed acceptance is ambiguous unless the driver confirms it
             // never reached the motion channel. Preserve any earlier motion.
             if (
@@ -466,6 +510,60 @@ export class RobotArmRuntime extends RobotKernel {
               return await work(host);
             } catch (error) {
               if (
+                !retriedStationaryStart &&
+                !calibrationSessionId &&
+                isRobotArmError(error) &&
+                error.code === 'CALIBRATION_MOTION_NOT_STARTED'
+              ) {
+                const guard = () => {
+                  this.assertStopRevision(stopRevision);
+                  check();
+                  if (this.operatorStop || this.recoveryRequired)
+                    throw new RobotArmError(
+                      'RECOVERY_REQUIRED',
+                      'Controller recovery requires confirmation',
+                      409,
+                    );
+                };
+                retriedStationaryStart = true;
+                guard();
+                await this.controlledStop();
+                guard();
+                await checkRecovery(this.adapter, this.softwarePaused, guard);
+                const stoppedPose = await this.adapter.getPose();
+                const stablePose = await this.motionExecutor.stable(
+                  stoppedPose,
+                  5000,
+                  guard,
+                  (ms) => this.hold(ms),
+                );
+                const startPose = error.details?.startPose as
+                  | CartesianPose
+                  | undefined;
+                if (
+                  !startPose ||
+                  distance(stablePose.positionMm, startPose.positionMm) > 0.5 ||
+                  quaternionDistance(
+                    stablePose.orientation,
+                    startPose.orientation,
+                  ) > 0.01
+                )
+                  throw new RobotArmError(
+                    'MOTION_INTERRUPTED',
+                    'The robot pose changed before the stop was confirmed',
+                    409,
+                  );
+                await this.ready(tool, setPayloadRecheck);
+                guard();
+                if (referenceAttemptId)
+                  this.audit('calibration', referenceAttemptId, 'completed', {
+                    stage: 'reference-travel-recovery',
+                    operationId,
+                    retrying: true,
+                  });
+                continue;
+              }
+              if (
                 !input.onPayloadRecheck ||
                 calibrationSessionId ||
                 this.motionSubmitted ||
@@ -521,6 +619,8 @@ export class RobotArmRuntime extends RobotKernel {
               isRobotArmError(error) &&
               (error.code === 'MOTION_INTERRUPTED' ||
                 error.code === 'MOTION_TIMEOUT' ||
+                error.code === 'CALIBRATION_MOTION_NOT_STARTED' ||
+                error.code === 'COMMAND_TIMEOUT' ||
                 isTransientFeedbackLoss(error)) &&
               // An evidence gap is a configuration precondition, not an
               // interruption: no command was travelling when it was reported,
@@ -528,7 +628,28 @@ export class RobotArmRuntime extends RobotKernel {
               !payloadEvidenceGap(error)
             )
               this.requireRecovery('interruption');
-            await this.controlledStop().catch(() => undefined);
+            if (referenceAttemptId) {
+              const recoveryDetail: Record<string, unknown> = {
+                stage: 'reference-travel-recovery',
+                operationId,
+                startedAt: Date.now(),
+              };
+              try {
+                await this.controlledStop();
+                this.audit('calibration', referenceAttemptId, 'completed', {
+                  ...recoveryDetail,
+                  stopConfirmedAt: Date.now(),
+                });
+              } catch (stopError) {
+                this.audit(
+                  'calibration',
+                  referenceAttemptId,
+                  'failed',
+                  recoveryDetail,
+                  stopError,
+                );
+              }
+            } else await this.controlledStop().catch(() => undefined);
           }
         } else await this.stopPromise;
         if (this.operation?.requestId === operationId)
@@ -2858,6 +2979,7 @@ export class RobotArmRuntime extends RobotKernel {
     this.audit('control', randomUUID(), 'completed', {
       control: 'recover',
       automatic: true,
+      operationId: interruptedId,
       recoveryReason: reason,
     });
   }

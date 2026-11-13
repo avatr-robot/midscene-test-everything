@@ -1627,12 +1627,11 @@ it.each([
         'contact',
         'avoiding-camera',
       ]);
-      expect(move.mock.calls.slice(0, 3).map(([p]) => p)).toEqual([
+      expect(move.mock.calls.slice(0, 2).map(([p]) => p)).toEqual([
         pose(100, 50, 80),
         pose(100, -50, 80),
-        pose(100, -50, 80),
       ]);
-      for (const [, options] of move.mock.calls.slice(0, 3)) {
+      for (const [, options] of move.mock.calls.slice(0, 2)) {
         expect(options).toMatchObject({
           speed: f.screen.actionSpeed,
           acceleration: f.screen.actionAcceleration,

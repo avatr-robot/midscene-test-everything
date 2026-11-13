@@ -34,6 +34,7 @@ export type {
 export {
   RobotArmError,
   isRobotArmError,
+  sameToolPayload,
   SCREEN_TILT_LIMIT_DEGREES,
 } from './contracts.js';
 export type { RobotRemoteControlMode } from './setup-contracts.js';

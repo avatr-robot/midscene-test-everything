@@ -490,6 +490,11 @@ export interface AutomaticCaptureHost {
       acceleration?: MotionAcceleration;
       timeoutMs?: number;
       onTiming?(timing: AutomaticCaptureMotionTiming): void;
+      referenceTravel?: {
+        attemptId: string;
+        direction: 'approach' | 'return';
+        leg: 'lift' | 'traverse' | 'lower';
+      };
     },
   ): Promise<CartesianPose | undefined>;
 }

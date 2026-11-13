@@ -48,6 +48,12 @@ export type MotionAcceleration =
 export interface MotionOptions {
   speed?: MotionSpeed;
   acceleration?: MotionAcceleration;
+  /** Capture a bounded driver timeline for a diagnostic move. */
+  traceCompletion?: boolean;
+  /** Detect a confirmed stationary start failure on a calibration approach. */
+  detectStartFailure?: boolean;
+  /** Optional diagnostic comparison against a newly received load sample. */
+  freshPayloadReadbackKg?: number;
   /**
    * How many consecutive fresh samples must confirm arrival before a driver
    * reports terminal completion. Every extra sample of a contact move is spent
@@ -71,6 +77,7 @@ export interface MotionResult {
   status: 'completed' | 'stopped' | 'cancelled' | 'failed';
   completedAt: string;
   submittedAt?: number;
+  completionTrace?: Record<string, unknown>;
   /**
    * Host-clock milliseconds of the first fresh sample that showed the target
    * reached, when the driver can observe arrival before its own terminal

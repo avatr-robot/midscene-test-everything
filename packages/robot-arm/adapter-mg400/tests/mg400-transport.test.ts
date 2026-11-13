@@ -103,9 +103,11 @@ async function controller(
   let blockedMode = false;
   let failJogConfirmation = false;
   let jogConfirmationFailed = false;
+  const connections = { motion: 0, dashboard: 0 };
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const server = (motion: boolean) =>
     createServer((socket) => {
+      connections[motion ? 'motion' : 'dashboard']++;
       sockets.add(socket);
       socket.on('error', () => undefined);
       socket.on('close', () => sockets.delete(socket));
@@ -406,6 +408,7 @@ async function controller(
   return {
     adapter,
     commands,
+    connections,
     httpRequests,
     dropConnections() {
       for (const socket of sockets) socket.destroy();
@@ -587,6 +590,38 @@ describe('MG400 transport boundary', () => {
         code: 'DISCONNECTED',
       });
       expect(f.commands.filter((c) => c === 'RobotMode()')).toHaveLength(1);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('reports a motion Sync timeout as unknown completion without resending the move', async () => {
+    const f = await controller({
+      syncDelayMs: 500,
+      adapter: { motionTimeoutMs: 80 },
+    });
+    try {
+      await f.adapter.connect();
+      await f.adapter.enable();
+      const handle = await f.adapter.moveLinear(pose(150, 10, 80), {
+        speed: { kind: 'ratio', value: 0.1 },
+        traceCompletion: true,
+      });
+      await expect(handle.wait()).rejects.toMatchObject({
+        code: 'COMMAND_TIMEOUT',
+        details: {
+          command: 'Sync()',
+          completionTrace: {
+            vendorCode: 0,
+            acknowledgedAt: expect.any(Number),
+            syncStartedAt: expect.any(Number),
+            samples: expect.any(Array),
+            finishedAt: expect.any(Number),
+          },
+        },
+      });
+      expect(
+        f.commands.filter((command) => command.startsWith('MovL(')),
+      ).toHaveLength(1);
     } finally {
       await f.cleanup();
     }
@@ -1708,6 +1743,33 @@ it('MG400 late replies from a timed-out socket cannot satisfy reconnect queries'
 });
 
 describe('MG400 external Drag Mode changes', () => {
+  it('refreshes the motion connection before the first move after a physical drag exit', async () => {
+    const f = await controller({ dragMode: true });
+    try {
+      f.setEnabled(true);
+      await f.adapter.connect();
+      expect((await f.adapter.getState()).dragMode).toBe(true);
+      const connections = { ...f.connections };
+      f.setDrag(false);
+      const handle = await f.adapter.moveLinear(pose(150, 10, 80));
+      await expect(handle.wait()).resolves.toMatchObject({
+        status: 'completed',
+      });
+      expect(f.connections).toEqual({
+        dashboard: connections.dashboard,
+        motion: connections.motion + 1,
+      });
+      expect(f.commands).not.toContain('StopDrag()');
+      expect(
+        f.commands.filter((command) => command === 'ResetRobot()'),
+      ).toHaveLength(1);
+      expect(f.commands.indexOf('ResetRobot()')).toBeLessThan(
+        f.commands.findIndex((command) => command.startsWith('MovL(')),
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
   it('skips StopDrag when the operator already exited, using a fresh state instead of cached Drag Mode', async () => {
     const f = await controller({ dragMode: true });
     try {
@@ -1727,9 +1789,24 @@ describe('MG400 external Drag Mode changes', () => {
     try {
       f.setEnabled(true);
       await f.adapter.connect();
+      const connections = { ...f.connections };
       await f.adapter.exitDragMode();
       expect(f.commands).toContain('StopDrag()');
+      expect(f.connections).toEqual({
+        dashboard: connections.dashboard,
+        motion: connections.motion + 1,
+      });
+      expect(
+        f.commands.filter((command) => command === 'ResetRobot()'),
+      ).toHaveLength(1);
+      expect(f.commands.indexOf('StopDrag()')).toBeLessThan(
+        f.commands.indexOf('ResetRobot()'),
+      );
       expect((await f.adapter.getState()).dragMode).toBe(false);
+      const handle = await f.adapter.moveLinear(pose(150, 10, 80));
+      await expect(handle.wait()).resolves.toMatchObject({
+        status: 'completed',
+      });
     } finally {
       await f.cleanup();
     }
