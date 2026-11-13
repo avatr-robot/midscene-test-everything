@@ -388,7 +388,7 @@ export function WebCalibrationWorkspace({
         start(() => controller.command('retry-standard', true));
       }}
     >
-      {t('Confirm retry')}
+      {t('Retry in regular mode')}
     </Button>
   ) : ['cancelled', 'interrupted', 'capture-failed'].includes(stage ?? '') ? (
     <Button

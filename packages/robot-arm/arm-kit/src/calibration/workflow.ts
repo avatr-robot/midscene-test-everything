@@ -55,6 +55,7 @@ const recoverableSamplingErrors = new Set([
   'TOUCH_NOT_RELEASED',
   'TOUCH_RELEASE_NOT_FOUND',
   'TOUCH_SAFETY_LIMIT',
+  'VISION_UNAVAILABLE',
 ]);
 
 type Fit = Pick<
@@ -1111,17 +1112,34 @@ export class CalibrationWorkflow {
     const s = this.require();
     const stage = s.stage;
     const stopRevision = this.runtime.stopRevision;
-    await this.options.vision.assertPerspectiveCurrent?.();
-    if (
-      this.state !== s ||
-      s.stage !== stage ||
-      stopRevision !== this.runtime.stopRevision
-    )
-      throw new RobotArmError(
-        'ACTION_STOPPED',
-        'Calibration changed or stopped during outline verification',
-        409,
-      );
+    const assertCurrentAttempt = () => {
+      if (
+        this.state !== s ||
+        s.stage !== stage ||
+        stopRevision !== this.runtime.stopRevision
+      )
+        throw new RobotArmError(
+          'ACTION_STOPPED',
+          'Calibration changed or stopped during outline verification',
+          409,
+        );
+    };
+    for (let attempt = 0; ; attempt++) {
+      assertCurrentAttempt();
+      try {
+        await this.options.vision.assertPerspectiveCurrent?.();
+        break;
+      } catch (error) {
+        if (
+          attempt >= 2 ||
+          !isRobotArmError(error) ||
+          error.code !== 'VISION_UNAVAILABLE'
+        )
+          throw error;
+        await delay(300 * (attempt + 1));
+      }
+    }
+    assertCurrentAttempt();
     if (requirePhone) this.phone.assertConnected();
     if (
       !s.mapping ||

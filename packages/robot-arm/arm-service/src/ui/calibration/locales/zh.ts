@@ -2293,6 +2293,11 @@ export const zh: Record<string, string> = {
   Regular: '普通',
   'Confirm retry': '确认重试',
   'Retry in regular mode?': '切换到普通模式重新采样？',
+  'No touch detected at fast calibration point {0} within the safe depth':
+    '快速标定第 {0} 个采样点在安全深度内未检测到触摸',
+  'Fast calibration point {0} did not sustain touch within the safe depth':
+    '快速标定第 {0} 个采样点在安全深度内未能维持稳定触摸',
+  'Retry in regular mode': '用普通模式重试',
   'Fast probing': '快速探测',
   'No touch was detected before the safety height {0} mm. Sampling stopped.':
     '下降至安全高度 {0} mm 时仍未检测到触摸，采样已停止。',
