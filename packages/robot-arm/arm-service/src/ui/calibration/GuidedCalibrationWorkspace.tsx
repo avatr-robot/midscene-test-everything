@@ -7,6 +7,7 @@ import type {
 import {
   type CameraCorrection,
   SCREEN_DRIFT_DETECTION_ENABLED,
+  isPayloadReadbackPending,
 } from '@midscene/robotics-shared/contracts';
 import { markerCaptureRecommended } from '@midscene/robotics-shared/marker-contracts';
 import type {
@@ -1183,7 +1184,11 @@ function GuidedContent({
     pause: 'Resume the robot to continue calibration.',
     interruption: 'Waiting for the controller to confirm it is ready.',
   };
-  const powerControl = config && !config.ready && (
+  const payloadReadbackPending =
+    config?.armState?.state.enabled &&
+    !config.armState.recoveryRequired &&
+    isPayloadReadbackPending(config.armState.payloadApplication);
+  const powerControl = config && !config.ready && !payloadReadbackPending && (
     <CalibrationPowerButton
       key={base}
       config={config}
@@ -1692,7 +1697,9 @@ function GuidedContent({
                                   config.armState.recoveryReason ??
                                     'interruption'
                                 ]
-                              : 'Prepare the robot and tool payload before collecting points.',
+                              : payloadReadbackPending
+                                ? 'Reconfirming the tool payload…'
+                                : 'Prepare the robot and tool payload before collecting points.',
                         )}
                         action={
                           !(

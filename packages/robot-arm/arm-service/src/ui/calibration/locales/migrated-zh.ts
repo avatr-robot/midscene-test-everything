@@ -35,6 +35,8 @@ const teachingBoundaryZh: Record<string, string> = {
     '所有屏幕均已固定，触控工具具有弹性缓冲。',
   'Sampling mode': '采样模式',
   'Reconfirming the tool payload…': '正在重新确认工具负载…',
+  'Waiting for the controller to reconfirm the tool payload.':
+    '正在等待控制器重新确认工具负载。',
   'Could not reconfirm the robot connection and tool payload before calibration motion.':
     '标定运动前未能重新确认机械臂连接和工具负载。',
   'The controller tool payload differs from the saved tool payload. Sync the saved payload before motion.':

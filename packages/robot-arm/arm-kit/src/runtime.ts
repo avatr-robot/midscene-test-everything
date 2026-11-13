@@ -62,6 +62,7 @@ import {
   assertToolPayload,
   calibrationAccepted,
   evaluatePayloadApplication,
+  isPayloadReadbackPending,
   isRobotArmError,
   semanticJson,
 } from './contracts.js';
@@ -156,14 +157,6 @@ const JOG_STOP_ATTEMPTS = 3;
 const PAYLOAD_RECONFIRM_TIMEOUT_MS = 3000;
 /** Poll interval while waiting for that re-confirmation. */
 const PAYLOAD_RECONFIRM_POLL_MS = 100;
-/** Evidence the adapter rebuilds from the controller without any operator action. */
-const RECONFIRMABLE_PAYLOAD_REASONS = [
-  'connection-lost',
-  'readback-unavailable',
-  'disconnected',
-  'state-unavailable',
-  'controller-restarted',
-];
 function payloadApplicationOf(error: RobotArmError) {
   return error.details?.payloadApplication as
     | PayloadApplicationState
@@ -173,9 +166,7 @@ function payloadApplicationOf(error: RobotArmError) {
 function payloadEvidenceGap(error: RobotArmError) {
   return (
     error.code === 'TOOL_PAYLOAD_NOT_APPLIED' &&
-    RECONFIRMABLE_PAYLOAD_REASONS.includes(
-      payloadApplicationOf(error)?.reason ?? '',
-    )
+    isPayloadReadbackPending(payloadApplicationOf(error))
   );
 }
 /** Feedback a reconnect repairs without an operator stop or recovery. */
@@ -1574,7 +1565,9 @@ export class RobotArmRuntime extends RobotKernel {
         'TOOL_PAYLOAD_NOT_APPLIED',
         payloadApplication.reason === 'parameters-changed'
           ? 'The controller tool payload differs from the saved tool payload. Sync the saved payload before motion.'
-          : 'Tool payload is not confirmed for the saved tool. Apply it according to the adapter requirements before motion.',
+          : isPayloadReadbackPending(payloadApplication)
+            ? 'Waiting for the controller to reconfirm the tool payload.'
+            : 'Tool payload is not confirmed for the saved tool. Apply it according to the adapter requirements before motion.',
         409,
         { payloadApplication },
       );

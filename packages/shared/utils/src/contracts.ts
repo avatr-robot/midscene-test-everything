@@ -294,6 +294,21 @@ export interface PayloadApplicationState {
   applied?: AppliedToolPayload;
   snapshot?: PayloadApplicationSnapshot;
 }
+/** The controller can restore this evidence through its normal readback. */
+export function isPayloadReadbackPending(
+  state: PayloadApplicationState | undefined,
+): boolean {
+  return (
+    state?.status === 'unconfirmed' &&
+    [
+      'connection-lost',
+      'readback-unavailable',
+      'disconnected',
+      'state-unavailable',
+      'controller-restarted',
+    ].includes(state.reason ?? '')
+  );
+}
 export interface EnableRequest {
   robotProfileId: string;
   toolProfileId: string;
