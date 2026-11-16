@@ -81,6 +81,20 @@ export class DeviceConnection {
         error: undefined,
       };
       this.notifyStateChange();
+      // Probe whether the existing connection and video stream are already healthy
+      // before tearing down the receiver and forcing a fresh AirPlay pairing.
+      try {
+        const existingState = await device.getConnectionState();
+        if (existingState.phase === 'ready') {
+          await device.screenshot();
+          if (this.device !== device) throw new Error('设备已移除。');
+          this.connectionState = existingState;
+          this.lastScreenCheck = Date.now();
+          return;
+        }
+      } catch (probeError) {
+        if (this.device !== device) throw probeError;
+      }
       await device.refreshConnection({
         timeoutMs: this.input.source === 'airplay' ? 10 * 60_000 : 180000,
         onState: (state) => {
@@ -240,9 +254,18 @@ export class DeviceConnection {
     }
   }
   async screenshot(): Promise<ScreenFrame> {
-    if (!this.device || this.connectionState?.phase !== 'ready')
-      throw new Error('设备尚未就绪。');
+    if (
+      !this.device ||
+      this.connectionState?.phase !== 'ready' ||
+      this.screenError
+    )
+      throw new Error(this.screenError ?? '设备尚未就绪。');
     return this.device.screenshot();
+  }
+
+  async previewScreenshot(): Promise<ScreenFrame> {
+    if (!this.device) throw new Error('设备尚未连接。');
+    return this.device.previewScreenshot();
   }
 
   controlDevice(id: string): ControlledDevice | undefined {

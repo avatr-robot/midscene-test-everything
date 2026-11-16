@@ -1,15 +1,4 @@
-import { DisconnectedPreview } from '@midscene/device-manager-ui/shell/DisconnectedPreview.tsx';
-import { ScreenshotViewer } from '@midscene/device-manager-ui/visualizer';
-import {
-  Button,
-  Form,
-  Modal,
-  Popover,
-  Select,
-  Spin,
-  Tooltip,
-  message,
-} from 'antd';
+import { Button, Form, Modal, Popover, Tooltip, message } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BindingSetup,
@@ -17,7 +6,10 @@ import {
   ConnectionPanel,
 } from './ConnectionPanel';
 import { ManagerLayout } from './ManagerLayout';
+import { LiveScreenshot, Spinner } from './ScreenPreview';
+import { useI18n } from './i18n';
 import { type Route, navigate } from './routes';
+import { subscribeSSE } from './sse';
 import './multi-device.css';
 
 type Workspace = {
@@ -29,12 +21,14 @@ type Workspace = {
   bluetoothPeerId?: string;
   screenError?: string;
   refreshing?: boolean;
+  occupied?: boolean;
   state?: Connection & {
     phase: string;
     device?: { id: string; name: string; modelName?: string };
     error?: string;
   };
 };
+
 async function workspaceRequest(path = '', method = 'GET', timeoutMs = 15000) {
   const result = await fetch(`/iphone-use/workspaces${path}`, {
     method,
@@ -46,6 +40,7 @@ async function workspaceRequest(path = '', method = 'GET', timeoutMs = 15000) {
   if (!result.ok) throw new Error(value.error ?? '设备列表读取失败');
   return value;
 }
+
 export function BluetoothStatusIcon({
   warning = false,
   active = false,
@@ -72,13 +67,15 @@ export function BluetoothStatusIcon({
     </span>
   );
 }
-function sourceLabel(source: string) {
+
+function sourceLabel(source: string, t: (zh: string, en: string) => string) {
   return source === 'camera'
-    ? '独立摄像头'
+    ? t('独立摄像头', 'Camera')
     : source === 'airplay'
       ? 'AirPlay'
       : 'USB';
 }
+
 function workspaceName(item: Workspace, list: Workspace[]) {
   const device = item.state?.device;
   const label = device?.modelName
@@ -94,38 +91,42 @@ function workspaceName(item: Workspace, list: Workspace[]) {
 }
 
 export function MultiDeviceApp({ route }: { route: Route }) {
+  const { t, te } = useI18n();
   const [workspaces, setWorkspaces] = useState<Workspace[]>();
   const [adding, setAdding] = useState(false);
   const boot = useRef<Promise<unknown>>();
   const isHome = !route.startsWith('workspace');
   const activeId = route.split('/')[1];
+
   const reload = useCallback(async () => {
     const value = (await workspaceRequest()) as Workspace[];
     setWorkspaces(value);
     return value;
   }, []);
+
   useEffect(() => {
-    const events = new EventSource('/iphone-use/workspaces/events');
-    events.onmessage = (event) => {
-      try {
-        setWorkspaces(JSON.parse(event.data) as Workspace[]);
-      } catch {
-        void message.warning('设备状态读取失败，请刷新页面。');
-      }
-    };
-    events.onerror = () =>
-      setWorkspaces((current) =>
-        current?.map((item) => ({
-          ...item,
-          state: {
-            ...item.state,
-            phase: 'failed',
-            error: '设备状态连接中断，正在恢复…',
-          },
-        })),
-      );
-    return () => events.close();
+    return subscribeSSE('/iphone-use/workspaces/events', {
+      onMessage: (data) => {
+        try {
+          setWorkspaces(JSON.parse(data) as Workspace[]);
+        } catch {
+          void message.warning('设备状态读取失败，请刷新页面。');
+        }
+      },
+      onError: () =>
+        setWorkspaces((current) =>
+          current?.map((item) => ({
+            ...item,
+            state: {
+              ...item.state,
+              phase: 'failed',
+              error: '设备状态连接中断，正在恢复…',
+            },
+          })),
+        ),
+    });
   }, []);
+
   const addDevice = useCallback(async () => {
     const draft = workspaces?.find((item) => !item.connected);
     if (draft) {
@@ -143,9 +144,18 @@ export function MultiDeviceApp({ route }: { route: Route }) {
       setAdding(false);
     }
   }, [reload, workspaces]);
+
   useEffect(() => {
     if (!workspaces) return;
-    if (activeId && workspaces.some((item) => item.id === activeId)) return;
+    const current = activeId
+      ? workspaces.find((item) => item.id === activeId)
+      : undefined;
+    if (current) {
+      if (isHome && current.connected) {
+        navigate(`workspace/${current.id}`, true);
+      }
+      return;
+    }
     const fallback = isHome
       ? workspaces.find((item) => !item.connected)
       : workspaces.find((item) => item.connected);
@@ -167,19 +177,37 @@ export function MultiDeviceApp({ route }: { route: Route }) {
           boot.current = undefined;
         });
   }, [workspaces, activeId, isHome, reload]);
+
   const remove = (item: Workspace) => {
     Modal.confirm({
-      title: '移除此设备？',
-      content: '将从当前列表移除此设备并释放连接，已保存的配置仍然保留。',
-      okText: '移除',
-      cancelText: '取消',
+      title: t('移除此设备？', 'Remove this device?'),
+      content: t(
+        '将从当前列表移除此设备并释放连接，已保存的配置仍然保留。',
+        'This removes the device from the active list and releases the connection. Saved calibration profiles are kept.',
+      ),
+      okText: t('移除', 'Remove'),
+      okButtonProps: { danger: true },
+      cancelText: t('取消', 'Cancel'),
+      centered: true,
       onOk: async () => {
-        await workspaceRequest(`/${item.id}`, 'DELETE');
-        await reload();
-        navigate('workspace', true);
+        try {
+          await workspaceRequest(`/${item.id}`, 'DELETE');
+          const next = await reload();
+          const remaining = next.find((other) => other.connected);
+          if (remaining) navigate(`workspace/${remaining.id}`, true);
+          else navigate('workspace', true);
+        } catch (error) {
+          void message.warning(
+            error instanceof Error
+              ? te(error.message)
+              : t('移除失败，请重试。', 'Failed to remove. Please try again.'),
+          );
+          throw error;
+        }
       },
     });
   };
+
   if (
     !workspaces ||
     !activeId ||
@@ -187,73 +215,102 @@ export function MultiDeviceApp({ route }: { route: Route }) {
   )
     return (
       <div className="iphone-use-loading">
-        <Spin />
+        <Spinner size={26} />
       </div>
     );
+
+  const connectedDevices = workspaces.filter((item) => item.connected);
+  const setupItem = isHome
+    ? workspaces.find((item) => item.id === activeId && !item.connected)
+    : undefined;
+
+  const inlineSetup = connectedDevices.length === 0 && Boolean(setupItem);
+
   return (
-    <>
-      {workspaces.map((item) => (
-        <DeviceWorkspace
-          key={item.id}
-          item={item}
+    <ManagerLayout
+      adding={adding}
+      onAdd={() => void addDevice()}
+      showAdd={!inlineSetup}
+    >
+      {inlineSetup && setupItem ? (
+        <AddDeviceModal
+          inline
+          item={setupItem}
           workspaces={workspaces}
-          isHome={isHome}
-          active={item.id === activeId}
-          adding={adding}
-          onAdd={addDevice}
-          onRemove={remove}
+          hasConnected={false}
           reload={reload}
         />
-      ))}
-    </>
+      ) : connectedDevices.length === 0 ? (
+        <div className="iphone-use-empty-grid">
+          <div className="iphone-use-empty-card">
+            <div className="iphone-use-empty-title">
+              {t('暂无已接入设备', 'No connected devices')}
+            </div>
+            <Button
+              type="primary"
+              className="iphone-use-primary-btn"
+              loading={adding}
+              onClick={() => void addDevice()}
+            >
+              {t('＋ 添加设备', '+ Add Device')}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="iphone-use-card-grid">
+            {connectedDevices.map((item) => (
+              <DeviceCard
+                key={item.id}
+                item={item}
+                workspaces={workspaces}
+                onRemove={() => remove(item)}
+                reload={reload}
+              />
+            ))}
+            <button
+              type="button"
+              className="iphone-use-add-grid-card"
+              onClick={() => void addDevice()}
+            >
+              <span className="iphone-use-add-grid-plus">＋</span>
+              <span>{t('添加设备', 'Add Device')}</span>
+            </button>
+          </div>
+
+          {setupItem && (
+            <AddDeviceModal
+              item={setupItem}
+              workspaces={workspaces}
+              hasConnected={connectedDevices.length > 0}
+              connectedFallbackId={connectedDevices[0]?.id}
+              reload={reload}
+            />
+          )}
+        </>
+      )}
+    </ManagerLayout>
   );
 }
-function DeviceWorkspace({
+
+function DeviceCard({
   item,
   workspaces,
-  isHome,
-  active,
-  adding,
-  onAdd,
   onRemove,
   reload,
 }: {
   item: Workspace;
   workspaces: Workspace[];
-  isHome: boolean;
-  active: boolean;
-  adding: boolean;
-  onAdd: () => Promise<void>;
-  onRemove: (item: Workspace) => void;
+  onRemove: () => void;
   reload: () => Promise<Workspace[]>;
 }) {
+  const { t, te } = useI18n();
   const [previewTarget, setPreviewTarget] = useState<HTMLDivElement | null>(
     null,
   );
-  const [returning, setReturning] = useState(false);
-  const settingUp =
-    item.state?.phase === 'setup-required' ||
-    item.state?.phase === 'connecting';
-  const returnToAdd = async () => {
-    setReturning(true);
-    try {
-      const response = await fetch(`${item.apiBase}/iphone-use/cancel`, {
-        method: 'POST',
-        headers: { 'X-Midscene-Playground': 'setup' },
-        signal: AbortSignal.timeout(30000),
-      });
-      if (!response.ok)
-        throw new Error((await response.json()).error ?? '返回失败，请重试。');
-      await reload();
-    } catch (error) {
-      void message.warning(
-        error instanceof Error ? error.message : '返回失败，请重试。',
-      );
-    } finally {
-      setReturning(false);
-    }
-  };
+  const [detailOpen, setDetailOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [cancellingRecovery, setCancellingRecovery] = useState(false);
   const busy = refreshing || Boolean(item.refreshing);
   const lastRecoverySetup = useRef<string>();
   if (busy && item.source === 'airplay' && item.state?.setupId)
@@ -265,23 +322,33 @@ function DeviceWorkspace({
   useEffect(() => {
     setRecoveryBluetoothConnected(undefined);
   }, [recoverySetup]);
+
   const recoveryMessage =
     item.state?.phase === 'connecting'
-      ? '正在恢复设备控制…'
+      ? t('正在恢复设备控制…', 'Restoring device control…')
       : recoverySetup
         ? recoveryBluetoothConnected === false
-          ? '等待蓝牙重新连接，请在手机「设置 → 蓝牙」中连接这台 Mac。'
+          ? t(
+              '等待蓝牙重新连接，请在手机「设置 → 蓝牙」中连接这台 Mac。',
+              'Waiting for Bluetooth reconnection. Connect to this Mac in Settings → Bluetooth on your iPhone.',
+            )
           : recoveryBluetoothConnected === true
-            ? '等待手机恢复屏幕镜像…'
-            : '正在获取蓝牙连接状态…'
-        : '正在检查设备连接…';
+            ? t(
+                '等待手机恢复屏幕镜像…',
+                'Waiting for Screen Mirroring to resume…',
+              )
+            : t('正在获取蓝牙连接状态…', 'Checking Bluetooth status…')
+        : t('正在检查设备连接…', 'Checking device connection…');
+
   const ready = item.state?.phase === 'ready' && !item.screenError && !busy;
-  const error =
+  const error = te(
     item.screenError ??
-    item.state?.error ??
-    '设备连接已断开，请检查连接后点击刷新。';
-  const tabs = workspaces.filter((other) => other.connected);
+      item.state?.error ??
+      '设备连接已断开，请检查连接后点击刷新。',
+  );
   const name = workspaceName(item, workspaces);
+  const deviceId = item.state?.device?.id;
+
   const refresh = async () => {
     if (busy) return;
     setRefreshing(true);
@@ -291,64 +358,454 @@ function DeviceWorkspace({
         'POST',
         10 * 60_000 + 15000,
       );
-    } catch (error) {
+    } catch (err) {
       void message.warning(
-        error instanceof Error ? error.message : '恢复失败，请重试。',
+        err instanceof Error
+          ? te(err.message)
+          : t('恢复失败，请重试。', 'Recovery failed. Please try again.'),
       );
     } finally {
       await reload().catch(() => {});
       setRefreshing(false);
     }
   };
-  const details = (
-    <div className="iphone-use-device-details">
-      <strong>{name}</strong>
-      <dl>
-        <dt>画面来源</dt>
-        <dd>
-          {sourceLabel(item.source)} ·{' '}
+
+  const getScreenshot = useCallback(async () => {
+    const response = await fetch(`${item.apiBase}/screenshot`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok)
+      throw new Error(t('画面获取失败', 'Failed to fetch frame'));
+    return response.json();
+  }, [item.apiBase, t]);
+
+  const copyId = () => {
+    if (!deviceId) return;
+    void navigator.clipboard
+      .writeText(deviceId)
+      .then(() => message.success(t('已复制设备 ID', 'Copied device ID')))
+      .catch(() =>
+        message.warning(
+          t(
+            '复制失败，请手动选择设备 ID。',
+            'Copy failed. Please copy the device ID manually.',
+          ),
+        ),
+      );
+  };
+
+  const statusPopover = (
+    <div className="iphone-use-popover-details">
+      <div className="iphone-use-kv-row">
+        <span className="iphone-use-kv-label">
+          {t('占用状态', 'Occupancy')}
+        </span>
+        <span className="iphone-use-kv-value">
+          <span
+            className={`iphone-use-occupancy-pill${item.occupied ? ' occupied' : ''}`}
+          >
+            <i />
+            {item.occupied ? t('使用中', 'In Use') : t('空闲可用', 'Available')}
+          </span>
+        </span>
+      </div>
+      <div className="iphone-use-kv-row">
+        <span className="iphone-use-kv-label">{t('画面来源', 'Screen')}</span>
+        <span className="iphone-use-kv-value">
+          {sourceLabel(item.source, t)} ·{' '}
           {item.screenError
-            ? '画面中断'
+            ? t('画面中断', 'Interrupted')
             : item.state?.phase === 'ready'
-              ? '正常'
-              : '不可用'}
-        </dd>
-        <dt>蓝牙键鼠</dt>
-        <dd>{item.state?.phase === 'ready' ? '已连接' : '已断开'}</dd>
-        <dt>指针验证</dt>
-        <dd>{ready ? '已通过' : '等待重新验证'}</dd>
-      </dl>
-      <Button size="small" type="text" danger onClick={() => onRemove(item)}>
-        移除设备
-      </Button>
-    </div>
-  );
-  const recoveryControls = (
-    <>
-      {!ready && item.connected && (
-        <div className="iphone-use-device-notice">
+              ? t('正常', 'OK')
+              : t('不可用', 'Unavailable')}
+        </span>
+      </div>
+      <div className="iphone-use-kv-row">
+        <span className="iphone-use-kv-label">
+          {t('蓝牙键鼠', 'Bluetooth HID')}
+        </span>
+        <span className="iphone-use-kv-value">
+          {item.state?.phase === 'ready'
+            ? t('已连接', 'Connected')
+            : t('已断开', 'Disconnected')}
+        </span>
+      </div>
+      <div className="iphone-use-kv-row">
+        <span className="iphone-use-kv-label">{t('指针验证', 'Pointer')}</span>
+        <span className="iphone-use-kv-value">
+          {ready
+            ? t('已通过', 'Verified')
+            : t('等待重新验证', 'Needs re-verification')}
+        </span>
+      </div>
+      <div className="iphone-use-kv-row">
+        <span className="iphone-use-kv-label">{t('设备 ID', 'Device ID')}</span>
+        <span className="iphone-use-kv-value">
+          <code>{deviceId ?? t('等待连接', 'Pending')}</code>
+        </span>
+      </div>
+      {!ready && (
+        <div className="iphone-use-device-notice" style={{ marginTop: 8 }}>
           <span>{busy ? recoveryMessage : error}</span>
         </div>
       )}
-      {recoverySetup && (
-        <BindingSetup
-          key={recoverySetup}
-          recovery
-          onBluetoothStatus={setRecoveryBluetoothConnected}
-          baseUrl={recoverySetup}
-          source="airplay"
-          previewTarget={previewTarget}
-          peers={
-            item.bluetoothPeerId ? [{ id: item.bluetoothPeerId, name }] : []
-          }
-          selectedPeerId={item.bluetoothPeerId}
-          onSelectPeer={() => {}}
-          verifying={item.state?.phase === 'connecting'}
-        />
-      )}
-    </>
+    </div>
   );
+
+  const cancelRecovery = () => {
+    if (!recoverySetup || cancellingRecovery) return;
+    const setupId = recoverySetup.split('/').filter(Boolean).at(-1);
+    if (!setupId) return;
+    setCancellingRecovery(true);
+    void fetch(`${recoverySetup}/cancel`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Midscene-Setup': setupId,
+      },
+      body: '{}',
+      signal: AbortSignal.timeout(10_000),
+    })
+      .catch(() => {})
+      .finally(() => {
+        setCancellingRecovery(false);
+      });
+  };
+
+  return (
+    <article className="iphone-use-card">
+      <div className="iphone-use-card-stage">
+        <div className="iphone-use-card-badges">
+          <Popover
+            trigger={['hover', 'click']}
+            placement="bottomLeft"
+            content={statusPopover}
+          >
+            <button
+              type="button"
+              className={`iphone-use-status-badge${ready ? ' ready' : ''}`}
+            >
+              <i />
+              {ready
+                ? t('连接正常', 'Connected')
+                : busy
+                  ? t('正在恢复', 'Recovering')
+                  : t('需要处理', 'Attention')}
+            </button>
+          </Popover>
+          <span className="iphone-use-source-tag">
+            {sourceLabel(item.source, t)}
+          </span>
+        </div>
+
+        <button
+          type="button"
+          className="iphone-use-thumb-bezel iphone-use-thumb-clickable"
+          aria-label={t(`查看 ${name} 详情`, `View ${name} details`)}
+          onClick={() => setDetailOpen(true)}
+        >
+          <div className="iphone-use-thumb-screen">
+            <LiveScreenshot getScreenshot={getScreenshot} paused={!ready} />
+          </div>
+        </button>
+
+        {!ready && (
+          <div className="iphone-use-device-preview-error">
+            <strong>
+              {busy
+                ? t('正在恢复设备连接…', 'Restoring connection…')
+                : item.screenError
+                  ? t('画面已中断', 'Screen Interrupted')
+                  : t('设备连接已断开', 'Disconnected')}
+            </strong>
+            {!busy && <p>{error}</p>}
+            <Button
+              type="primary"
+              size="small"
+              className="iphone-use-primary-btn"
+              loading={busy}
+              onClick={() => void refresh()}
+            >
+              {t('刷新', 'Refresh')}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      <footer className="iphone-use-card-footer">
+        <div className="iphone-use-card-title" title={name}>
+          {name}
+        </div>
+        <div className="iphone-use-card-tools">
+          <Tooltip title={t('复制设备 ID', 'Copy Device ID')}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t('复制设备 ID', 'Copy Device ID')}
+              className="iphone-use-icon-btn"
+              disabled={!deviceId}
+              onClick={copyId}
+              icon={
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="9" y="9" width="12" height="12" rx="2.5" />
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                </svg>
+              }
+            />
+          </Tooltip>
+          <Tooltip title={t('移除设备', 'Remove Device')}>
+            <Button
+              size="small"
+              type="text"
+              aria-label={t('移除设备', 'Remove Device')}
+              className="iphone-use-icon-btn danger"
+              onClick={onRemove}
+              icon={
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 7h16" />
+                  <path d="M10 11v6M14 11v6" />
+                  <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+                  <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                </svg>
+              }
+            />
+          </Tooltip>
+        </div>
+      </footer>
+
+      <Modal
+        open={Boolean(recoverySetup)}
+        footer={null}
+        closable
+        onCancel={cancelRecovery}
+        width={480}
+        centered
+        title={t('恢复 AirPlay 连接', 'Restore AirPlay Connection')}
+      >
+        <div className="iphone-use-recovery-preview" ref={setPreviewTarget}>
+          {recoverySetup && (
+            <BindingSetup
+              key={recoverySetup}
+              recovery
+              onBluetoothStatus={setRecoveryBluetoothConnected}
+              baseUrl={recoverySetup}
+              source="airplay"
+              previewTarget={previewTarget}
+              peers={
+                item.bluetoothPeerId ? [{ id: item.bluetoothPeerId, name }] : []
+              }
+              selectedPeerId={item.bluetoothPeerId}
+              onSelectPeer={() => {}}
+              verifying={item.state?.phase === 'connecting'}
+            />
+          )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={detailOpen}
+        footer={null}
+        width={760}
+        centered
+        onCancel={() => setDetailOpen(false)}
+        className="iphone-use-detail-modal"
+        styles={{ body: { padding: 0 } }}
+      >
+        <div className="iphone-use-detail-studio">
+          <div className="iphone-use-detail-preview">
+            <div className="iphone-use-phone-bezel iphone-use-detail-bezel">
+              <div className="iphone-use-phone-screen">
+                <LiveScreenshot getScreenshot={getScreenshot} paused={!ready} />
+              </div>
+            </div>
+          </div>
+
+          <div className="iphone-use-detail-info">
+            <div className="iphone-use-detail-head">
+              <h3 className="iphone-use-detail-title" title={name}>
+                {name}
+              </h3>
+              <span
+                className={`iphone-use-status-badge${ready ? ' ready' : ''}`}
+              >
+                <i />
+                {ready
+                  ? t('连接正常', 'Connected')
+                  : busy
+                    ? t('正在恢复', 'Recovering')
+                    : t('需要处理', 'Attention')}
+              </span>
+            </div>
+
+            <div className="iphone-use-detail-kv-card">
+              <div className="iphone-use-kv-row">
+                <span className="iphone-use-kv-label">
+                  {t('占用状态', 'Occupancy')}
+                </span>
+                <span className="iphone-use-kv-value">
+                  <span
+                    className={`iphone-use-occupancy-pill${item.occupied ? ' occupied' : ''}`}
+                  >
+                    <i />
+                    {item.occupied
+                      ? t('使用中', 'In Use')
+                      : t('空闲可用', 'Available')}
+                  </span>
+                </span>
+              </div>
+              <div className="iphone-use-kv-row">
+                <span className="iphone-use-kv-label">
+                  {t('画面来源', 'Screen')}
+                </span>
+                <span className="iphone-use-kv-value">
+                  {sourceLabel(item.source, t)} ·{' '}
+                  {item.screenError
+                    ? t('画面中断', 'Interrupted')
+                    : item.state?.phase === 'ready'
+                      ? t('正常', 'OK')
+                      : t('不可用', 'Unavailable')}
+                </span>
+              </div>
+              <div className="iphone-use-kv-row">
+                <span className="iphone-use-kv-label">
+                  {t('蓝牙键鼠', 'Bluetooth HID')}
+                </span>
+                <span className="iphone-use-kv-value">
+                  {item.state?.phase === 'ready'
+                    ? t('已连接', 'Connected')
+                    : t('已断开', 'Disconnected')}
+                </span>
+              </div>
+              <div className="iphone-use-kv-row">
+                <span className="iphone-use-kv-label">
+                  {t('指针验证', 'Pointer')}
+                </span>
+                <span className="iphone-use-kv-value">
+                  {ready
+                    ? t('已通过', 'Verified')
+                    : t('等待重新验证', 'Needs re-verification')}
+                </span>
+              </div>
+              <div className="iphone-use-kv-row">
+                <span className="iphone-use-kv-label">
+                  {t('设备 ID', 'Device ID')}
+                </span>
+                <span className="iphone-use-kv-value iphone-use-detail-id">
+                  <code>{deviceId ?? t('等待连接', 'Pending')}</code>
+                  {deviceId && (
+                    <Button size="small" type="text" onClick={copyId}>
+                      {t('复制', 'Copy')}
+                    </Button>
+                  )}
+                </span>
+              </div>
+            </div>
+
+            {!ready && (
+              <div className="iphone-use-device-notice">
+                <span>{busy ? recoveryMessage : error}</span>
+              </div>
+            )}
+
+            <div className="iphone-use-detail-actions">
+              {!ready && (
+                <Button
+                  type="primary"
+                  className="iphone-use-primary-btn"
+                  loading={busy}
+                  onClick={() => void refresh()}
+                >
+                  {t('刷新连接', 'Refresh')}
+                </Button>
+              )}
+              <Button
+                danger
+                onClick={() => {
+                  setDetailOpen(false);
+                  onRemove();
+                }}
+              >
+                {t('移除设备', 'Remove Device')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Modal>
+    </article>
+  );
+}
+
+function AddDeviceModal({
+  inline = false,
+  item,
+  workspaces,
+  hasConnected,
+  connectedFallbackId,
+  reload,
+}: {
+  inline?: boolean;
+  item: Workspace;
+  workspaces: Workspace[];
+  hasConnected: boolean;
+  connectedFallbackId?: string;
+  reload: () => Promise<Workspace[]>;
+}) {
+  const { t, te } = useI18n();
+  const [previewTarget, setPreviewTarget] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const [returning, setReturning] = useState(false);
   const [form] = Form.useForm();
+
+  const settingUp =
+    item.state?.phase === 'setup-required' ||
+    item.state?.phase === 'connecting';
+
+  const returnToAdd = async () => {
+    setReturning(true);
+    try {
+      const response = await fetch(`${item.apiBase}/iphone-use/cancel`, {
+        method: 'POST',
+        headers: { 'X-Midscene-Playground': 'setup' },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (!response.ok)
+        throw new Error(
+          (await response.json()).error ??
+            t('取消失败，请重试。', 'Failed to cancel. Please try again.'),
+        );
+      await reload();
+    } catch (error) {
+      void message.warning(
+        error instanceof Error
+          ? te(error.message)
+          : t('取消失败，请重试。', 'Failed to cancel. Please try again.'),
+      );
+    } finally {
+      setReturning(false);
+    }
+  };
+
   const createSession = async (input?: Record<string, unknown>) => {
     const response = await fetch(`${item.apiBase}/session`, {
       method: 'POST',
@@ -360,38 +817,31 @@ function DeviceWorkspace({
       signal: AbortSignal.timeout(11 * 60_000),
     });
     if (!response.ok)
-      throw new Error((await response.json()).error ?? '连接失败');
+      throw new Error(
+        (await response.json()).error ?? t('连接失败', 'Connection failed'),
+      );
     return true;
   };
-  const getScreenshot = useCallback(async () => {
-    const response = await fetch(`${item.apiBase}/screenshot`, {
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!response.ok) throw new Error('画面获取失败');
-    return response.json();
-  }, [item.apiBase]);
-  const setup =
-    active && isHome ? (
-      <div className="iphone-use-connect-page">
-        {(tabs.length > 0 || settingUp) && (
-          <nav className="iphone-use-connect-nav" aria-label="页面导航">
-            <Button
-              className="iphone-use-back-workspace"
-              type="text"
-              size="small"
-              loading={returning}
-              onClick={() => {
-                if (settingUp) void returnToAdd();
-                else
-                  navigate(
-                    `workspace/${tabs.some((other) => other.id === item.id) ? item.id : tabs[0].id}`,
-                  );
-              }}
-            >
-              {settingUp ? '← 返回添加设备' : '← 返回工作台'}
-            </Button>
-          </nav>
-        )}
+
+  const handleClose = () => {
+    if (settingUp) {
+      void returnToAdd();
+      return;
+    }
+    if (hasConnected && connectedFallbackId) {
+      navigate(`workspace/${connectedFallbackId}`);
+    }
+  };
+
+  const cameraWizardActive = Boolean(
+    item.state?.setupKind === 'camera' && item.state?.setupId,
+  );
+
+  const studio = (
+    <div
+      className={`iphone-use-setup-studio${cameraWizardActive ? ' iphone-use-setup-studio--camera' : ''}`}
+    >
+      <div className="iphone-use-setup-panel">
         <ConnectionPanel
           connection={item.state}
           initialSource={item.source}
@@ -401,12 +851,10 @@ function DeviceWorkspace({
           }}
           previewTarget={previewTarget}
           apiBase={item.apiBase}
+          onCancel={() => void returnToAdd()}
+          cancelling={returning}
           reservedPeers={workspaces
-            .filter(
-              (other) =>
-                // Occupancy follows workspace membership, including outages.
-                other.id !== item.id && other.connected,
-            )
+            .filter((other) => other.id !== item.id && other.connected)
             .map((other) => other.bluetoothPeerId)
             .filter((id): id is string => Boolean(id))}
           reservedSources={workspaces
@@ -421,146 +869,35 @@ function DeviceWorkspace({
           }}
         />
       </div>
-    ) : null;
-  if (!active) return null;
+      <div className="iphone-use-setup-preview">
+        <div className="iphone-use-preview" ref={setPreviewTarget} />
+      </div>
+    </div>
+  );
+
+  if (inline) {
+    return (
+      <div
+        className={`iphone-use-inline-setup${cameraWizardActive ? ' iphone-use-inline-setup--camera' : ''}`}
+      >
+        {studio}
+      </div>
+    );
+  }
+
   return (
-    <ManagerLayout
-      sidebar={
-        <div className="iphone-use-manager-panel">
-          {recoveryControls}
-          {isHome ? (
-            setup
-          ) : (
-            <section className="iphone-use-manager-summary">
-              <div className="iphone-use-manager-summary-heading">
-                <h2>设备信息</h2>
-                <span
-                  className={`iphone-use-manager-status${ready ? ' ready' : ''}`}
-                >
-                  {ready ? '连接正常' : busy ? '正在恢复' : '需要处理'}
-                </span>
-              </div>
-              <dl>
-                <dt>设备名称</dt>
-                <dd>{name}</dd>
-                <dt>画面来源</dt>
-                <dd>{sourceLabel(item.source)}</dd>
-                <dt>蓝牙键鼠</dt>
-                <dd>{item.state?.phase === 'ready' ? '已连接' : '未连接'}</dd>
-                <dt>设备 ID</dt>
-                <dd className="iphone-use-manager-device-id">
-                  <code>{item.state?.device?.id ?? '等待连接'}</code>
-                  <Button
-                    size="small"
-                    type="text"
-                    disabled={!item.state?.device?.id}
-                    onClick={() => {
-                      void navigator.clipboard
-                        .writeText(item.state!.device!.id)
-                        .then(() => message.success('已复制设备 ID'))
-                        .catch(() =>
-                          message.warning('复制失败，请手动选择设备 ID。'),
-                        );
-                    }}
-                  >
-                    复制
-                  </Button>
-                </dd>
-              </dl>
-            </section>
-          )}
-        </div>
-      }
-      preview={
-        isHome || !item.connected ? (
-          <div className="iphone-use-preview" ref={setPreviewTarget}>
-            <DisconnectedPreview />
-          </div>
-        ) : recoverySetup ? (
-          <div className="iphone-use-preview" ref={setPreviewTarget} />
-        ) : (
-          <div className="iphone-use-device-preview">
-            <div className="iphone-use-device-preview-header">
-              <div className="iphone-use-preview-device">
-                {tabs.length > 1 ? (
-                  <Select
-                    aria-label="切换设备"
-                    size="small"
-                    variant="borderless"
-                    value={item.id}
-                    onChange={(id) => navigate(`workspace/${id}`)}
-                    options={tabs.map((other) => ({
-                      value: other.id,
-                      label: (
-                        <span className="iphone-use-device-option">
-                          <span
-                            className={`iphone-use-device-dot${other.state?.phase !== 'ready' || other.screenError ? ' warning' : ''}`}
-                          />
-                          {workspaceName(other, workspaces)}
-                        </span>
-                      ),
-                    }))}
-                  />
-                ) : (
-                  <span>{name}</span>
-                )}
-                <small>／ {sourceLabel(item.source)}</small>
-              </div>
-              <div className="iphone-use-preview-actions">
-                <Button
-                  type="text"
-                  size="small"
-                  loading={adding}
-                  onClick={() => void onAdd()}
-                >
-                  ＋ 添加设备
-                </Button>
-                <Popover
-                  trigger={['hover', 'click']}
-                  placement="bottomRight"
-                  content={details}
-                >
-                  <Tooltip title={ready ? '设备已就绪' : '设备连接异常'}>
-                    <Button
-                      type="text"
-                      size="small"
-                      aria-label={
-                        ready ? '设备连接状态：已就绪' : '设备连接状态：异常'
-                      }
-                      icon={
-                        <BluetoothStatusIcon active={ready} warning={!ready} />
-                      }
-                    />
-                  </Tooltip>
-                </Popover>
-              </div>
-            </div>
-            <div className="iphone-use-device-video">
-              <ScreenshotViewer
-                mode="screen-only"
-                serverOnline
-                isUserOperating={!ready}
-                getScreenshot={getScreenshot}
-              />
-              {!ready && item.connected && (
-                <div className="iphone-use-device-preview-error">
-                  <strong>
-                    {busy
-                      ? '正在恢复设备连接…'
-                      : item.screenError
-                        ? '画面已中断'
-                        : '设备连接已断开'}
-                  </strong>
-                  {!busy && <p>{error}</p>}
-                  <Button loading={busy} onClick={() => void refresh()}>
-                    刷新
-                  </Button>
-                </div>
-              )}
-            </div>
-          </div>
-        )
-      }
-    />
+    <Modal
+      open
+      footer={null}
+      width={cameraWizardActive ? 980 : 860}
+      centered
+      closable={hasConnected || settingUp}
+      maskClosable={hasConnected && !settingUp}
+      onCancel={handleClose}
+      className="iphone-use-add-modal"
+      styles={{ body: { padding: 0 } }}
+    >
+      {studio}
+    </Modal>
   );
 }
