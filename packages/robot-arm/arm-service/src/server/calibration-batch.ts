@@ -4,7 +4,6 @@ import {
   type CalibrationProfile,
   type CartesianPose,
   RobotArmError,
-  type RobotState,
   type SharedParkingEvidence,
   calibrationAccepted,
   semanticJson,
@@ -23,7 +22,6 @@ import {
   knownScreenTravelHeight,
   pageOrderedQuad,
   quadCenter,
-  screenSurfaceUpperZ,
 } from '@midscene/arm-kit/internal/calibration/screen-position';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import { contactPoint, flangePose } from '@midscene/arm-kit/internal/domain';
@@ -33,10 +31,8 @@ import type {
   CalibrationBatchState,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
-import { getDebug } from '@midscene/shared/logger';
 import type { PlaygroundDevices } from './devices.js';
 
-const log = getDebug('robot-arm:calibration-batch', { console: true });
 const terminal = (status: string) => ['completed', 'skipped'].includes(status);
 /** Original per-screen batch states and confirmations, using the shared Controller queue. */
 export class CalibrationBatch {
@@ -447,63 +443,6 @@ export class CalibrationBatch {
       };
     });
   }
-  private calibrationTip(toolProfileId: string, measured: RobotState) {
-    if (
-      !measured.connected ||
-      !measured.pose ||
-      measured.status?.quality.stale ||
-      measured.moving ||
-      measured.faults.length
-    )
-      return undefined;
-    return contactPoint(
-      measured.pose,
-      this.runtime.profileStore.getTool(toolProfileId).offsetMm,
-    );
-  }
-  private orderEntries(
-    entries: ReturnType<CalibrationBatch['entries']>,
-    referenceDeviceId?: string,
-    tip?: ReturnType<typeof contactPoint>,
-  ) {
-    entries.sort((a, b) =>
-      a.calibration && b.calibration
-        ? a.calibration.origin.x - b.calibration.origin.x ||
-          a.calibration.origin.y - b.calibration.origin.y
-        : a.calibration
-          ? -1
-          : b.calibration
-            ? 1
-            : a.target.name.localeCompare(b.target.name),
-    );
-    const current = entries.findIndex((e) => {
-      const quad =
-        e.calibration && e.screen && calibrationQuad(e.calibration, e.screen);
-      return tip && quad && insideQuad(tip, quad, 0);
-    });
-    const reference = entries.findIndex(
-      (e) => e.target.id === referenceDeviceId && !e.calibration,
-    );
-    const first = current >= 0 ? current : reference;
-    if (first > 0) entries.unshift(...entries.splice(first, 1));
-  }
-  async screenOrder(cameraId: string) {
-    const input = this.selection(cameraId);
-    const entries = this.entries(cameraId);
-    const teaching = this.runtime.profileStore.installationTeaching(input);
-    const measured = await this.runtime
-      .state(input.toolProfileId)
-      .catch(() => undefined);
-    this.orderEntries(
-      entries,
-      teaching?.referenceDeviceId,
-      measured && this.calibrationTip(input.toolProfileId, measured.state),
-    );
-    return entries.map(({ target }) => ({
-      screenId: target.id,
-      name: target.name,
-    }));
-  }
   async plan(cameraId: string): Promise<CalibrationBatchPlan> {
     if (this.task || this.stopping || this.busy)
       throw new RobotArmError(
@@ -528,17 +467,45 @@ export class CalibrationBatch {
         'Apply the screen perspective results first',
         409,
       );
-    const measured = await this.runtime.state(input.toolProfileId, {
-      fresh: true,
-    });
-    const tip = this.calibrationTip(input.toolProfileId, measured.state);
-    if (!tip)
+    const measured = (
+      await this.runtime.state(input.toolProfileId, { fresh: true })
+    ).state;
+    if (
+      !measured.connected ||
+      !measured.pose ||
+      measured.status?.quality.stale ||
+      measured.moving ||
+      measured.faults.length
+    )
       throw new RobotArmError(
         'NOT_READY',
         'Hold the robot still with current pose feedback before reviewing the calibration plan',
         409,
       );
-    this.orderEntries(entries, teaching.referenceDeviceId, tip);
+    const tip = contactPoint(
+      measured.pose,
+      this.runtime.profileStore.getTool(input.toolProfileId).offsetMm,
+    );
+    entries.sort((a, b) =>
+      a.calibration && b.calibration
+        ? a.calibration.origin.x - b.calibration.origin.x ||
+          a.calibration.origin.y - b.calibration.origin.y
+        : a.calibration
+          ? -1
+          : b.calibration
+            ? 1
+            : a.target.name.localeCompare(b.target.name),
+    );
+    const current = entries.findIndex((e) => {
+      const quad =
+        e.calibration && e.screen && calibrationQuad(e.calibration, e.screen);
+      return quad && insideQuad(tip, quad, 0);
+    });
+    const reference = entries.findIndex(
+      (e) => e.target.id === teaching.referenceDeviceId && !e.calibration,
+    );
+    const first = current >= 0 ? current : reference;
+    if (first > 0) entries.unshift(...entries.splice(first, 1));
     let transfer: CalibrationBatchPlan['transfer'];
     if (entries.length > 1 && entries.every((e) => e.calibration && e.screen)) {
       const points = entries.flatMap((e) =>
@@ -793,12 +760,6 @@ export class CalibrationBatch {
     operatorConfirmedParking: boolean,
   ): Promise<CalibrationProfile | undefined> {
     const state = this.state!;
-    const started = performance.now();
-    const fast = state.samplingMode === 'slide';
-    const prechecks = new Map<
-      string,
-      { connected: boolean; fullscreen?: boolean; mapped: boolean }
-    >();
     let last: CalibrationProfile | undefined;
     try {
       for (; state.currentIndex < state.items.length; state.currentIndex++) {
@@ -808,9 +769,6 @@ export class CalibrationBatch {
         while (retry) {
           retry = false;
           this.check(signal);
-          const screenStarted = performance.now();
-          let mappingMs = 0;
-          let preparationMs = 0;
           await this.update(() => {
             state.status = 'running';
             row.status = 'preparing';
@@ -852,14 +810,7 @@ export class CalibrationBatch {
               if (this.choice) break;
             }
             if (this.choice) throw new Error('Batch screen changed');
-            if (!host.service.setup().mapping) {
-              const mappingStarted = performance.now();
-              try {
-                await host.alignForBatch(signal, fast);
-              } finally {
-                mappingMs = performance.now() - mappingStarted;
-              }
-            }
+            if (!host.service.setup().mapping) await host.alignForBatch(signal);
             this.check(signal);
             let session = await host.service.create({ batch: true });
             attemptId = session.id;
@@ -873,6 +824,7 @@ export class CalibrationBatch {
                 );
               return status;
             };
+            host.service.setBatchTravelHeight(this.transfer?.travelTipZMm);
             if (state.usesSharedSafePosition)
               host.service.setBatchParking(state.id);
             const selection = this.selection(state.cameraId!);
@@ -916,39 +868,6 @@ export class CalibrationBatch {
               session = readAttempt();
             }
             if (this.choice) throw new Error('Batch screen changed');
-            let surfaceZ: number | undefined;
-            if (fast) {
-              const { calibration, screen } =
-                this.entries(state.cameraId!).find(
-                  (entry) => entry.target.id === row.deviceId,
-                ) ?? {};
-              const teaching =
-                this.runtime.profileStore.installationTeaching(selection);
-              const reference = session.referencePosition;
-              if (
-                calibration &&
-                screen &&
-                teaching &&
-                reference &&
-                calibration.createdAt >= teaching.recordedAt &&
-                calibration.verification?.auto?.planeSource === 'measured'
-              ) {
-                const tool = this.runtime.profileStore.getTool(
-                  selection.toolProfileId,
-                );
-                const quad = calibrationQuad(calibration, screen);
-                if (
-                  quad &&
-                  insideQuad(contactPoint(reference, tool.offsetMm), quad, 0)
-                )
-                  surfaceZ = screenSurfaceUpperZ(calibration, screen);
-              }
-            }
-            if (fast)
-              host.service.setBatchTravelHeight(this.transfer?.travelTipZMm, {
-                surfaceZ,
-              });
-            else host.service.setBatchTravelHeight(this.transfer?.travelTipZMm);
             this.check(signal);
             if (
               (await this.runtime.state(selection.toolProfileId)).state.dragMode
@@ -964,7 +883,6 @@ export class CalibrationBatch {
               row.runIds.push(session.id);
               row.note = undefined;
             });
-            preparationMs = performance.now() - screenStarted;
             await host.service.command(
               session.id,
               state.samplingMode === 'slide'
@@ -972,21 +890,6 @@ export class CalibrationBatch {
                 : 'start-automatic',
               true,
             );
-            if (fast) {
-              const next = state.items
-                .slice(state.currentIndex + 1)
-                .find((item) => !terminal(item.status));
-              const nextService =
-                next && this.devices.entries.get(next.deviceId)?.host?.service;
-              if (next && nextService) {
-                const setup = nextService.setup();
-                prechecks.set(next.deviceId, {
-                  connected: setup.phoneConnected,
-                  fullscreen: nextService.phoneObservation?.()?.fullscreen,
-                  mapped: Boolean(setup.mapping),
-                });
-              }
-            }
             let deadline = Date.now() + 15 * 60_000;
             let checkedAcceptance = false;
             while (true) {
@@ -1119,18 +1022,6 @@ export class CalibrationBatch {
               });
               return undefined;
             }
-          } finally {
-            if (fast)
-              log('Fast batch screen', {
-                batchId: state.id,
-                attemptId,
-                deviceId: row.deviceId,
-                status: row.status,
-                totalMs: Math.round(performance.now() - screenStarted),
-                preparationMs: Math.round(preparationMs),
-                mappingMs: Math.round(mappingMs),
-                precheck: prechecks.get(row.deviceId),
-              });
           }
           if (this.choice === 'retry') retry = true;
           else if (this.choice === 'skip')
@@ -1144,7 +1035,6 @@ export class CalibrationBatch {
         state.usesSharedSafePosition &&
         state.items.some((item) => item.status === 'completed')
       ) {
-        const parkingStarted = performance.now();
         await this.assertPerspectives(state.cameraId!);
         this.check(signal);
         const selection = this.selection(state.cameraId!);
@@ -1243,11 +1133,6 @@ export class CalibrationBatch {
         );
         if (profiles.some((profile) => profile.id === source.id))
           last = store.getCalibration(source.id);
-        if (fast)
-          log('Fast batch final parking', {
-            batchId: state.id,
-            elapsedMs: Math.round(performance.now() - parkingStarted),
-          });
       }
       this.check(signal);
       await this.update(() => {
@@ -1293,12 +1178,6 @@ export class CalibrationBatch {
         await this.devices.entries.get(row.deviceId)?.host?.service.stop();
       return undefined;
     } finally {
-      if (fast)
-        log('Fast batch complete', {
-          batchId: state.id,
-          status: state.status,
-          elapsedMs: Math.round(performance.now() - started),
-        });
       this.automaticSharedParking = false;
       for (const item of state.items) {
         const service = this.devices.entries.get(item.deviceId)?.host?.service;

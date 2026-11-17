@@ -116,8 +116,6 @@ export const CALIBRATION_POINT_POLICY = {
   maximumHeartbeatGapMs: 350,
   maximumQueryMs: 100,
   maximumConfirmationMs: 500,
-  /** Streamed step cadence while a host step is active; 25 Hz leaves margin over the 100 ms confirmation spacing. */
-  streamStepFeedbackIntervalMs: 40,
 } as const;
 export function calibrationCaptureTargets(
   layout: Pick<CalibrationPageLayout, 'width' | 'height'>,
@@ -240,13 +238,6 @@ export interface CalibrationPageUpdate {
   /** Painted height in CSS pixels when iOS sizes the first row around system overlays. */
   visibilityFirstRowHeight?: number;
   touchDiagnosticsVersion?: 2;
-  /**
-   * The page reports an active step continuously at `CALIBRATION_POINT_POLICY.streamStepFeedbackIntervalMs`
-   * instead of only on touch events, paint and the heartbeat. The host can then
-   * confirm a stationary result from two streamed frames instead of issuing two
-   * extra result requests. Absent means the request/response protocol.
-   */
-  streamStepFeedback?: boolean;
   /** Bounded diagnostic history; never used as contact evidence. */
   touchEvents?: PhoneTouchEvent[];
   model?: string;

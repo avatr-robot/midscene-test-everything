@@ -490,18 +490,6 @@ export function screenPlacementMessage(
   return `The stylus is ${issue.distanceMm.toFixed(1)} mm outside the estimated position of "${issue.screenName}"; confirm the screen selection or place it over that screen`;
 }
 
-export function screenSurfaceUpperZ(
-  calibration: CalibrationProfile,
-  screen: ScreenProfile,
-) {
-  return (
-    calibration.origin.z +
-    Math.max(0, calibration.xAxis.z * screen.physicalWidthMm) +
-    Math.max(0, calibration.yAxis.z * screen.physicalHeightMm) +
-    surfaceClearanceMm(calibration.surface)
-  );
-}
-
 /** A free transfer clears every measured screen, not just the two endpoints. */
 export function knownScreenTravelHeight(
   data: ProfileData,
@@ -520,10 +508,21 @@ export function knownScreenTravelHeight(
     const screen = data.screens.find((s) => s.id === device.screenProfileId);
     if (!c || !screen || !calibrationAccepted(c, c.pendingParkingBatchId))
       continue;
-    height = Math.max(
-      height,
-      screenSurfaceUpperZ(c, screen) + screen.safeHeightMm + 1,
-    );
+    for (const [x, y] of [
+      [0, 0],
+      [screen.physicalWidthMm, 0],
+      [screen.physicalWidthMm, screen.physicalHeightMm],
+      [0, screen.physicalHeightMm],
+    ])
+      height = Math.max(
+        height,
+        c.origin.z +
+          c.xAxis.z * x +
+          c.yAxis.z * y +
+          screen.safeHeightMm +
+          surfaceClearanceMm(c.surface) +
+          1,
+      );
   }
   return height;
 }

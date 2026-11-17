@@ -544,14 +544,11 @@ export class CalibrationHost {
     }
   }
   private alignmentTask?: Promise<void>;
-  alignForBatch(signal: AbortSignal, fast = false) {
+  alignForBatch(signal: AbortSignal) {
     if (this.alignmentTask) return this.alignmentTask;
     const abort = new AbortController();
     this.alignment = abort;
-    const task = this.alignScreen(
-      AbortSignal.any([signal, abort.signal]),
-      fast,
-    );
+    const task = this.alignScreen(AbortSignal.any([signal, abort.signal]));
     this.alignmentTask = task.finally(() => {
       this.alignmentTask = undefined;
       this.alignment = undefined;
@@ -559,7 +556,7 @@ export class CalibrationHost {
     return this.alignmentTask;
   }
   private alignment?: AbortController;
-  private async alignScreen(signal: AbortSignal, fast: boolean) {
+  private async alignScreen(signal: AbortSignal) {
     this.editable();
     const session = this.service.status();
     if (
@@ -591,23 +588,18 @@ export class CalibrationHost {
           await delay(80, undefined, { signal });
           observed = this.service.markerObservation(request);
         }
-        const { pageId, browserInstanceId, layout } = observed;
-        const paintedAt = Date.now();
-        const captureAt = paintedAt + 3000;
+        const { pageId, layout } = observed;
         this.service.setMarkerCapture({
           request,
           attempt,
-          captureAt,
+          captureAt: Date.now() + 3000,
         });
+        await delay(3000, undefined, { signal });
         const check = () => {
           signal.throwIfAborted();
           this.editable();
           const current = this.service.markerObservation(request);
-          if (
-            current?.pageId !== pageId ||
-            current.browserInstanceId !== browserInstanceId ||
-            !sameLayout(layout, current.layout)
-          )
+          if (current?.pageId !== pageId || !sameLayout(layout, current.layout))
             throw new RobotArmError(
               'PAGE_CHANGED',
               'The phone display changed during marker detection',
@@ -617,65 +609,22 @@ export class CalibrationHost {
         const camera = this.options.camera;
         const output = this.autoOutputSize() ?? this.input ?? layout.screen;
         let correction: CameraCorrection;
-        const recognize = async (
-          rawFrame: () => Promise<Buffer>,
-          useBoundedFrame = false,
-        ) => {
-          const result = await recognizeScreenMarkers(() => {
+        try {
+          ({ correction } = await recognizeScreenMarkers(() => {
             check();
-            return rawFrame();
-          }, layout);
+            return camera.rawFrame();
+          }, layout));
           check();
           // Check the candidate in the corrected image before replacing the saved corners.
-          const frame = await camera.correctedFrame(
-            result.correction,
-            output,
-            useBoundedFrame ? await rawFrame() : undefined,
-          );
+          const frame = await camera.correctedFrame(correction, output);
           await camera.detectMarkers(frame, layout.markers);
           check();
-          return result.correction;
-        };
-        try {
-          const stream = fast ? camera.stream : undefined;
-          const early = stream
-            ? await recognize(async () => {
-                const remaining = paintedAt + 1000 - Date.now();
-                if (remaining <= 0)
-                  throw new RobotArmError(
-                    'VISION_UNAVAILABLE',
-                    'Early marker capture timed out',
-                  );
-                const frame = await stream.getFrame({
-                  fresh: true,
-                  timeoutMs: remaining,
-                });
-                check();
-                if (frame.capturedAt <= paintedAt)
-                  throw new RobotArmError(
-                    'VISION_UNAVAILABLE',
-                    'Camera frame predates the marker page',
-                  );
-                return frame.jpeg;
-              }, true).catch(() => {
-                check();
-                return undefined;
-              })
-            : undefined;
-          if (early) correction = early;
-          else {
-            await delay(Math.max(0, captureAt - Date.now()), undefined, {
-              signal,
-            });
-            correction = await recognize(() => camera.rawFrame());
-          }
         } catch (error) {
           signal.throwIfAborted();
           const current = this.service.markerObservation(request);
           if (
             !current ||
             current.pageId !== pageId ||
-            current.browserInstanceId !== browserInstanceId ||
             !sameLayout(layout, current.layout)
           ) {
             // Discard the whole batch when the phone leaves fullscreen or is reopened.

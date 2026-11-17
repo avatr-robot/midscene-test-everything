@@ -121,7 +121,6 @@ export class AutomaticCapture {
   }
   resetStability() {
     this.invalid = 'The phone page changed during automatic collection';
-    this.observation?.notify();
   }
   receive(update: CalibrationPageUpdate) {
     if (this.pageId && this.pageId !== update.pageId) this.resetStability();
@@ -179,9 +178,6 @@ export class AutomaticCapture {
       tool: ToolProfile;
       webToImage: number[];
       minimumTravelTipZMm?: number;
-      initialSearchSurfaceZMm?: number;
-      optimizeBatchTravel?: boolean;
-      onTiming?(event: string, elapsedMs: number): void;
     },
   ) {
     this.reference = structuredClone(home);
@@ -324,12 +320,6 @@ export class AutomaticCapture {
       preflight: async () => {
         this.check(host);
       },
-      preflightTravel: host.preflight
-        ? async (poses, motion) => {
-            this.check(host);
-            await host.preflight!(poses, motion);
-          }
-        : undefined,
       stable: async () => {
         this.check(host);
       },
@@ -382,7 +372,6 @@ export class AutomaticCapture {
             this.lastSeen,
             measuredTipZMm,
             motionTiming,
-            this.latest?.streamStepFeedback === true,
           );
           motionTiming = undefined;
           this.observation = observation;
@@ -426,12 +415,9 @@ export class AutomaticCapture {
       },
       {
         startPose: home,
-        mode: this.mode === 'standard' ? 'standard' : 'fast-plane',
+        mode: this.mode === 'standard' ? 'standard' : 'fast-horizontal',
         collection: this.mode === 'slide' ? 'slide' : 'tap',
-        compliantSetupConfirmed: this.mode !== 'standard',
-        initialSearchSurfaceZMm: config.initialSearchSurfaceZMm,
-        optimizeBatchTravel: config.optimizeBatchTravel,
-        onTiming: config.onTiming,
+        horizontalConfirmed: this.mode !== 'standard',
       },
     );
     this.captured = true;

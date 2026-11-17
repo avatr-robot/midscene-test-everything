@@ -21,9 +21,9 @@
     "prepare": "husky",
     "commitlint": "commitlint",
     "lint:staged": "lint-staged",
-    "dev:playground": "pnpm --filter @midscene/open-device-playground start",
-    "iphone-use:release": "node packages/iphone-use/scripts/package-release.mjs",
-    "iphone-use": "pnpm --filter @midscene/iphone-use start"
+    "dev:playground": "pnpm --filter @midscene/universal-device-playground start",
+    "ios-airlink:release": "node packages/ios-airlink/scripts/package-release.mjs",
+    "ios-airlink": "pnpm --filter @midscene/ios-airlink start"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

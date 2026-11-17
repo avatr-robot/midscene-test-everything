@@ -1,4 +1,3 @@
-import { armUiTheme } from '@midscene/robotics-shared';
 import type { CalibrationPreviewPositions } from '@midscene/robotics-shared/assisted-contracts';
 import type {
   CalibrationBatchState,
@@ -37,6 +36,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useArmTheme } from '../theme';
 import {
   CalibrationPowerButton,
   type Configuration,
@@ -123,8 +123,9 @@ export function GuidedCalibrationWorkspace({
   initialStep?: 0 | 1;
   reviewInstallationOnOpen?: boolean;
 }) {
+  const theme = useArmTheme();
   return (
-    <ConfigProvider theme={armUiTheme}>
+    <ConfigProvider theme={theme}>
       <App className="guided-calibration-root">
         <CalibrationLanguageProvider>
           <GuidedContent
@@ -277,57 +278,6 @@ function GuidedContent({
   const savedScreens = screens.filter(
     (s) => s.cameraId === cameraId && s.hasCorrection,
   );
-  const multipleMappedScreens = savedScreens.length > 1;
-  const [screenOrder, setScreenOrder] = useState<
-    Awaited<ReturnType<BatchClient['screenOrder']>>
-  >([]);
-  const [teachingOrderReady, setTeachingOrderReady] = useState(false);
-  useEffect(() => {
-    if (step !== 2) setTeachingOrderReady(false);
-    if (
-      (step !== 2 && step !== 3) ||
-      !multipleMappedScreens ||
-      batchActive ||
-      singleBusy
-    )
-      return;
-
-    const abort = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      try {
-        const order = await batchClient.screenOrder(
-          AbortSignal.any([abort.signal, AbortSignal.timeout(5000)]),
-        );
-        if (abort.signal.aborted) return;
-        setScreenOrder(order);
-        const first = order[0]?.screenId;
-        if (step === 2 && first && first !== requestedScreen.current)
-          requestScreen(first);
-      } catch {
-        if (!abort.signal.aborted) setScreenOrder([]);
-      } finally {
-        if (!abort.signal.aborted) {
-          if (step === 2) setTeachingOrderReady(true);
-          else timer = setTimeout(() => void load(), 5000);
-        }
-      }
-    };
-    void load();
-    return () => {
-      abort.abort();
-      clearTimeout(timer);
-    };
-  }, [
-    batchClient,
-    batchActive,
-    multipleMappedScreens,
-    requestScreen,
-    singleBusy,
-    step,
-  ]);
-  const loadingTeachingOrder =
-    step === 2 && multipleMappedScreens && !teachingOrderReady;
   const phoneCameras = useMemo(
     () => [
       {
@@ -1264,17 +1214,7 @@ function GuidedContent({
     (next < 2 || Boolean(config?.correction && controller.setup.mapping)) &&
     (next < 2 || !outlineBlocked) &&
     (next < 3 || Boolean(config?.installationTaught));
-  const screenRanks = new Map(
-    screenOrder.map(({ screenId }, index) => [screenId, index]),
-  );
-  const screenOptions =
-    step === 1
-      ? knownScreens
-      : [...savedScreens].sort(
-          (a, b) =>
-            (screenRanks.get(a.id) ?? screenOrder.length) -
-            (screenRanks.get(b.id) ?? screenOrder.length),
-        );
+  const screenOptions = step === 1 ? knownScreens : savedScreens;
   const showScreenPicker =
     !batchActive &&
     ((step === 1 && !markerOpen && screenOptions.length > 1) ||
@@ -1391,7 +1331,6 @@ function GuidedContent({
               <Select
                 aria-label={t('Calibration Screen')}
                 value={
-                  !loadingTeachingOrder &&
                   screenOptions.some((screen) => screen.id === requestedId)
                     ? requestedId
                     : undefined
@@ -1401,11 +1340,8 @@ function GuidedContent({
                   label: name,
                 }))}
                 placeholder={t('Select a screen for calibration')}
-                loading={
-                  loadingTeachingOrder || switching || (!config && !loadError)
-                }
+                loading={switching || (!config && !loadError)}
                 disabled={
-                  loadingTeachingOrder ||
                   closing ||
                   singleBusy ||
                   controller.busy ||
@@ -1426,7 +1362,6 @@ function GuidedContent({
                   api={batchClient}
                   cameraId={cameraId}
                   screens={states}
-                  screenOrder={screenOrder}
                   disabled={
                     !config?.ready ||
                     !config.installationTaught ||
@@ -1438,9 +1373,7 @@ function GuidedContent({
                 />
               </div>
             )}
-            {loadingTeachingOrder || (step === 2 && switching) ? (
-              <Spin />
-            ) : !config ? (
+            {!config ? (
               !loadError && <Spin />
             ) : (
               <div

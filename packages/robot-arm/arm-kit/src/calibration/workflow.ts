@@ -183,7 +183,6 @@ export class CalibrationWorkflow {
     this.receipt = undefined;
     this.receivingTarget = undefined;
     this.batchTravelTipZMm = undefined;
-    this.batchFastTravel = undefined;
     this.batchParking = undefined;
     this.phoneHome = false;
     this.changed();
@@ -1801,15 +1800,6 @@ export class CalibrationWorkflow {
       host: AutomaticCaptureHost &
         Required<Pick<AutomaticCaptureHost, 'preflight'>>,
     ) => {
-      const timing = new Map<string, { count: number; ms: number }>();
-      const track = (event: string, elapsedMs: number) => {
-        if (!this.batchFastTravel) return;
-        const previous = timing.get(event) ?? { count: 0, ms: 0 };
-        timing.set(event, {
-          count: previous.count + 1,
-          ms: previous.ms + elapsedMs,
-        });
-      };
       await this.assertMechanicalFrame(true);
       host.check();
       const teaching = this.runtime.profileStore.installationTeaching(input);
@@ -1821,7 +1811,6 @@ export class CalibrationWorkflow {
         );
       const reference = s.referencePosition!;
       const travelToReference = async (reason: 'approach' | 'return') => {
-        const started = performance.now();
         s.referenceTravel = reason;
         this.changed();
         try {
@@ -1844,7 +1833,6 @@ export class CalibrationWorkflow {
             referenceTravel: reason,
           });
         } finally {
-          track(`reference-${reason}`, performance.now() - started);
           s.referenceTravel = undefined;
           this.changed();
         }
@@ -1876,9 +1864,6 @@ export class CalibrationWorkflow {
           {
             tool,
             webToImage: s.mapping!.webToImage,
-            initialSearchSurfaceZMm: this.batchFastTravel?.surfaceZ,
-            optimizeBatchTravel: Boolean(this.batchFastTravel),
-            onTiming: track,
             minimumTravelTipZMm: Math.max(
               teaching
                 ? contactPoint(teaching.referencePose, tool.offsetMm).z
@@ -1926,13 +1911,6 @@ export class CalibrationWorkflow {
           );
         }
         throw error;
-      } finally {
-        if (timing.size)
-          log('Fast batch sampling', {
-            attemptId: s.id,
-            deviceId: this.options.deviceId,
-            timing: Object.fromEntries(timing),
-          });
       }
       // Sampling can finish with the tip pressed. Park using the measured
       // reference before waiting for a review of the new geometry.
@@ -2053,6 +2031,7 @@ export class CalibrationWorkflow {
     };
     const toTouch = (p: (typeof measurements.points)[number]) => ({
       contact: p.positionMm,
+      heightIntervalMm: p.probeStep?.heightIntervalMm,
       screen: project(s.mapping!.webToImage, p.point),
       weight: p.weight,
       pressedZ: p.probeStep
@@ -2077,15 +2056,21 @@ export class CalibrationWorkflow {
       screen,
     };
     const robot = this.runtime.profileStore.getRobot(input.robotProfileId);
-    const result = fitExploration(collection, tool, this.runtime.capabilities, {
-      id: randomUUID(),
-      robotProfileId: robot.id,
-      toolProfileId: tool.id,
-      screenProfileId: s.id,
-      robotGeometryRevision: robot.geometryRevision,
-      toolGeometryRevision: tool.geometryRevision,
-      screenGeometryRevision: 1,
-    });
+    const result = fitExploration(
+      collection,
+      tool,
+      this.runtime.capabilities,
+      {
+        id: randomUUID(),
+        robotProfileId: robot.id,
+        toolProfileId: tool.id,
+        screenProfileId: s.id,
+        robotGeometryRevision: robot.geometryRevision,
+        toolGeometryRevision: tool.geometryRevision,
+        screenGeometryRevision: 1,
+      },
+      s.explorationMode === 'slide' || s.explorationMode === 'fast',
+    );
     const candidate = result.candidate;
     const fit: Fit = {
       kind: candidate.kind,
@@ -2400,12 +2385,10 @@ export class CalibrationWorkflow {
       );
   }
 
-  private batchFastTravel?: { surfaceZ?: number };
-  setBatchTravelHeight(value?: number, fastTravel?: { surfaceZ?: number }) {
+  setBatchTravelHeight(value?: number) {
     if (value !== undefined && !Number.isFinite(value))
       throw new RobotArmError('INVALID_ARGUMENT', 'Invalid travel height');
     this.batchTravelTipZMm = value;
-    this.batchFastTravel = fastTravel;
   }
   phoneObservation() {
     return this.phone.update ? structuredClone(this.phone.update) : undefined;
@@ -2437,7 +2420,12 @@ export class CalibrationWorkflow {
       quality.inliers > quality.total ||
       !Array.isArray(evidence.samples) ||
       evidence.samples.length < 7 ||
-      evidence.planeSource !== 'measured' ||
+      (evidence.planeSource !== 'measured' &&
+        !(
+          (state?.explorationMode === 'slide' ||
+            state?.explorationMode === 'fast') &&
+          evidence.planeSource === 'assumed-horizontal'
+        )) ||
       !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
       (evidence.surfaceMaxMm ?? 0) > SAMPLED_SURFACE_LIMIT_MM
     )

@@ -26,30 +26,9 @@ import { DriverSupport } from './driver-support.js';
 import { validateJoints, validateMotionOptions } from './motion.js';
 import { assertFresh, evaluateReadiness } from './readiness.js';
 
-/** Identity of a Cartesian target, used to spend a preflight exactly once. */
-function poseSignature(pose: CartesianPose): string {
-  return JSON.stringify([
-    pose.frame,
-    pose.positionMm.x,
-    pose.positionMm.y,
-    pose.positionMm.z,
-    pose.orientation.x,
-    pose.orientation.y,
-    pose.orientation.z,
-    pose.orientation.w,
-  ]);
-}
-
 /** Vendor-neutral state and motion boundary. No screen geometry or vendor branches. */
 export class RobotDriverBoundary {
   private generation = 0;
-  /**
-   * Target already validated by `preflightCartesian` in this generation.
-   * Callers preflight and then move the same target; the dispatch gate still
-   * checks controller reachability before submission, so the boundary's own
-   * duplicate query for that target can be consumed once.
-   */
-  private preflighted?: { signature: string; generation: number };
   private payloadInvalidationReason?: PayloadInvalidationReason;
   private payloadEnabling = false;
   private readonly payloadSessionId = randomUUID();
@@ -619,10 +598,6 @@ export class RobotDriverBoundary {
         409,
       );
     await this.assertReady();
-    this.preflighted = {
-      signature: poseSignature(pose),
-      generation: this.generation,
-    };
   }
   private async assertCartesianFreedom(pose: CartesianPose): Promise<void> {
     const lockedAxes = (['x', 'y', 'z'] as const).filter(
@@ -676,15 +651,7 @@ export class RobotDriverBoundary {
     // Explicit SDK bounds retain their existing semantics. Workstation moves
     // have no user bounds and must recheck reachability before every submission.
     try {
-      const preflighted =
-        !workspace &&
-        this.preflighted?.generation === this.generation &&
-        this.preflighted.signature === poseSignature(pose);
-      // Spend any ticket up front: this move owns it, and a failed preflight
-      // must not leave a stale target for the next move to skip.
-      this.preflighted = undefined;
-      if (!workspace && !preflighted)
-        await this.preflightCartesian(kind, pose, options);
+      if (!workspace) await this.preflightCartesian(kind, pose, options);
       await this.assertCartesianFreedom(pose);
       await this.assertReady();
     } catch (error) {

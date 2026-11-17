@@ -21,7 +21,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "zustand": "^5.0.0",
-    "@midscene/open-device": "workspace:*",
+    "@midscene/universal-device": "workspace:*",
     "@midscene/arm-adapter-mg400": "workspace:*",
     "@clack/prompts": "^0.11.0",
     "@midscene/robotics-vision": "workspace:*",
@@ -57,7 +57,13 @@
       "import": "./dist/server/index.js"
     }
   },
-  "files": ["dist/server", "dist/ui", "src/ui", "dist/cli"],
+  "files": [
+    "dist/server",
+    "dist/ui",
+    "src/ui",
+    "src/server/twin-types.ts",
+    "dist/cli"
+  ],
   "bin": {
     "arm-service": "dist/cli/index.js"
   }
