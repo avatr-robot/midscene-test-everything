@@ -132,10 +132,12 @@ export function fitSamplePlane(
     points,
     points.map(() => 1),
   );
-  if (!(values[1] > 1e-8))
+  // Near-collinear contacts still produce a mathematically valid second
+  // eigenvalue at measurement-noise scale; require it to be a real span.
+  if (!(values[1] > Math.max(1e-8, values[0] * 1e-3)))
     throw new RobotArmError(
       'CALIBRATION_QUALITY',
-      'Plane probes must span two directions',
+      'Measured contact heights must span two directions to define a plane',
       409,
     );
   const normal =

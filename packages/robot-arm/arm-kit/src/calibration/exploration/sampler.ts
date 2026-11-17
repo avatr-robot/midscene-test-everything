@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto';
 import { CALIBRATION_PHONE_POLICY } from '../../assisted-contracts.js';
 import { type CartesianPose, RobotArmError } from '../../contracts.js';
-import { contactPoint, flangePose } from '../../domain.js';
+import { contactPoint, flangePose, rotate, unit } from '../../domain.js';
 import {
   scaleAcceleration,
   scaleSpeed,
@@ -16,6 +16,7 @@ import {
   fitAffine,
   screenFrame,
 } from './geometry.js';
+import { fitSamplePlane } from './plane.js';
 import {
   type ApplicationContext,
   type AutoCalibrationProgress,
@@ -142,6 +143,47 @@ export function fastExplorationTargets(
   );
 }
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Pick the two fit corners whose triangle with the first contact has the
+ * largest area.
+ *
+ * The audit measures these once, and the plane they form with the first
+ * contact must not be a line: two diagonal corners plus a centred first touch
+ * are collinear, which leaves the fitted plane ill-conditioned. Adjacent
+ * corners keep both axes spanned.
+ */
+export function auditTargets(
+  targets: ScreenCalibTarget[],
+): ScreenCalibTarget[] {
+  const corners = targets.filter((target) => target.role === 'fit');
+  if (corners.length < 2) return corners.slice(0, 2);
+  const xs = corners.map((target) => target.css.x);
+  const ys = corners.map((target) => target.css.y);
+  const width = Math.max(...xs) - Math.min(...xs) || 1;
+  const height = Math.max(...ys) - Math.min(...ys) || 1;
+  const reference = {
+    x: xs.reduce((total, value) => total + value, 0) / xs.length,
+    y: ys.reduce((total, value) => total + value, 0) / ys.length,
+  };
+  let best: [number, number] = [0, 1];
+  let bestArea = -1;
+  for (let i = 0; i < corners.length; i++)
+    for (let j = i + 1; j < corners.length; j++) {
+      const ax = (corners[i].css.x - reference.x) / width;
+      const ay = (corners[i].css.y - reference.y) / height;
+      const bx = (corners[j].css.x - reference.x) / width;
+      const by = (corners[j].css.y - reference.y) / height;
+      const area = Math.abs(ax * by - ay * bx);
+      if (area > bestArea) {
+        bestArea = area;
+        best = [i, j];
+      }
+    }
+  return [corners[best[0]], corners[best[1]]].sort(
+    (a, b) => a.css.y - b.css.y || a.css.x - b.css.x,
+  );
+}
 
 function isIntermittentContact(error: unknown): error is RobotArmError {
   return (
@@ -897,12 +939,49 @@ export async function runAutoExploration(
   const gridTargets = fast
     ? fastExplorationTargets(targets.targets)
     : targets.targets;
-  // The audit points come first in fast mode: their measured heights decide
-  // whether the predicted corners are safe to press at all.
+  const preferredDirection = unit(
+    rotate(start.orientation, tool.contactDirection),
+  );
+  // The first measured samples define the plane the remaining presses use.
+  // Before that (or if the fit is degenerate) the IDW anchors stay in charge.
+  let measuredPlane: ReturnType<typeof fitSamplePlane> | undefined;
+  const pressOffsetMm = first.contact.z - first.pressCommandZ;
+  const predictPoint = (x: number, y: number) => {
+    if (!measuredPlane || Math.abs(measuredPlane.normal.z) < 1e-6)
+      return predictHeights(x, y);
+    const { normal, offset } = measuredPlane;
+    const surfaceZ = (offset - normal.x * x - normal.y * y) / normal.z;
+    return { surfaceZ, pressZ: surfaceZ - pressOffsetMm };
+  };
+  const grid: GridTouch[] = [];
+  const refreshMeasuredPlane = () => {
+    if (!fast) return;
+    const measured = [...probes, ...grid].filter(
+      (point) => point.zSource === 'measured',
+    );
+    if (measured.length < 3) return;
+    try {
+      const plane = fitSamplePlane(
+        measured.map((point) => point.contact),
+        preferredDirection,
+      );
+      // A plane this steep is a bad fit, not a tilted screen; the audit range
+      // only supports a couple of millimetres over the whole panel.
+      measuredPlane = Math.abs(plane.normal.z) > 0.9 ? plane : undefined;
+    } catch {
+      // A nearly collinear audit pair cannot define a plane; keep predicting
+      // from the measured anchors instead of failing the run.
+      measuredPlane = undefined;
+    }
+  };
+  // The audit measures two corners that span both axes, then the remaining
+  // points are pressed from the plane those corners form with the first touch.
+  const auditPoints = fast ? auditTargets(gridTargets) : [];
+  const auditIds = new Set(auditPoints.map((target) => target.id));
   const orderedTargets = fast
     ? [
-        ...gridTargets.filter((target) => target.role === 'validation'),
-        ...gridTargets.filter((target) => target.role === 'fit'),
+        ...auditPoints,
+        ...gridTargets.filter((target) => !auditIds.has(target.id)),
       ]
     : gridTargets;
   const slideTo = async (
@@ -910,7 +989,7 @@ export async function runAutoExploration(
     y: number,
   ): Promise<SampledTouch | undefined> => {
     await assertPage();
-    const { pressZ, surfaceZ } = predictHeights(x, y);
+    const { pressZ, surfaceZ } = predictPoint(x, y);
     const contact = { x, y, z: pressZ };
     await preflight(contact, 'Sliding grid endpoint');
     if (contact.z < safetyFloorZ + FAST_FLOOR_COMMAND_MARGIN_MM)
@@ -955,11 +1034,11 @@ export async function runAutoExploration(
     Math.min(...measuredContacts.map((probe) => probe.contact.z)) +
     TILT_AUDIT_RANGE_MM +
     TILT_AUDIT_MARGIN_MM;
-  const grid: GridTouch[] = [];
   let auditChecked = false;
+  let auditSeen = 0;
   for (let index = 0; index < orderedTargets.length; index++) {
     const target = orderedTargets[index];
-    const audit = fast && target.role === 'validation';
+    const audit = fast && auditIds.has(target.id);
     const slide =
       fast && options.collection === 'slide' && grid.length > 0 && !audit;
     setPhase(host, session, {
@@ -988,7 +1067,7 @@ export async function runAutoExploration(
             // The audit searches its own envelope below the lowest measured
             // contact; the first-touch floor would sit inside a sloping screen.
             audit ? undefined : safetyFloorZ,
-            fast && !audit ? predictHeights(point.x, point.y) : undefined,
+            fast && !audit ? predictPoint(point.x, point.y) : undefined,
           );
         try {
           touch = await probeGrid(robot, `Grid ${target.id}`);
@@ -1033,6 +1112,10 @@ export async function runAutoExploration(
       }
       if (touch.recovered && target.role === 'fit') heightAnchors.push(touch);
       grid.push({ ...touch, target });
+      if (audit) auditSeen++;
+      // Measured points (audit corners, local recoveries) keep improving the
+      // plane that later predicted presses are derived from.
+      if (fast && touch.zSource === 'measured') refreshMeasuredPlane();
       await recordSample(
         touch,
         target.role,
@@ -1042,19 +1125,13 @@ export async function runAutoExploration(
             ? 'direct'
             : 'stepped',
       );
-      if (
-        fast &&
-        audit &&
-        grid.filter((point) => point.target.role === 'validation').length ===
-          2 &&
-        !auditChecked
-      ) {
+      if (fast && audit && auditSeen === 2 && !auditChecked) {
         auditChecked = true;
-        // The predicted corners press at the model height; a measured audit
-        // point that disagrees by more than the supported surface range would
-        // press that much deeper. Fail before touching any corner.
+        // The remaining points press at the predicted height; an audit point
+        // that disagrees by more than the supported surface range would press
+        // that much deeper. Fail before touching any unpredicted point.
         const deviationsMm = grid
-          .filter((point) => point.target.role === 'validation')
+          .filter((point) => auditIds.has(point.target.id))
           .map((point) =>
             Math.abs(
               point.contact.z -

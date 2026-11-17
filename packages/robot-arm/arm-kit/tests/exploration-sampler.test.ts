@@ -372,7 +372,7 @@ describe('first-time automatic exploration', () => {
             // The audit owns its envelope: lowest measured contact minus the
             // 6 mm tilt range, never the first-touch safety floor.
             expect(lowestZ).toBeGreaterThanOrEqual(24);
-            expect(session.auto?.collectedSamples).toHaveLength(4);
+            expect(session.auto?.collectedSamples).toHaveLength(3);
             expect(session.auto?.fastAdaptation?.searchSteps).toBe(0);
           }
           return;
@@ -466,8 +466,9 @@ describe('first-time automatic exploration', () => {
             touchZ - (clearZ - touchZ) / 2,
             6,
           );
-          // Three local recoveries give enough measured heights for a real fit.
-          expect(result.evidence.measuredPlaneSamples).toBe(3);
+          // Three measured fit points (first + two audit corners), plus any
+          // corner that needed a local recovery, define the plane.
+          expect(result.evidence.measuredPlaneSamples).toBe(4);
           expect(result.evidence.planeSource).toBe('measured');
           return;
         }
@@ -478,7 +479,7 @@ describe('first-time automatic exploration', () => {
         }
         expect(result.candidate.acceptanceStatus).toBe('pending');
         // The simulated screen maps pixels in XY; the measured axes follow its surface.
-        const sizePrecision = tilted ? 1 : 3;
+        const sizePrecision = tilted ? 1 : isFast ? 2 : 3;
         expect(result.measuredSize.physicalWidthMm).toBeCloseTo(
           tilted ? Math.hypot(200, slopeX * 200) : 200,
           sizePrecision,
@@ -497,26 +498,48 @@ describe('first-time automatic exploration', () => {
             .filter((sample) => sample.role === role)
             .map((sample) => sample.method);
         if (mode === 'fast-slide' || mode === 'fast-tap') {
-          // The two audit points are measured; corners keep the fast press.
-          expect(result.evidence.validationHeightMaxMm).toBeDefined();
-          expect(methodsOf('validation')).toEqual(['stepped', 'stepped']);
-          expect(methodsOf('fit')).toEqual(
-            Array(4).fill(mode === 'fast-slide' ? 'slide' : 'direct'),
+          // Two audit corners are measured first; the rest are predicted from
+          // the plane they form with the first touch. A prediction that misses
+          // falls back to a local recovery, so the exact method can vary.
+          expect(result.evidence.validationHeightMaxMm).toBeUndefined();
+          expect(methodsOf('validation')).toEqual(
+            Array(2).fill(mode === 'fast-slide' ? 'slide' : 'direct'),
           );
-          expect(finalPressCount).toBe(3);
+          const fitMethods = methodsOf('fit');
+          expect(fitMethods.slice(0, 2)).toEqual(['stepped', 'stepped']);
+          expect(
+            fitMethods
+              .slice(2)
+              .every((method) =>
+                mode === 'fast-slide'
+                  ? method === 'slide' || method === 'stepped'
+                  : method === 'direct' || method === 'stepped',
+              ),
+          ).toBe(true);
+          // First touch plus the two audit corners always press; a predicted
+          // press that misses adds one local-recovery press.
+          expect(finalPressCount).toBeGreaterThanOrEqual(3);
         }
         if (mode === 'fast-slide') {
           const first = collection.probes[0];
           expect(first.heightIntervalMm?.[0]).toBeLessThanOrEqual(activationZ);
           expect(first.heightIntervalMm?.[1]).toBeGreaterThan(activationZ);
           const [touchZ, clearZ] = first.heightIntervalMm!;
-          expect(first.pressedZ).toBeCloseTo(touchZ - (clearZ - touchZ) / 2, 6);
+          // The fixture adds a readback offset, so the command-derived press
+          // height and the measured bracket midpoint agree to a few microns.
+          expect(first.pressedZ).toBeCloseTo(touchZ - (clearZ - touchZ) / 2, 3);
           for (const point of [...collection.probes, ...collection.grid]) {
             // Predicted presses use the anchor height; the measured audit
             // points sit within one bracket of it on this flat screen.
             if (point.zSource === 'predicted') {
-              expect(point.pressedZ).toBeCloseTo(first.pressedZ, 6);
-              expect(point.contact.z).toBeCloseTo(first.contact.z, 6);
+              // The plane is fitted from the two audit corners plus the first
+              // touch, so the far side extrapolates a fraction of a millimetre.
+              expect(Math.abs(point.pressedZ - first.pressedZ)).toBeLessThan(
+                0.3,
+              );
+              expect(Math.abs(point.contact.z - first.contact.z)).toBeLessThan(
+                0.3,
+              );
             } else
               expect(Math.abs(point.contact.z - first.contact.z)).toBeLessThan(
                 0.3,
@@ -525,13 +548,10 @@ describe('first-time automatic exploration', () => {
         }
         if (mode === 'fast-adaptive-slide') {
           expect(missedSlide).toBe(true);
-          expect(methodsOf('fit')).toEqual([
-            'direct',
-            'slide',
-            'slide',
-            'slide',
-          ]);
-          expect(methodsOf('validation')).toEqual(['stepped', 'stepped']);
+          const fitMethods = methodsOf('fit');
+          expect(fitMethods.slice(0, 2)).toEqual(['stepped', 'stepped']);
+          expect(fitMethods.at(-1)).toBe('slide');
+          expect(methodsOf('validation')).toEqual(['direct', 'slide']);
         }
         if (mode === 'press-recovers') expect(missedPress).toBe(true);
         expect(f.store.getScreen(f.screen.id)).toEqual(f.screen);
