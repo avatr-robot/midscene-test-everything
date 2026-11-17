@@ -38,11 +38,11 @@ const round = (value: number, digits = 3) =>
 
 /** Work budget per scenario; a speed change may only lower these. */
 const BUDGETS: Record<string, { moves: number; phoneResults: number }> = {
-  fast: { moves: 27, phoneResults: 26 },
+  fast: { moves: 47, phoneResults: 43 },
   standard: { moves: 163, phoneResults: 143 },
   // Streaming trades host requests for pushed frames: the page sends several
   // frames per confirmation, but the host only issues one prepare request.
-  stream: { moves: 27, phoneResults: 300 },
+  stream: { moves: 47, phoneResults: 400 },
 };
 
 type Scenario = 'fast' | 'standard' | 'stream';

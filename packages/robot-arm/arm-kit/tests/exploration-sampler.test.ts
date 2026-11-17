@@ -32,6 +32,7 @@ describe('first-time automatic exploration', () => {
     'fast-hysteresis',
     'fast-offset-hysteresis',
     'fast-reported-failure',
+    'fast-tilt-audit',
     'press-recovers',
     'bad-validation',
     'fast-no-touch',
@@ -293,9 +294,11 @@ describe('first-time automatic exploration', () => {
           previousHeld = touching;
           const inside =
             point.x >= 0 && point.x <= 200 && point.y <= 0 && point.y >= -100;
-          const tiltOffset = tilted
+          let tiltOffset = tilted
             ? slopeX * (point.x - 100) - 0.005 * (point.y + 50)
             : 0;
+          // Steep enough that the fast audit sees more than its 3 mm budget.
+          if (mode === 'fast-tilt-audit') tiltOffset = 0.04 * (point.x - 100);
           touching =
             inside &&
             (touching
@@ -350,20 +353,27 @@ describe('first-time automatic exploration', () => {
           'snapshot-missing': 'Phone step acknowledgement timed out',
           'snapshot-stale': 'Phone step acknowledgement timed out',
           'safety-floor': 'safety floor',
-          'fast-no-touch': 'fast local height-search budget',
+          'fast-no-touch': 'too tilted for fast mode',
+          'fast-tilt-audit': 'screen height error at the audit points',
           'fast-refine-stalled': 'could not narrow the contact interval',
         };
         if (expected[mode]) {
           await expect(job).rejects.toThrow(expected[mode]);
+          if (mode === 'fast-tilt-audit')
+            await expect(job).rejects.toMatchObject({
+              code: 'SCREEN_TILT_UNSUPPORTED',
+            });
           if (mode.startsWith('snapshot-')) expect(motions).toHaveLength(0);
           if (mode === 'fast-refine-stalled')
             expect(session.auto?.collectedSamples).toBeUndefined();
           if (mode === 'safety-floor')
             expect(lowestZ).toBeGreaterThanOrEqual(27.625);
           if (mode === 'fast-no-touch') {
-            expect(lowestZ).toBeGreaterThanOrEqual(27.625);
-            expect(session.auto?.collectedSamples).toHaveLength(3);
-            expect(session.auto?.fastAdaptation?.searchSteps).toBe(12);
+            // The audit owns its envelope: lowest measured contact minus the
+            // 6 mm tilt range, never the first-touch safety floor.
+            expect(lowestZ).toBeGreaterThanOrEqual(24);
+            expect(session.auto?.collectedSamples).toHaveLength(4);
+            expect(session.auto?.fastAdaptation?.searchSteps).toBe(0);
           }
           return;
         }
@@ -444,14 +454,17 @@ describe('first-time automatic exploration', () => {
           expect(result.evidence.predictedHeightResidualMaxMm!).toBeLessThan(3);
         }
         if (mode === 'fast-local-recovery') {
-          const recovered = collection.grid[0];
-          expect(recovered.recovered).toBe(true);
-          const [touchZ, clearZ] = recovered.heightIntervalMm!;
-          expect(recovered.pressedZ).toBeCloseTo(
+          // Validation points are measured now, so recovery is asserted on a
+          // fit corner: the predicted press missed and the local search found it.
+          const recovered = collection.grid.find(
+            (point) => point.target.role === 'fit' && point.recovered,
+          );
+          expect(recovered).toBeDefined();
+          const [touchZ, clearZ] = recovered!.heightIntervalMm!;
+          expect(recovered!.pressedZ).toBeCloseTo(
             touchZ - (clearZ - touchZ) / 2,
             6,
           );
-          expect(collection.grid[1].recovered).toBeUndefined();
           // Three local recoveries give enough measured heights for a real fit.
           expect(result.evidence.measuredPlaneSamples).toBe(3);
           expect(result.evidence.planeSource).toBe('measured');
@@ -476,20 +489,20 @@ describe('first-time automatic exploration', () => {
         expect(result.coverage).toBeGreaterThan(0.6);
         expect(result.gridRmsMm).toBeLessThan(0.75);
         expect(result.evidence.validationMaxMm).toBeLessThan(1);
-        expect(result.evidence.planeSource).toBe(
-          isFast ? 'assumed-horizontal' : 'measured',
-        );
-        const methods = session.auto?.collectedSamples?.map((p) => p.method);
+        if (!isFast) expect(result.evidence.planeSource).toBe('measured');
+        const samples = session.auto?.collectedSamples ?? [];
+        const methodsOf = (role: 'probe' | 'fit' | 'validation') =>
+          samples
+            .filter((sample) => sample.role === role)
+            .map((sample) => sample.method);
         if (mode === 'fast-slide' || mode === 'fast-tap') {
-          expect(result.evidence.validationHeightMaxMm).toBeUndefined();
-          expect(methods).toEqual([
-            'stepped',
-            'direct',
-            'direct',
-            'direct',
-            ...Array(5).fill(mode === 'fast-slide' ? 'slide' : 'direct'),
-          ]);
-          expect(finalPressCount).toBe(1);
+          // The two audit points are measured; corners keep the fast press.
+          expect(result.evidence.validationHeightMaxMm).toBeDefined();
+          expect(methodsOf('validation')).toEqual(['stepped', 'stepped']);
+          expect(methodsOf('fit')).toEqual(
+            Array(4).fill(mode === 'fast-slide' ? 'slide' : 'direct'),
+          );
+          expect(finalPressCount).toBe(3);
         }
         if (mode === 'fast-slide') {
           const first = collection.probes[0];
@@ -498,19 +511,26 @@ describe('first-time automatic exploration', () => {
           const [touchZ, clearZ] = first.heightIntervalMm!;
           expect(first.pressedZ).toBeCloseTo(touchZ - (clearZ - touchZ) / 2, 6);
           for (const point of [...collection.probes, ...collection.grid]) {
-            expect(point.pressedZ).toBeCloseTo(first.pressedZ, 6);
-            expect(point.contact.z).toBeCloseTo(first.contact.z, 6);
+            // Predicted presses use the anchor height; the measured audit
+            // points sit within one bracket of it on this flat screen.
+            if (point.zSource === 'predicted') {
+              expect(point.pressedZ).toBeCloseTo(first.pressedZ, 6);
+              expect(point.contact.z).toBeCloseTo(first.contact.z, 6);
+            } else
+              expect(Math.abs(point.contact.z - first.contact.z)).toBeLessThan(
+                0.3,
+              );
           }
         }
         if (mode === 'fast-adaptive-slide') {
           expect(missedSlide).toBe(true);
-          expect(methods?.slice(4)).toEqual([
+          expect(methodsOf('fit')).toEqual([
             'direct',
             'slide',
             'slide',
             'slide',
-            'slide',
           ]);
+          expect(methodsOf('validation')).toEqual(['stepped', 'stepped']);
         }
         if (mode === 'press-recovers') expect(missedPress).toBe(true);
         expect(f.store.getScreen(f.screen.id)).toEqual(f.screen);

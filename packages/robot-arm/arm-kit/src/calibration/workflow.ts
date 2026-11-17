@@ -2460,6 +2460,10 @@ export class CalibrationWorkflow {
             state?.explorationMode === 'fast') &&
           evidence.planeSource === 'assumed-horizontal'
         )) ||
+      // An assumed plane must have at least one measured held-out height;
+      // without it the tilt audit never ran and the assumption is unverified.
+      (evidence.planeSource === 'assumed-horizontal' &&
+        evidence.validationHeightMaxMm === undefined) ||
       !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
       (evidence.surfaceMaxMm ?? 0) > SAMPLED_SURFACE_LIMIT_MM
     )

@@ -67,6 +67,13 @@ const FAST_MOTION_FACTOR = 0.25;
 // but let them run faster than a probe step. Contact steps stay at the factor
 // above.
 const FAST_TRAVEL_FACTOR = 0.6;
+// Fast mode measures its two held-out points before it predicts any corner.
+// The audit starts this far above the lowest measured contact and searches
+// twice that range, so a screen that exceeds the audit envelope fails before
+// a corner is pressed.
+const TILT_AUDIT_RANGE_MM = 6;
+const TILT_AUDIT_MARGIN_MM = 2;
+const TILT_AUDIT_MAX_DEVIATION_MM = 3;
 const STANDARD_PRESS_FACTOR = 0.25;
 const STEP_TIMEOUT_MS = 10000;
 interface TouchPoint {
@@ -890,6 +897,14 @@ export async function runAutoExploration(
   const gridTargets = fast
     ? fastExplorationTargets(targets.targets)
     : targets.targets;
+  // The audit points come first in fast mode: their measured heights decide
+  // whether the predicted corners are safe to press at all.
+  const orderedTargets = fast
+    ? [
+        ...gridTargets.filter((target) => target.role === 'validation'),
+        ...gridTargets.filter((target) => target.role === 'fit'),
+      ]
+    : gridTargets;
   const slideTo = async (
     x: number,
     y: number,
@@ -927,21 +942,32 @@ export async function runAutoExploration(
   setPhase(host, session, {
     phase: 'grid',
     index: 0,
-    total: gridTargets.length,
+    total: orderedTargets.length,
     message: 'Sampling the screen',
   });
   const gridZ =
     Math.max(...probes.map((probe) => probe.contact.z)) + APPROACH_LIFT_MM;
+  // Only measured contacts bound the audit envelope; predicted probes do not.
+  const measuredContacts = probes.filter(
+    (probe) => probe.zSource === 'measured',
+  );
+  const auditStart =
+    Math.min(...measuredContacts.map((probe) => probe.contact.z)) +
+    TILT_AUDIT_RANGE_MM +
+    TILT_AUDIT_MARGIN_MM;
   const grid: GridTouch[] = [];
-  for (let index = 0; index < gridTargets.length; index++) {
-    const target = gridTargets[index];
-    const slide = fast && options.collection === 'slide' && grid.length > 0;
+  let auditChecked = false;
+  for (let index = 0; index < orderedTargets.length; index++) {
+    const target = orderedTargets[index];
+    const audit = fast && target.role === 'validation';
+    const slide =
+      fast && options.collection === 'slide' && grid.length > 0 && !audit;
     setPhase(host, session, {
       phase: 'grid',
       operation: slide ? 'slide' : 'travel',
       index: index + 1,
-      total: gridTargets.length,
-      message: `Sampling ${index + 1}/${gridTargets.length}`,
+      total: orderedTargets.length,
+      message: `Sampling ${index + 1}/${orderedTargets.length}`,
     });
     const robot = affinePoint(initialFrame.inverse, target.screen);
     try {
@@ -953,16 +979,38 @@ export async function runAutoExploration(
           touchAt(
             point.x,
             point.y,
-            gridZ,
+            audit ? auditStart : gridZ,
             label,
-            TOUCH_DESCENT_MM,
+            audit
+              ? TILT_AUDIT_RANGE_MM * 2 + TILT_AUDIT_MARGIN_MM
+              : TOUCH_DESCENT_MM,
             false,
-            safetyFloorZ,
-            fast ? predictHeights(point.x, point.y) : undefined,
+            // The audit searches its own envelope below the lowest measured
+            // contact; the first-touch floor would sit inside a sloping screen.
+            audit ? undefined : safetyFloorZ,
+            fast && !audit ? predictHeights(point.x, point.y) : undefined,
           );
         try {
           touch = await probeGrid(robot, `Grid ${target.id}`);
         } catch (error) {
+          if (
+            audit &&
+            error instanceof RobotArmError &&
+            (error.code === 'TOUCH_NOT_FOUND' ||
+              error.code === 'TOUCH_NOT_RELEASED' ||
+              error.code === 'TOUCH_SAFETY_LIMIT')
+          )
+            throw new RobotArmError(
+              'SCREEN_TILT_UNSUPPORTED',
+              `Fast calibration could not measure the screen height at ${target.id}; the screen is too tilted for fast mode (audit range ${TILT_AUDIT_RANGE_MM} mm)`,
+              422,
+              {
+                auditStartMm: auditStart,
+                auditRangeMm: TILT_AUDIT_RANGE_MM,
+                cause: error.code,
+              },
+            );
+          if (audit) throw error;
           if (
             !fast ||
             index !== 0 ||
@@ -988,8 +1036,44 @@ export async function runAutoExploration(
       await recordSample(
         touch,
         target.role,
-        slideTouch ? 'slide' : fast && !touch.recovered ? 'direct' : 'stepped',
+        slideTouch
+          ? 'slide'
+          : fast && !audit && !touch.recovered
+            ? 'direct'
+            : 'stepped',
       );
+      if (
+        fast &&
+        audit &&
+        grid.filter((point) => point.target.role === 'validation').length ===
+          2 &&
+        !auditChecked
+      ) {
+        auditChecked = true;
+        // The predicted corners press at the model height; a measured audit
+        // point that disagrees by more than the supported surface range would
+        // press that much deeper. Fail before touching any corner.
+        const deviationsMm = grid
+          .filter((point) => point.target.role === 'validation')
+          .map((point) =>
+            Math.abs(
+              point.contact.z -
+                predictHeights(point.contact.x, point.contact.y).surfaceZ,
+            ),
+          );
+        const maxDeviationMm = Math.max(...deviationsMm);
+        if (!(maxDeviationMm <= TILT_AUDIT_MAX_DEVIATION_MM))
+          throw new RobotArmError(
+            'SCREEN_TILT_UNSUPPORTED',
+            `Fast calibration measured ${maxDeviationMm.toFixed(2)} mm of screen height error at the audit points (limit ${TILT_AUDIT_MAX_DEVIATION_MM} mm); calibrate this screen in standard mode`,
+            422,
+            {
+              deviationsMm,
+              auditStartMm: auditStart,
+              auditRangeMm: TILT_AUDIT_RANGE_MM,
+            },
+          );
+      }
     } catch (error) {
       if (
         fast ||
