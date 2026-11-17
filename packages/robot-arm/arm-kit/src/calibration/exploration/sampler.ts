@@ -73,6 +73,11 @@ interface TouchPoint {
   screen: ScreenPoint2;
   /** Reduced when the point needed a retry or hit the safety floor. */
   weight?: number;
+  /**
+   * `predicted` when `contact.z` came from the height model instead of a
+   * measured bracket. Geometry keeps those heights out of the plane fit.
+   */
+  zSource: 'measured' | 'predicted';
 }
 interface SampledTouch extends TouchPoint {
   /** Command that produced the confirmed press. Readback stays in pressedZ. */
@@ -232,9 +237,9 @@ export async function runAutoExploration(
       if (timer) clearTimeout(timer);
     }
     await host.stable(pose, ctx);
-    return fast
-      ? contactPoint(measured ?? (await host.currentPose()), tool.offsetMm)
-      : contact;
+    // Always report the readback: a commanded contact height is not evidence,
+    // and the safety floor must be checked against where the tool actually is.
+    return contactPoint(measured ?? (await host.currentPose()), tool.offsetMm);
   };
 
   const page = structuredClone(
@@ -293,6 +298,7 @@ export async function runAutoExploration(
         role,
         method,
         weight: point.weight,
+        zSource: point.zSource,
       });
       await save(host, session);
     }
@@ -516,6 +522,7 @@ export async function runAutoExploration(
             pressedZ: measured.z,
             screen: touched.screen,
             weight: 0.5,
+            zSource: 'predicted',
           };
         assertInterval(lastClear.z, measured.z);
         const contact = contactBetween(lastClear, measured);
@@ -537,6 +544,7 @@ export async function runAutoExploration(
           recovered: true,
           heightIntervalMm: [measured.z, lastClear.z],
           weight: 0.7,
+          zSource: 'measured',
         };
       }
       throw new RobotArmError(
@@ -713,6 +721,7 @@ export async function runAutoExploration(
           heightIntervalMm: fast ? [touchingPoint.z, upperPoint.z] : undefined,
           screen: pressed.screen,
           weight: pressRetried ? 0.5 : weight,
+          zSource: 'measured',
         };
       }
     }
@@ -888,6 +897,7 @@ export async function runAutoExploration(
       pressedZ: measured.z,
       screen: touched,
       weight: 0.5,
+      zSource: 'predicted',
     };
   };
   setPhase(host, session, {

@@ -86,6 +86,8 @@ export interface CollectedSample {
   role: 'probe' | 'fit' | 'validation';
   method: 'stepped' | 'direct' | 'slide';
   weight?: number;
+  /** Whether `robot.z` came from a measured bracket or a predicted press height. */
+  zSource?: 'measured' | 'predicted';
 }
 export interface CalibrationSession {
   auto?: {

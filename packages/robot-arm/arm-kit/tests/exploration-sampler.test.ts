@@ -376,6 +376,48 @@ describe('first-time automatic exploration', () => {
           return;
         }
         const result = fit();
+        // Predicted press heights may locate the next move, never the plane.
+        const fitPoints = [
+          ...collection.probes,
+          ...collection.grid.filter((point) => point.target.role === 'fit'),
+        ];
+        const predictedFit = fitPoints.filter(
+          (point) => point.zSource === 'predicted',
+        );
+        expect(result.evidence.predictedSamples).toBe(predictedFit.length);
+        expect(result.evidence.predictedFraction).toBeCloseTo(
+          predictedFit.length / fitPoints.length,
+        );
+        expect(
+          result.evidence.predictedSamples! +
+            result.evidence.measuredPlaneSamples!,
+        ).toBe(result.quality.total);
+        for (const sample of session.auto?.collectedSamples ?? [])
+          expect(sample.zSource).toBe(
+            sample.method === 'stepped' ? 'measured' : 'predicted',
+          );
+        if (!isFast) {
+          expect(predictedFit).toHaveLength(0);
+          expect(result.evidence.measuredPlaneSamples).toBe(
+            result.quality.total,
+          );
+        } else {
+          expect(predictedFit.length).toBeGreaterThan(0);
+          expect(result.evidence.measuredPlaneSamples).toBeGreaterThanOrEqual(
+            1,
+          );
+          // Fast-horizontal measures the first contact plus any local recovery.
+          // Below three measured heights the plane is the stated assumption,
+          // and the normal must be exactly the approach direction.
+          const assumed = result.evidence.measuredPlaneSamples! < 3;
+          expect(result.evidence.planeSource).toBe(
+            assumed ? 'assumed-horizontal' : 'measured',
+          );
+          if (assumed)
+            expect(Math.abs(result.candidate.plane.normal.z)).toBeCloseTo(1, 3);
+          expect(result.evidence.predictedHeightResidualMaxMm).toBeDefined();
+          expect(result.evidence.predictedHeightResidualMaxMm!).toBeLessThan(3);
+        }
         if (mode === 'fast-local-recovery') {
           const recovered = collection.grid[0];
           expect(recovered.recovered).toBe(true);
@@ -385,7 +427,9 @@ describe('first-time automatic exploration', () => {
             6,
           );
           expect(collection.grid[1].recovered).toBeUndefined();
-          expect(result.evidence.planeSource).toBe('assumed-horizontal');
+          // Three local recoveries give enough measured heights for a real fit.
+          expect(result.evidence.measuredPlaneSamples).toBe(3);
+          expect(result.evidence.planeSource).toBe('measured');
           return;
         }
         if (tilted) {

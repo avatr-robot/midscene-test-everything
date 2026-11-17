@@ -110,6 +110,38 @@ function pca(points: Vector3[], weights: number[]) {
   });
   return { center, ...eigenSymmetric(covariance) };
 }
+/**
+ * Fit the plane from as few as three contacts whose heights were measured.
+ *
+ * Fast exploration predicts most grid heights, and the full grid still needs a
+ * five-sample fit for its span and inlier evidence. The plane equation itself
+ * must come from measured brackets only; this helper supplies that fit, and
+ * `autoCalibrationGeometry` scores the predicted height error separately.
+ */
+export function fitSamplePlane(
+  points: Vector3[],
+  preferred: Vector3,
+): CalibrationProfile['plane'] {
+  if (points.length < 3)
+    throw new RobotArmError(
+      'CALIBRATION_QUALITY',
+      'At least three measured contact heights are required to fit the screen plane',
+      409,
+    );
+  const { center, values, vectors } = pca(
+    points,
+    points.map(() => 1),
+  );
+  if (!(values[1] > 1e-8))
+    throw new RobotArmError(
+      'CALIBRATION_QUALITY',
+      'Plane probes must span two directions',
+      409,
+    );
+  const normal =
+    dot(vectors[0], preferred) < 0 ? scale(vectors[0], -1) : vectors[0];
+  return { normal, offset: dot(normal, center) };
+}
 /** Deterministic bounded RANSAC, followed by Huber-weighted PCA. */
 export function fitContactPlane(
   points: Vector3[],

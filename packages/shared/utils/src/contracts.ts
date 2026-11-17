@@ -610,6 +610,16 @@ export interface AutoCalibrationEvidence {
   validationMaxMm: number;
   /** Held-out Z residual after applying local surface compensation. */
   validationHeightMaxMm?: number;
+  /** Contact samples whose measured height defined the plane. */
+  measuredPlaneSamples?: number;
+  /** Contact samples whose height came from the height model, not a bracket. */
+  predictedSamples?: number;
+  /** Share of fit samples with a predicted height, in [0, 1]. */
+  predictedFraction?: number;
+  /** Largest predicted height error against the measured plane, after compensation. */
+  predictedHeightResidualMaxMm?: number;
+  /** Spread of the heights that were measured, which is the direct tilt hint. */
+  measuredHeightRangeMm?: number;
   /** Absolute cosine of the angle between the independently measured screen axes. */
   axisSkewRatio?: number;
   coverage: number;
@@ -618,6 +628,7 @@ export interface AutoCalibrationEvidence {
     screen: { x: number; y: number };
     planeMm: { x: number; y: number };
     zMm: number;
+    zSource?: 'measured' | 'predicted';
   }[];
 }
 export interface PlaneQuality {

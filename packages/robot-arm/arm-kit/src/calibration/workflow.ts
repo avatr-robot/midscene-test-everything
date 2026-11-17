@@ -2034,6 +2034,8 @@ export class CalibrationWorkflow {
       heightIntervalMm: p.probeStep?.heightIntervalMm,
       screen: project(s.mapping!.webToImage, p.point),
       weight: p.weight,
+      // The local bridge only records stepped contacts; every height is measured.
+      zSource: 'measured' as const,
       pressedZ: p.probeStep
         ? contactPoint(p.probeStep.after, tool.offsetMm).z
         : p.positionMm.z - 0.5,

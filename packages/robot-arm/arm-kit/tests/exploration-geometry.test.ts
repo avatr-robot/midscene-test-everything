@@ -172,6 +172,77 @@ describe('automatic calibration geometry', () => {
       await f.cleanup();
     }
   });
+  it('fits the plane from measured heights and scores predicted ones separately', async () => {
+    const f = await fixture();
+    try {
+      const planeZ = (x: number, y: number) => 30 + 0.03 * x + 0.02 * y;
+      const screen = (x: number, y: number) => ({
+        x: (x / 200) * 999,
+        y: (-y / 100) * 499,
+      });
+      const measured = [
+        [35, -35],
+        [165, -35],
+        [165, -65],
+        [35, -65],
+        [100, -50],
+      ].map(([x, y]) => ({
+        robot: { x, y, z: planeZ(x, y) },
+        screen: screen(x, y),
+        zSource: 'measured' as const,
+      }));
+      // Fast exploration predicts one height for the whole screen: these
+      // corners carry the centre height instead of the tilted surface.
+      const predicted = [
+        [0, 0],
+        [200, 0],
+        [200, -100],
+        [0, -100],
+      ].map(([x, y]) => ({
+        robot: { x, y, z: planeZ(100, -50) },
+        screen: screen(x, y),
+        zSource: 'predicted' as const,
+      }));
+      const result = autoCalibrationGeometry({
+        startPose: pose(100, -50, 100),
+        samples: [...measured, ...predicted],
+        screen: {
+          ...f.screen,
+          physicalWidthMm: 0,
+          physicalHeightMm: 0,
+        },
+        tool: f.tool,
+        capabilities: f.runtime.capabilities,
+        binding: {
+          id: 'predicted-height-candidate',
+          robotProfileId: f.binding.robotProfileId,
+          toolProfileId: f.binding.toolProfileId,
+          screenProfileId: f.binding.screenProfileId,
+          robotGeometryRevision: f.robot.geometryRevision,
+          toolGeometryRevision: f.tool.geometryRevision,
+          screenGeometryRevision: f.screen.geometryRevision,
+        },
+      });
+      // The two millimetre-tall predicted corners must not flatten the plane.
+      expect(
+        -result.candidate.plane.normal.x / result.candidate.plane.normal.z,
+      ).toBeCloseTo(0.03, 3);
+      expect(
+        -result.candidate.plane.normal.y / result.candidate.plane.normal.z,
+      ).toBeCloseTo(0.02, 3);
+      expect(result.planeSampleCount).toBe(measured.length);
+      expect(result.predictedSampleCount).toBe(predicted.length);
+      // Predicted corners sit 2–4 mm off the measured plane: out of the inlier
+      // band, but still represented in the total so acceptance sees them.
+      expect(result.quality.inliers).toBe(measured.length);
+      expect(result.quality.total).toBe(measured.length + predicted.length);
+      // Compensation only ever uses measured heights (here: none needed).
+      expect(result.surfaceMaxMm).toBeLessThan(0.05);
+      expect(result.candidate.surface).toBeUndefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
   it('converts held-out residuals with both measured axis scales when the fit is exact', async () => {
     const f = await fixture();
     try {
