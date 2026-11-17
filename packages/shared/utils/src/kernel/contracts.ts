@@ -171,7 +171,7 @@ export interface RobotDriver {
   clearFaults?(): Promise<void>;
   enterDragMode?(): Promise<void>;
   exitDragMode?(): Promise<void>;
-  startJog?(target: JogTarget): Promise<void>;
+  startJog?(target: JogTarget, speedFactor?: number): Promise<void>;
   stopJog?(): Promise<void>;
   pause?(): Promise<void>;
   resume?(): Promise<void>;
