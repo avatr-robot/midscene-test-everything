@@ -345,6 +345,10 @@ function surfaceCompensation(
     ...localSamples.map((sample) => Math.abs(sample.depthMm)),
   );
   assertSurfaceDeviationMm(maxAbsMm);
+  // A sampled surface is an interpolation of at least five measured heights.
+  // Fast mode usually has one to three, so it keeps the plane and no surface
+  // instead of inventing local corrections from predicted heights.
+  if (localSamples.length < 5) return { maxAbsMm };
   if (maxAbsMm < MIN_SURFACE_COMPENSATION_MM) return { maxAbsMm };
   return {
     surface: {
