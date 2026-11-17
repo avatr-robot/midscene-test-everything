@@ -591,6 +591,8 @@ export interface CalibrationVerification {
   confirmedAt: string;
 }
 export interface AutoCalibrationEvidence {
+  /** Which exploration mode produced this candidate. */
+  samplingMode?: 'standard' | 'fast';
   planeSource?: string;
   tiltDeg?: number;
   heightRangeMm?: number;

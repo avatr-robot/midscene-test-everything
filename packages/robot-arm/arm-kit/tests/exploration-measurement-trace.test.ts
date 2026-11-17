@@ -223,6 +223,7 @@ async function trace(mode: Scenario) {
           })),
         ],
         evidence: {
+          samplingMode: result.evidence.samplingMode,
           planeSource: result.evidence.planeSource,
           planeRmseMm: round(result.evidence.planeRmseMm, 4),
           measuredPlaneSamples: result.evidence.measuredPlaneSamples,

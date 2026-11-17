@@ -128,6 +128,7 @@ export function fitExploration(
       409,
     );
   const evidence = {
+    samplingMode: fast ? ('fast' as const) : ('standard' as const),
     planeSource:
       fast && result.planeSampleCount < 3 ? 'assumed-horizontal' : 'measured',
     planeRmseMm: result.quality.rmseMm,

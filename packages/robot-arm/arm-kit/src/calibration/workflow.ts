@@ -2031,16 +2031,20 @@ export class CalibrationWorkflow {
     timing: ReadonlyMap<string, { count: number; ms: number }>,
   ) {
     if (!timing.size) return;
-    log('Automatic sampling timing', {
-      attemptId,
-      deviceId: this.options.deviceId,
-      timing: Object.fromEntries(
-        [...timing].map(([event, entry]) => [
-          event,
-          { count: entry.count, ms: Math.round(entry.ms) },
-        ]),
-      ),
-    });
+    // One JSON object per attempt so the log report can parse it without
+    // depending on the logger's object formatting.
+    log(
+      `Automatic sampling timing ${JSON.stringify({
+        attemptId,
+        deviceId: this.options.deviceId,
+        timing: Object.fromEntries(
+          [...timing].map(([event, entry]) => [
+            event,
+            { count: entry.count, ms: Math.round(entry.ms) },
+          ]),
+        ),
+      })}`,
+    );
   }
 
   private fitMeasurements() {

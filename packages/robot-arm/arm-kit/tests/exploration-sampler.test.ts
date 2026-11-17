@@ -412,6 +412,7 @@ describe('first-time automatic exploration', () => {
         if (isFast)
           expect(samplingTiming.get('point-travel')).toBeGreaterThan(0);
         // Predicted press heights may locate the next move, never the plane.
+        expect(result.evidence.samplingMode).toBe(isFast ? 'fast' : 'standard');
         const fitPoints = [
           ...collection.probes,
           ...collection.grid.filter((point) => point.target.role === 'fit'),

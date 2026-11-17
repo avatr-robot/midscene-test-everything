@@ -555,6 +555,7 @@
       }
     ],
     "evidence": {
+      "samplingMode": "fast",
       "planeSource": "assumed-horizontal",
       "planeRmseMm": 0,
       "measuredPlaneSamples": 1,
@@ -2241,6 +2242,7 @@
       }
     ],
     "evidence": {
+      "samplingMode": "standard",
       "planeSource": "measured",
       "planeRmseMm": 0.0479,
       "measuredPlaneSamples": 8,
@@ -4302,6 +4304,7 @@
       }
     ],
     "evidence": {
+      "samplingMode": "fast",
       "planeSource": "assumed-horizontal",
       "planeRmseMm": 0,
       "measuredPlaneSamples": 1,
