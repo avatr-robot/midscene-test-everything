@@ -63,6 +63,10 @@ const DWELL_MS = 250;
 const ACK_POLL_MS = 25;
 const STANDARD_MOTION_FACTOR = 0.1;
 const FAST_MOTION_FACTOR = 0.25;
+// Travel legs carry no contact; keep their clearance and endpoint confirmation,
+// but let them run faster than a probe step. Contact steps stay at the factor
+// above.
+const FAST_TRAVEL_FACTOR = 0.6;
 const STANDARD_PRESS_FACTOR = 0.25;
 const STEP_TIMEOUT_MS = 10000;
 interface TouchPoint {
@@ -200,6 +204,7 @@ export async function runAutoExploration(
   const moveOptions = motionAtFactor(
     fast ? FAST_MOTION_FACTOR : STANDARD_MOTION_FACTOR,
   );
+  const travelOptions = fast ? motionAtFactor(FAST_TRAVEL_FACTOR) : moveOptions;
   const pressOptions = fast
     ? moveOptions
     : motionAtFactor(STANDARD_PRESS_FACTOR);
@@ -487,8 +492,8 @@ export async function runAutoExploration(
       );
       if (Math.hypot(current.x - x, current.y - y) > 0.2) {
         if (current.z < safeZ - 0.05)
-          await moveTo({ x: current.x, y: current.y, z: safeZ });
-        await moveTo({ x, y, z: safeZ });
+          await moveTo({ x: current.x, y: current.y, z: safeZ }, travelOptions);
+        await moveTo({ x, y, z: safeZ }, travelOptions);
       }
       // After a lost sliding endpoint, XY is already correct but the tip is
       // still down. Establish release before reacquiring this same point.

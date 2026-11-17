@@ -170,8 +170,13 @@ it.each([
           ))
             expect(motion.speedRatio).toBeCloseTo(0.08);
         } else {
+          // Fast probes and presses keep 0.25; travel legs may use 0.6.
           for (const motion of motions)
-            expect(motion.speedRatio).toBeCloseTo(0.2);
+            expect(
+              [0.2, 0.48].some(
+                (ratio) => Math.abs(ratio - motion.speedRatio) < 1e-9,
+              ),
+            ).toBe(true);
         }
         expect(collector.upstreamResult).toBeDefined();
       } else {

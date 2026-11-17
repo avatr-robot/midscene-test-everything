@@ -253,11 +253,27 @@ describe('first-time automatic exploration', () => {
           speed: MotionSpeed,
           acceleration: MotionAcceleration,
         ) => {
-          const factor = isFast || finalPress ? 0.25 : 0.1;
-          expect(speed).toEqual(scaleSpeed(ctx.screen.actionSpeed, factor));
-          expect(acceleration).toEqual(
-            scaleAcceleration(ctx.screen.actionAcceleration, factor),
-          );
+          if (isFast) {
+            // Probe approaches and presses keep the fast factor; pure travel
+            // legs are allowed to run at the faster travel factor.
+            const factors = [0.25, 0.6];
+            expect(
+              factors.map((factor) =>
+                scaleSpeed(ctx.screen.actionSpeed, factor),
+              ),
+            ).toContainEqual(speed);
+            expect(
+              factors.map((factor) =>
+                scaleAcceleration(ctx.screen.actionAcceleration, factor),
+              ),
+            ).toContainEqual(acceleration);
+          } else {
+            const factor = finalPress ? 0.25 : 0.1;
+            expect(speed).toEqual(scaleSpeed(ctx.screen.actionSpeed, factor));
+            expect(acceleration).toEqual(
+              scaleAcceleration(ctx.screen.actionAcceleration, factor),
+            );
+          }
           if (finalPress) finalPressCount++;
           finalPress = false;
           const measured = structuredClone(target);

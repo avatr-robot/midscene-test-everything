@@ -186,7 +186,10 @@ function captureMotion(
   return {
     speed: options?.speed ?? { kind: 'ratio', value: 0.01 },
     acceleration: options?.acceleration ?? { kind: 'ratio', value: 0.01 },
-    arrivalSamples: 1,
+    // Two consecutive fresh samples are the same evidence the application-level
+    // dwell below would collect; asking the driver for both lets this path skip
+    // that duplicate dwell instead of sampling the glass twice more.
+    arrivalSamples: 2,
   };
 }
 export class RobotArmRuntime extends RobotKernel {
@@ -392,6 +395,7 @@ export class RobotArmRuntime extends RobotKernel {
           );
           checkSubmission();
           const previousMotionSubmitted = this.motionSubmitted;
+          let arrivedPose: CartesianPose | undefined;
           try {
             const result = await this.motionExecutor.move(
               pose,
@@ -416,6 +420,7 @@ export class RobotArmRuntime extends RobotKernel {
                 },
               },
             );
+            if ((options.arrivalSamples ?? 0) >= 2) arrivedPose = result.pose;
             if (trace)
               this.audit('calibration', trace.attemptId, 'completed', {
                 stage: 'reference-travel',
@@ -452,12 +457,15 @@ export class RobotArmRuntime extends RobotKernel {
             throw error;
           }
           const adapterCompletedAt = performance.now();
-          const actual = await this.motionExecutor.stable(
-            pose,
-            5000,
-            check,
-            (ms) => this.hold(ms),
-          );
+          // The driver returned the pose of its last fresh arrival sample. With
+          // two requested, that is the evidence this dwell would collect, so do
+          // not spend another two samples with the tool already on the glass.
+          // Drivers that cannot report it fall back to the dwell.
+          const actual =
+            arrivedPose ??
+            (await this.motionExecutor.stable(pose, 5000, check, (ms) =>
+              this.hold(ms),
+            ));
           check();
           if (
             probeOptions?.maximumPositionErrorMm !== undefined &&
@@ -472,7 +480,9 @@ export class RobotArmRuntime extends RobotKernel {
           probeOptions?.onTiming?.({
             beforeSubmitMs: Math.round(submittedAt - startedAt),
             adapterCompletionMs: Math.round(adapterCompletedAt - submittedAt),
-            stableMs: Math.round(performance.now() - adapterCompletedAt),
+            stableMs: arrivedPose
+              ? 0
+              : Math.round(performance.now() - adapterCompletedAt),
           });
           return actual;
         },
