@@ -11,7 +11,7 @@ import type {
 export function mountCalibrationPhonePage(
   policy: Pick<
     typeof CALIBRATION_POINT_POLICY,
-    'touchSpreadPx' | 'targetRadiusPx'
+    'touchSpreadPx' | 'targetRadiusPx' | 'streamStepFeedbackIntervalMs'
   > &
     typeof CALIBRATION_PHONE_POLICY & { verificationRadiusPx: number },
   pageId: string,
@@ -1097,6 +1097,7 @@ export function mountCalibrationPhonePage(
       claimBrowserInstance,
       touchEvents,
       touchDiagnosticsVersion: 2,
+      streamStepFeedback: true,
       wakeState: wakeState(),
       sequence: ++sequence,
       model,
@@ -1222,6 +1223,7 @@ export function mountCalibrationPhonePage(
     socket = transport;
     let endedTransport = false;
     let heartbeat: ReturnType<typeof setInterval>;
+    let stream: ReturnType<typeof setInterval> | undefined;
     let lastReply = performance.now();
     const stalled = () => {
       if (endedTransport) return;
@@ -1249,6 +1251,14 @@ export function mountCalibrationPhonePage(
         )
           send();
       }, policy.heartbeatMs);
+      // While a host step is active, report it at a steady cadence. The host can
+      // then confirm the stationary result from two streamed frames instead of
+      // asking for a fresh result twice; absent a step this is a no-op.
+      stream = setInterval(() => {
+        if (transport.readyState !== WebSocket.OPEN) return;
+        if (!state?.capture?.step || document.hidden) return;
+        send();
+      }, policy.streamStepFeedbackIntervalMs);
     };
     transport.onmessage = (event) => {
       if (endedTransport) return;
@@ -1270,6 +1280,7 @@ export function mountCalibrationPhonePage(
       endedTransport = true;
       clearTimeout(opening);
       clearInterval(heartbeat);
+      if (stream) clearInterval(stream);
       touches = [];
       touchEvents.length = 0;
       contact = undefined;

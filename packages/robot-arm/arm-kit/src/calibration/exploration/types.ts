@@ -114,6 +114,9 @@ export interface AutoExplorationOptions {
   mode?: 'standard' | 'fast-plane';
   collection?: 'tap' | 'slide';
   compliantSetupConfirmed?: boolean;
+  initialSearchSurfaceZMm?: number;
+  optimizeBatchTravel?: boolean;
+  onTiming?(event: string, elapsedMs: number): void;
 }
 export interface AutoExplorationHost {
   currentPose(): Promise<CartesianPose>;
@@ -127,6 +130,10 @@ export interface AutoExplorationHost {
   preflight(
     steps: Array<{ name: string; pose: CartesianPose; options: MotionOptions }>,
     ctx: ApplicationContext,
+  ): Promise<void>;
+  preflightTravel?(
+    poses: CartesianPose[],
+    options: MotionOptions,
   ): Promise<void>;
   check(): void;
   stop?(): Promise<void>;

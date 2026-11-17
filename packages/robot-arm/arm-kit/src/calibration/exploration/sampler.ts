@@ -80,6 +80,10 @@ const DWELL_MS = 250;
 const ACK_POLL_MS = 25;
 const STANDARD_MOTION_FACTOR = 0.1;
 const FAST_MOTION_FACTOR = 0.25;
+// Travel legs carry no contact; keep their clearance and endpoint confirmation,
+// but let them run faster than a probe step. Contact steps stay at the factor
+// above.
+const FAST_TRAVEL_FACTOR = 0.6;
 const STANDARD_PRESS_FACTOR = 0.25;
 const STEP_TIMEOUT_MS = 10000;
 interface TouchPoint {
@@ -195,6 +199,7 @@ export async function runAutoExploration(
   const moveOptions = motionAtFactor(
     fast ? FAST_MOTION_FACTOR : STANDARD_MOTION_FACTOR,
   );
+  const travelOptions = fast ? motionAtFactor(FAST_TRAVEL_FACTOR) : moveOptions;
   const pressOptions = fast
     ? moveOptions
     : motionAtFactor(STANDARD_PRESS_FACTOR);
@@ -213,6 +218,7 @@ export async function runAutoExploration(
     await assertPage();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let measured: CartesianPose | undefined;
+    const started = performance.now();
     try {
       measured = await Promise.race([
         host.move(pose, ctx, motion.speed, motion.acceleration),
@@ -231,6 +237,7 @@ export async function runAutoExploration(
       ]);
     } finally {
       if (timer) clearTimeout(timer);
+      options.onTiming?.('movl', performance.now() - started);
     }
     await host.stable(pose, ctx);
     return fast
@@ -356,6 +363,7 @@ export async function runAutoExploration(
     settleMs = searchWaitMs,
     allowBriefContactGaps?: boolean,
   ) => {
+    const started = performance.now();
     try {
       return await observeOnce(purpose, settleMs, allowBriefContactGaps);
     } catch (error) {
@@ -365,9 +373,12 @@ export async function runAutoExploration(
       )
         throw error;
       host.check();
-      return observeOnce(purpose, settleMs, allowBriefContactGaps);
+      return await observeOnce(purpose, settleMs, allowBriefContactGaps);
+    } finally {
+      options.onTiming?.('phone-confirmation', performance.now() - started);
     }
   };
+  let hasInitialContact = false;
   const touchAt = async (
     x: number,
     y: number,
@@ -414,6 +425,7 @@ export async function runAutoExploration(
     const probeAt = async (z: number, name: string, motion = moveOptions) => {
       checkDepth(z, name);
       await preflight({ x, y, z }, name, motion);
+      options.onTiming?.('probe-move', 0);
       const measured = await moveTo({ x, y, z }, motion);
       checkDepth(z, name, measured.z);
       return measured;
@@ -448,21 +460,58 @@ export async function runAutoExploration(
     await assertPage();
     let approach = { x, y, z: zHigh };
     if (!skipApproach) {
+      const travelStarted = performance.now();
       const current = contactPoint(await host.currentPose(), tool.offsetMm);
+      const travelFloor = ctx.minimumTravelTipZMm ?? Number.POSITIVE_INFINITY;
       const safeZ = Math.max(
         current.z + TRAVERSE_CLEARANCE_MM,
         zHigh,
         ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
       );
+      let combined = false;
       if (Math.hypot(current.x - x, current.y - y) > 0.2) {
+        const endpoint = { x, y, z: zHigh };
+        const lift = { x: current.x, y: current.y, z: safeZ };
+        // Both ends of a constant-orientation straight segment have to clear
+        // the same horizontal floor. The extra lift also clears the last press.
+        const clearance = Math.max(travelFloor, current.z + RELEASE_LIFT_MM);
+        let diagonalAllowed =
+          fast &&
+          options.optimizeBatchTravel &&
+          hasInitialContact &&
+          host.preflightTravel &&
+          zHigh >= clearance &&
+          zHigh < safeZ;
+        if (diagonalAllowed) {
+          try {
+            await host.preflightTravel!([poseAt(endpoint)], travelOptions);
+          } catch {
+            host.check();
+            diagonalAllowed = false;
+            options.onTiming?.('travel-fallback-preflight', 0);
+          }
+        } else if (fast && options.optimizeBatchTravel && hasInitialContact) {
+          options.onTiming?.('travel-fallback-clearance', 0);
+        }
         if (current.z < safeZ - 0.05)
-          await moveTo({ x: current.x, y: current.y, z: safeZ });
-        await moveTo({ x, y, z: safeZ });
+          approach = await moveTo(lift, travelOptions);
+        if (diagonalAllowed && approach.z >= clearance) {
+          approach = await moveTo(endpoint, travelOptions);
+          combined = true;
+          options.onTiming?.('travel-diagonal', 0);
+        } else {
+          if (diagonalAllowed)
+            options.onTiming?.('travel-fallback-readback', 0);
+          await moveTo({ x, y, z: safeZ }, travelOptions);
+        }
       }
       // After a lost sliding endpoint, XY is already correct but the tip is
       // still down. Establish release before reacquiring this same point.
-      await preflight({ x, y, z: zHigh }, `${label} approach`);
-      approach = await moveTo({ x, y, z: zHigh });
+      if (!combined) {
+        await preflight({ x, y, z: zHigh }, `${label} approach`);
+        approach = await moveTo({ x, y, z: zHigh });
+      }
+      options.onTiming?.('point-travel', performance.now() - travelStarted);
     } else if (fast) {
       approach = contactPoint(await host.currentPose(), tool.offsetMm);
     }
@@ -749,9 +798,38 @@ export async function runAutoExploration(
   // Require the current phone protocol before submitting the first motion.
   await observe('preflight', 0);
   const startContact = contactPoint(start, tool.offsetMm);
+  const initialStarted = performance.now();
   let first: TouchPoint | undefined;
+  const surfaceZ = options.initialSearchSurfaceZMm;
+  const localApproach =
+    surfaceZ === undefined ? undefined : surfaceZ + TRAVERSE_CLEARANCE_MM;
+  if (
+    fast &&
+    localApproach !== undefined &&
+    localApproach <= startContact.z - searchStepMm &&
+    localApproach - MAX_FAST_HEIGHT_RANGE_MM - TRAVERSE_CLEARANCE_MM >=
+      startContact.z - INITIAL_DESCENT_MM
+  ) {
+    try {
+      first = await touchAt(
+        startContact.x,
+        startContact.y,
+        localApproach,
+        'Initial touch near measured plane',
+        MAX_FAST_HEIGHT_RANGE_MM + TRAVERSE_CLEARANCE_MM,
+      );
+      options.onTiming?.('initial-local-hit', 0);
+    } catch (error) {
+      if (!(error instanceof RobotArmError) || error.code !== 'TOUCH_NOT_FOUND')
+        throw error;
+      options.onTiming?.('initial-fallback-no-touch', 0);
+      await moveTo(startContact);
+    }
+  } else if (fast && options.optimizeBatchTravel) {
+    options.onTiming?.('initial-fallback-no-local-window', 0);
+  }
   try {
-    first = await touchAt(
+    first ??= await touchAt(
       startContact.x,
       startContact.y,
       startContact.z,
@@ -783,12 +861,14 @@ export async function runAutoExploration(
         }
       }
   }
+  options.onTiming?.('initial-search', performance.now() - initialStarted);
   if (!first)
     throw new RobotArmError(
       'TOUCH_NOT_FOUND',
       'No screen touch was found within the search area; place the stylus closer to the centre and retry',
       409,
     );
+  hasInitialContact = true;
   // Bound later probes relative to the confirmed light press, and apply the
   // same floor to both search and final press targets.
   const safetyFloorZ = first.pressedZ - TOUCH_SAFETY_MARGIN_MM;

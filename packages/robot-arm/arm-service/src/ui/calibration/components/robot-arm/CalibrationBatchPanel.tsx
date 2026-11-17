@@ -100,12 +100,16 @@ export const CalibrationBatchPanel = forwardRef<
     cameraId?: string;
     /** Screens of the selected camera, already fetched by the workspace. */
     screens: readonly WorkstationScreenState[];
+    screenOrder: readonly Pick<
+      CalibrationBatchPlan['screens'][number],
+      'name'
+    >[];
     disabled: boolean;
     onChanged?: () => void | Promise<void>;
     onActiveChange?: (active: boolean) => void;
   }
 >(function CalibrationBatchPanel(
-  { api, cameraId, screens, disabled, onChanged, onActiveChange },
+  { api, cameraId, screens, screenOrder, disabled, onChanged, onActiveChange },
   ref,
 ) {
   const [batch, setBatch] = useState<CalibrationBatchState | null>();
@@ -113,7 +117,6 @@ export const CalibrationBatchPanel = forwardRef<
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string>();
   const [plan, setPlan] = useState<CalibrationBatchPlan>();
-  const [previewPlan, setPreviewPlan] = useState<CalibrationBatchPlan>();
   const [deletedCalibrations, setDeletedCalibrations] = useState<string[]>([]);
   const [samplingMode, setSamplingMode] =
     useState<CalibrationBatchSamplingMode>('standard');
@@ -159,34 +162,6 @@ export const CalibrationBatchPanel = forwardRef<
       clearInterval(timer);
     };
   }, [api]);
-  /*
-   * The order is what tells the operator which screen the taught reference
-   * belongs to. Read the same plan the start dialog uses, but never while a
-   * batch owns the workstation.
-   */
-  useEffect(() => {
-    if (
-      !cameraId ||
-      busyBatch ||
-      typeof api.calibrationBatchPlan !== 'function'
-    )
-      return;
-    let disposed = false;
-    const load = () => {
-      void api.calibrationBatchPlan(cameraId).then(
-        (next) => {
-          if (!disposed) setPreviewPlan(next);
-        },
-        () => undefined,
-      );
-    };
-    load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      disposed = true;
-      clearInterval(timer);
-    };
-  }, [api, cameraId, busyBatch]);
   const perform = async (work: () => Promise<unknown>) => {
     setWorking(true);
     setError(undefined);
@@ -377,10 +352,10 @@ export const CalibrationBatchPanel = forwardRef<
           </Button>
         )}
       </div>
-      {!showQueue && previewPlan && previewPlan.screens.length > 1 && (
+      {!showQueue && screenOrder.length > 1 && (
         <Typography.Text type="secondary">
           {t('Calibration order: {0}', [
-            previewPlan.screens.map((screen) => screen.name).join(' → '),
+            screenOrder.map((screen) => screen.name).join(' → '),
           ])}
         </Typography.Text>
       )}

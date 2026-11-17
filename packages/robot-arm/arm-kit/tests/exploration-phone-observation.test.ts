@@ -110,13 +110,11 @@ it.each([
   async (purpose, firstReply, intervalMs) => {
     const f = start(purpose);
     f.report(firstReply);
-    // The observation polls every 20 ms to receive the first reply.
-    await rstest.advanceTimersByTimeAsync(20 + intervalMs - 1);
+    await rstest.advanceTimersByTimeAsync(intervalMs - 1);
     expect(f.observation.step?.phase).toBe('prepare');
     await rstest.advanceTimersByTimeAsync(1);
     expect(f.observation.step?.phase).toBe('result');
     f.report(firstReply === 'ready' ? 'no_touch' : 'touched');
-    await rstest.advanceTimersByTimeAsync(20);
     await expect(f.result).resolves.toEqual(
       firstReply === 'ready' ? undefined : point,
     );
@@ -129,7 +127,7 @@ it('restores the full interval when coarse search detects a late contact', async
   await rstest.advanceTimersByTimeAsync(70);
   expect(f.observation.step?.phase).toBe('result');
   f.report('touched');
-  await rstest.advanceTimersByTimeAsync(119);
+  await rstest.advanceTimersByTimeAsync(99);
   expect(f.observation.step?.id).toBe('sample');
   await rstest.advanceTimersByTimeAsync(1);
   expect(f.observation.step?.id).toBe('sample-confirm');
@@ -138,6 +136,13 @@ it('restores the full interval when coarse search detects a late contact', async
   f.report('touched');
   await rstest.advanceTimersByTimeAsync(20);
   await expect(f.result).resolves.toEqual(point);
+});
+
+it('aborts immediately while waiting for a phone reply', async () => {
+  const f = start();
+  f.abort.abort();
+  await expect(f.result).rejects.toMatchObject({ name: 'AbortError' });
+  expect(f.observation.step).toBeUndefined();
 });
 
 it('does not turn a short touch overwritten between server polls into a clear descent', async () => {

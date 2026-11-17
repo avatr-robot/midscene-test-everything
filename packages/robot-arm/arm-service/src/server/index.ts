@@ -844,6 +844,8 @@ export async function startPlaygroundHost({
           return send(200, otherCamera ? null : current);
         if (input.action === 'plan')
           return send(200, await batch.plan(input.cameraId));
+        if (input.action === 'order')
+          return send(200, await batch.screenOrder(input.cameraId));
         if (input.action === 'screens')
           return send(200, await batch.screens(input.cameraId));
         if (input.action === 'start')

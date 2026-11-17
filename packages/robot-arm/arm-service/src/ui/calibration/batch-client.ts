@@ -29,6 +29,11 @@ export class BatchClient {
   calibrationBatchPlan(cameraId: string) {
     return this.request<CalibrationBatchPlan>('plan', { cameraId });
   }
+  screenOrder(signal?: AbortSignal) {
+    return this.request<
+      Pick<CalibrationBatchPlan['screens'][number], 'screenId' | 'name'>[]
+    >('order', {}, signal);
+  }
   screens(signal?: AbortSignal) {
     return this.request<WorkstationScreenState[]>('screens', {}, signal);
   }

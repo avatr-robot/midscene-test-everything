@@ -28,6 +28,8 @@ describe('first-time automatic exploration', () => {
     'fast-corner-inset-slide',
     'fast-height-limit-slide',
     'fast-tap',
+    'fast-batch-diagonal',
+    'fast-batch-clearance',
     'fast-slide',
     'fast-refine-stalled',
     'fast-adaptive-slide',
@@ -89,6 +91,7 @@ describe('first-time automatic exploration', () => {
       let delayedOnce = false;
       let delayedMoveCount = 0;
       const motions: CartesianPose[] = [];
+      const batchCase = mode.startsWith('fast-batch-');
       let actualPose = pose(100, -50, startZ);
       const finishedSampling = false;
       let missedSlide = false;
@@ -215,6 +218,11 @@ describe('first-time automatic exploration', () => {
       } as AutoExplorationHost['screenCalib'];
       const ctx: ApplicationContext = {
         tool: f.tool,
+        minimumTravelTipZMm: batchCase
+          ? mode === 'fast-batch-diagonal'
+            ? 34
+            : 50
+          : undefined,
         screen: {
           ...f.screen,
           physicalWidthMm: 0,
@@ -260,17 +268,24 @@ describe('first-time automatic exploration', () => {
           finalPress = step.name.endsWith(' press');
           refining = step.name.endsWith(' refine');
         },
+        preflightTravel: async () => undefined,
         move: async (
           target: CartesianPose,
           _ctx: unknown,
           speed: MotionSpeed,
           acceleration: MotionAcceleration,
         ) => {
-          const factor = isFast || finalPress ? 0.25 : 0.1;
-          expect(speed).toEqual(scaleSpeed(ctx.screen.actionSpeed, factor));
-          expect(acceleration).toEqual(
-            scaleAcceleration(ctx.screen.actionAcceleration, factor),
-          );
+          // Probe steps use the contact factor; fast travel legs use the
+          // faster travel factor (B2), and a standard press uses its own.
+          const factors = isFast ? [0.25, 0.6] : [0.1, 0.25];
+          expect(
+            factors.map((factor) => scaleSpeed(ctx.screen.actionSpeed, factor)),
+          ).toContainEqual(speed);
+          expect(
+            factors.map((factor) =>
+              scaleAcceleration(ctx.screen.actionAcceleration, factor),
+            ),
+          ).toContainEqual(acceleration);
           if (finalPress) finalPressCount++;
           finalPress = false;
           const measured = structuredClone(target);
@@ -336,6 +351,12 @@ describe('first-time automatic exploration', () => {
       };
       const job = runAutoExploration(host as never, session, ctx, {
         startPose: pose(100, -50, startZ),
+        optimizeBatchTravel: batchCase,
+        initialSearchSurfaceZMm: batchCase
+          ? mode === 'fast-batch-diagonal'
+            ? 30
+            : 39
+          : undefined,
         ...(isFast
           ? {
               mode: 'fast-plane' as const,
@@ -384,6 +405,20 @@ describe('first-time automatic exploration', () => {
         const collection = await job;
         expect(collection.probes).toHaveLength(3);
         expect(collection.grid).toHaveLength(isFast ? 6 : 9);
+        if (batchCase) {
+          const merged = mode === 'fast-batch-diagonal';
+          const tipPath = motions.map((motion) =>
+            contactPoint(motion, f.tool.offsetMm),
+          );
+          expect(tipPath[0]?.z).toBe(merged ? 40 : 49);
+          expect(tipPath.some((point) => point.z === startZ)).toBe(!merged);
+          expect(
+            tipPath.slice(1).some((point, index) => {
+              const prior = tipPath[index];
+              return point.x !== prior.x && point.z !== prior.z;
+            }),
+          ).toBe(merged);
+        }
         if (mode === 'standard') expect(finalPressCount).toBe(12);
         const fit = () =>
           fitExploration(collection, f.tool, f.runtime.capabilities, {
