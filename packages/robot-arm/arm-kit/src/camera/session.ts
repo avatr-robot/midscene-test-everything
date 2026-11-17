@@ -406,9 +406,10 @@ export class CameraSession implements CalibrationVision {
   async correctedFrame(
     correction: CameraCorrection,
     options: { width: number; height: number },
+    source?: Buffer,
   ) {
     validateCameraCorrection(correction);
-    const jpeg = await this.rawFrame();
+    const jpeg = source ?? (await this.rawFrame());
     const size = jpegSize(jpeg);
     if (
       size.width !== correction.sourceWidth ||

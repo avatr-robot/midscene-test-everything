@@ -810,7 +810,8 @@ export class CalibrationBatch {
               if (this.choice) break;
             }
             if (this.choice) throw new Error('Batch screen changed');
-            if (!host.service.setup().mapping) await host.alignForBatch(signal);
+            if (!host.service.setup().mapping)
+              await host.alignForBatch(signal, state.samplingMode === 'slide');
             this.check(signal);
             let session = await host.service.create({ batch: true });
             attemptId = session.id;
@@ -1369,7 +1370,10 @@ export class CalibrationBatch {
           ) {
             await host.service.command(session.id, 'verify-boundary', true);
           } else if (row.status === 'awaiting-mapping')
-            await host.alignForBatch(this.abort!.signal);
+            await host.alignForBatch(
+              this.abort!.signal,
+              this.state?.samplingMode === 'slide',
+            );
           else if (row.status === 'awaiting-placement') {
             if ((await this.runtime.state()).state.dragMode)
               await this.runtime.exitDragMode();
