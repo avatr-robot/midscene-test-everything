@@ -56,6 +56,8 @@ export class AutomaticCapture {
       : this.recentObservations;
   }
   private captured = false;
+  /** Set when the page advertised streaming but stopped delivering frames. */
+  private streamingUnsupported = false;
   private latest?: CalibrationPageUpdate;
   private lastSeen = 0;
   private pageId?: string;
@@ -121,6 +123,7 @@ export class AutomaticCapture {
   }
   resetStability() {
     this.invalid = 'The phone page changed during automatic collection';
+    this.observation?.notify();
   }
   receive(update: CalibrationPageUpdate) {
     if (this.pageId && this.pageId !== update.pageId) this.resetStability();
@@ -186,6 +189,7 @@ export class AutomaticCapture {
     this.localPoints.length = 0;
     this.invalid = undefined;
     this.upstreamResult = undefined;
+    this.streamingUnsupported = false;
     this.recentObservations.length = 0;
     this.recentCoarseObservations.length = 0;
     let requestedTipZMm = contactPoint(home, this.offset).z;
@@ -373,6 +377,8 @@ export class AutomaticCapture {
             this.lastSeen,
             measuredTipZMm,
             motionTiming,
+            this.latest?.streamStepFeedback === true &&
+              !this.streamingUnsupported,
           );
           motionTiming = undefined;
           this.observation = observation;
@@ -390,6 +396,16 @@ export class AutomaticCapture {
               pointerCount: point ? 1 : 0,
               screen: point ? project(config.webToImage, point) : null,
             };
+          } catch (error) {
+            // The page claimed streamed results but did not produce them. Retry
+            // this run through request/response instead of failing every step.
+            if (
+              this.latest?.streamStepFeedback === true &&
+              error instanceof RobotArmError &&
+              error.code === 'PHONE_STEP_TIMEOUT'
+            )
+              this.streamingUnsupported = true;
+            throw error;
           } finally {
             const evidence = observation.diagnostics();
             this.recentObservations.push(evidence);

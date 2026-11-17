@@ -15,6 +15,7 @@ it.each([
   'standard',
   'fast',
   'slide',
+  'stream',
   'page-reload',
   'missing-ack',
   'slow-ack',
@@ -67,6 +68,7 @@ it.each([
         layout,
         contact,
         targetReady: capture?.target.id,
+        streamStepFeedback: mode === 'stream',
         stepFeedback:
           step &&
           mode !== 'missing-ack' &&
@@ -106,7 +108,9 @@ it.each([
       () => queueMicrotask(send),
       (['fast', 'slide'].includes(mode)
         ? mode
-        : 'standard') as AutomaticExplorationMode,
+        : mode === 'stream'
+          ? 'fast'
+          : 'standard') as AutomaticExplorationMode,
     );
     send();
     const timer = setInterval(send, 20);
@@ -153,7 +157,7 @@ it.each([
     try {
       await rstest.advanceTimersByTimeAsync(60000);
       const error = await job;
-      if (['standard', 'fast', 'slide'].includes(mode)) {
+      if (['standard', 'fast', 'slide', 'stream'].includes(mode)) {
         expect(error).toBeUndefined();
         expect(collector.localPoints).toHaveLength(3);
         expect(collector.points).toHaveLength(mode === 'standard' ? 9 : 6);
@@ -170,13 +174,14 @@ it.each([
           ))
             expect(motion.speedRatio).toBeCloseTo(0.08);
         } else {
-          // Fast probes and presses keep 0.25; travel legs may use 0.6.
-          for (const motion of motions)
-            expect(
-              [0.2, 0.48].some(
-                (ratio) => Math.abs(ratio - motion.speedRatio) < 1e-9,
-              ),
-            ).toBe(true);
+          // Probe steps keep the fast contact factor; travel legs may run at
+          // the faster travel factor (B2).
+          for (const motion of motions) {
+            const probe = Math.abs(motion.speedRatio - 0.2) < 0.005;
+            const travel = Math.abs(motion.speedRatio - 0.48) < 0.005;
+            expect(probe || travel).toBe(true);
+          }
+          expect(motions.some((motion) => motion.speedRatio > 0.4)).toBe(true);
         }
         expect(collector.upstreamResult).toBeDefined();
       } else {

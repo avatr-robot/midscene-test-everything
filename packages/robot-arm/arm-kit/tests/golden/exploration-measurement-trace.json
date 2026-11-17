@@ -184,31 +184,6 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 200,
@@ -228,33 +203,11 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 200,
           "y": 400
         }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
       },
       {
         "outcome": "no_touch"
@@ -267,24 +220,7 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 240,
-          "y": 400
-        }
-      },
-      {
         "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 320
-        }
       },
       {
         "outcome": "touched",
@@ -300,19 +236,6 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 80
-        }
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 40,
@@ -323,26 +246,9 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 40,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
           "y": 80
         }
       },
@@ -363,13 +269,6 @@
       {
         "outcome": "touched",
         "point": {
-          "x": 360,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
           "x": 40,
           "y": 400
         }
@@ -378,27 +277,6 @@
         "outcome": "touched",
         "point": {
           "x": 40,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
           "y": 720
         }
       },
@@ -511,7 +389,7 @@
     "calls": {
       "moves": 27,
       "reads": 4,
-      "phoneResults": 52
+      "phoneResults": 26
     },
     "timing": {
       "phone-confirmation": 26,
@@ -1537,44 +1415,20 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 200,
           "y": 400
         }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
       },
       {
         "outcome": "touched",
@@ -1599,60 +1453,6 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 240,
-          "y": 400
-        }
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 240,
@@ -1669,42 +1469,11 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 240,
           "y": 400
         }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 240,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
       },
       {
         "outcome": "no_touch"
@@ -1727,6 +1496,15 @@
           "x": 200,
           "y": 320
         }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
       },
       {
         "outcome": "touched",
@@ -1756,59 +1534,12 @@
       {
         "outcome": "touched",
         "point": {
-          "x": 200,
-          "y": 320
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 320
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
           "x": 40,
           "y": 80
         }
+      },
+      {
+        "outcome": "no_touch"
       },
       {
         "outcome": "touched",
@@ -1831,54 +1562,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -1901,19 +1584,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -1927,16 +1597,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -1945,25 +1605,6 @@
           "x": 200,
           "y": 80
         }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 80
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
       },
       {
         "outcome": "no_touch"
@@ -1985,13 +1626,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 80
-        }
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -1999,22 +1633,6 @@
       },
       {
         "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 80
-        }
       },
       {
         "outcome": "touched",
@@ -2045,22 +1663,11 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
       },
       {
         "outcome": "no_touch"
@@ -2073,16 +1680,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -2093,44 +1690,7 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 400
-        }
-      },
-      {
         "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 400
-        }
       },
       {
         "outcome": "touched",
@@ -2158,19 +1718,11 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
       },
       {
         "outcome": "no_touch"
@@ -2183,16 +1735,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -2203,16 +1745,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -2221,48 +1753,6 @@
           "x": 200,
           "y": 400
         }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
       },
       {
         "outcome": "no_touch"
@@ -2287,16 +1777,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 400
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -2307,30 +1787,10 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 400
-        }
-      },
-      {
         "outcome": "no_touch"
       },
       {
         "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 400
-        }
       },
       {
         "outcome": "touched",
@@ -2361,60 +1821,6 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 40,
-          "y": 720
-        }
-      },
-      {
         "outcome": "touched",
         "point": {
           "x": 40,
@@ -2435,59 +1841,12 @@
         }
       },
       {
+        "outcome": "no_touch"
+      },
+      {
         "outcome": "touched",
         "point": {
           "x": 40,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 200,
           "y": 720
         }
       },
@@ -2517,6 +1876,15 @@
         }
       },
       {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
         "outcome": "touched",
         "point": {
           "x": 200,
@@ -2542,19 +1910,11 @@
         "outcome": "no_touch"
       },
       {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
       },
       {
         "outcome": "no_touch"
@@ -2567,16 +1927,6 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
         "outcome": "no_touch"
       },
       {
@@ -2587,44 +1937,7 @@
         }
       },
       {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 720
-        }
-      },
-      {
         "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 720
-        }
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "no_touch"
-      },
-      {
-        "outcome": "touched",
-        "point": {
-          "x": 360,
-          "y": 720
-        }
       },
       {
         "outcome": "touched",
@@ -2762,7 +2075,7 @@
     "calls": {
       "moves": 163,
       "reads": 11,
-      "phoneResults": 286
+      "phoneResults": 143
     },
     "timing": {
       "phone-confirmation": 143,
@@ -2770,6 +2083,1473 @@
       "movl": 163,
       "initial-search": 1,
       "point-travel": 11
+    }
+  },
+  "stream": {
+    "moves": [
+      {
+        "x": 50,
+        "y": -50,
+        "z": 38,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 36,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 34,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 32,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 30,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 34,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 31,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 30.5,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 30.25,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 29.875,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -50,
+        "z": 39.875,
+        "speedRatio": 0.48
+      },
+      {
+        "x": 60,
+        "y": -50,
+        "z": 39.875,
+        "speedRatio": 0.48
+      },
+      {
+        "x": 60,
+        "y": -50,
+        "z": 29.875,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 60,
+        "y": -50,
+        "z": 39.875,
+        "speedRatio": 0.48
+      },
+      {
+        "x": 50,
+        "y": -40,
+        "z": 39.875,
+        "speedRatio": 0.48
+      },
+      {
+        "x": 50,
+        "y": -40,
+        "z": 29.875,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 50,
+        "y": -40,
+        "z": 39.875,
+        "speedRatio": 0.48
+      },
+      {
+        "x": 10,
+        "y": -10,
+        "z": 39.875,
+        "speedRatio": 0.48
+      },
+      {
+        "x": 10,
+        "y": -10,
+        "z": 29.875,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 10,
+        "y": -10,
+        "z": 29.625,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 10,
+        "y": -10,
+        "z": 35.125,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 10,
+        "y": -10,
+        "z": 29.5,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 90,
+        "y": -10,
+        "z": 29.749,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 90,
+        "y": -50,
+        "z": 29.81,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 10,
+        "y": -50,
+        "z": 29.688,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 10,
+        "y": -90,
+        "z": 29.749,
+        "speedRatio": 0.2
+      },
+      {
+        "x": 90,
+        "y": -90,
+        "z": 29.799,
+        "speedRatio": 0.2
+      }
+    ],
+    "phoneResults": [
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 240,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 200,
+          "y": 320
+        }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "no_touch"
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 80
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 400
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 40,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      },
+      {
+        "outcome": "touched",
+        "point": {
+          "x": 360,
+          "y": 720
+        }
+      }
+    ],
+    "samples": [
+      {
+        "role": "probe",
+        "x": 50,
+        "y": -50,
+        "z": 30.125,
+        "screenX": 200,
+        "screenY": 400,
+        "zSource": "measured"
+      },
+      {
+        "role": "probe",
+        "x": 60,
+        "y": -50,
+        "z": 30.125,
+        "screenX": 240,
+        "screenY": 400,
+        "zSource": "predicted"
+      },
+      {
+        "role": "probe",
+        "x": 50,
+        "y": -40,
+        "z": 30.125,
+        "screenX": 200,
+        "screenY": 320,
+        "zSource": "predicted"
+      },
+      {
+        "role": "fit",
+        "x": 10,
+        "y": -10,
+        "z": 29.75,
+        "screenX": 40,
+        "screenY": 80,
+        "zSource": "measured"
+      },
+      {
+        "role": "fit",
+        "x": 90,
+        "y": -10,
+        "z": 29.999,
+        "screenX": 360,
+        "screenY": 80,
+        "zSource": "predicted"
+      },
+      {
+        "role": "validation",
+        "x": 90,
+        "y": -50,
+        "z": 30.06,
+        "screenX": 360,
+        "screenY": 400,
+        "zSource": "predicted"
+      },
+      {
+        "role": "validation",
+        "x": 10,
+        "y": -50,
+        "z": 29.938,
+        "screenX": 40,
+        "screenY": 400,
+        "zSource": "predicted"
+      },
+      {
+        "role": "fit",
+        "x": 10,
+        "y": -90,
+        "z": 29.999,
+        "screenX": 40,
+        "screenY": 720,
+        "zSource": "predicted"
+      },
+      {
+        "role": "fit",
+        "x": 90,
+        "y": -90,
+        "z": 30.049,
+        "screenX": 360,
+        "screenY": 720,
+        "zSource": "predicted"
+      }
+    ],
+    "evidence": {
+      "planeSource": "assumed-horizontal",
+      "planeRmseMm": 0.1875,
+      "measuredPlaneSamples": 2,
+      "predictedSamples": 5,
+      "predictedFraction": 0.7143,
+      "predictedHeightResidualMaxMm": 0.1875,
+      "measuredHeightRangeMm": 0.375,
+      "validationMaxMm": 0,
+      "validationHeightMaxMm": null,
+      "surfaceMaxMm": 0.1875,
+      "gridRmsPx": 0,
+      "gridRmsMm": 0,
+      "coverage": 0.6424
+    },
+    "calls": {
+      "moves": 27,
+      "reads": 4,
+      "phoneResults": 239
+    },
+    "timing": {
+      "phone-confirmation": 26,
+      "probe-move": 15,
+      "movl": 27,
+      "initial-search": 1,
+      "point-travel": 3
     }
   }
 }

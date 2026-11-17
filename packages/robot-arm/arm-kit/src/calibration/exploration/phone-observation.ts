@@ -13,6 +13,8 @@ import type { ProbePurpose } from './types.js';
 const CONFIRM_INTERVAL_MS = 100;
 const COARSE_NO_TOUCH_CONFIRM_INTERVAL_MS = 50;
 const BRIEF_CONTACT_GAP_MS = 150;
+/** Give a streaming page one retry window before falling back to request/response. */
+const STREAM_CONFIRM_TIMEOUT_MS = 500;
 const MAX_BRIEF_CONTACT_GAPS = 2;
 type Step = NonNullable<CalibrationPointProgress['step']>;
 type Feedback = NonNullable<CalibrationPageUpdate['stepFeedback']>;
@@ -66,11 +68,14 @@ export class StationaryPhoneObservation {
   private allowBriefContactGaps = false;
   private contactGap?: { point: WebPoint; startedAt: number };
   private recoveredContactGaps = 0;
+  private wake?: () => void;
   private failure?:
     | 'multiple_contacts'
     | 'pointer_cancelled'
     | 'intermittent_contact'
     | 'unstable';
+  /** Accepted result frames for the active step, oldest first. */
+  private readonly readings: Array<{ at: number; reading: Reading }> = [];
 
   constructor(
     sampleId: string,
@@ -81,6 +86,8 @@ export class StationaryPhoneObservation {
     receivedAt: number,
     measuredTipZMm?: number,
     motionTiming?: AutomaticCaptureMotionTiming,
+    /** The page streams an active step instead of answering each read. */
+    private readonly streaming = false,
   ) {
     this.sequence = sequence;
     this.receivedAt = receivedAt;
@@ -106,8 +113,13 @@ export class StationaryPhoneObservation {
     };
   }
 
+  notify() {
+    this.wake?.();
+  }
+
   receive(update: CalibrationPageUpdate) {
     if (update.sequence <= this.sequence) return;
+    this.notify();
     this.sequence = update.sequence;
     this.receivedAt = performance.now();
     const reply = update.stepFeedback;
@@ -187,6 +199,13 @@ export class StationaryPhoneObservation {
       point: point && { ...point },
     };
     if (
+      this.streaming &&
+      this.step &&
+      reply.id === this.step.id &&
+      reply.phase === this.step.phase
+    )
+      this.readings.push({ at: this.receivedAt, reading: this.current });
+    if (
       !this.firstReply &&
       reply.id === this.step.id &&
       reply.phase === this.step.phase
@@ -241,10 +260,11 @@ export class StationaryPhoneObservation {
       });
     };
     const check = () => {
+      host.signal.throwIfAborted();
       host.check();
       if (
         this.contactGap &&
-        performance.now() - this.contactGap.startedAt > BRIEF_CONTACT_GAP_MS
+        performance.now() - this.contactGap.startedAt >= BRIEF_CONTACT_GAP_MS
       )
         this.failure ??= 'intermittent_contact';
       if (this.failure === 'multiple_contacts')
@@ -277,12 +297,94 @@ export class StationaryPhoneObservation {
       publish();
       while (!this.firstReply || this.contactGap) {
         check();
-        await delay(20, undefined, { signal: host.signal });
+        const now = performance.now();
+        const freshnessCheckAt =
+          this.receivedAt + CALIBRATION_PHONE_POLICY.measurementFreshMs + 1;
+        const wakeAt = Math.min(
+          deadline,
+          freshnessCheckAt > now ? freshnessCheckAt : Number.POSITIVE_INFINITY,
+          this.contactGap
+            ? this.contactGap.startedAt + BRIEF_CONTACT_GAP_MS
+            : Number.POSITIVE_INFINITY,
+        );
+        await new Promise<void>((resolve) => {
+          const wake = () => {
+            clearTimeout(timer);
+            host.signal.removeEventListener('abort', wake);
+            this.wake = undefined;
+            resolve();
+          };
+          const timer = setTimeout(wake, Math.max(1, Math.ceil(wakeAt - now)));
+          this.wake = wake;
+          host.signal.addEventListener('abort', wake, { once: true });
+          if (host.signal.aborted) wake();
+        });
       }
       check();
       return this.firstReply;
     };
+    /**
+     * Streaming path: arm the step once, then accept the same rule from frames
+     * the page pushes continuously. Two frames must agree and be at least
+     * CONFIRM_INTERVAL_MS apart, and the settle window still starts at
+     * `started + settleMs`.
+     */
+    const streamed = async () => {
+      const id = this.evidence.sampleId;
+      await read(id, 'prepare');
+      this.readings.length = 0;
+      this.firstReply = undefined;
+      this.step = { id, phase: 'result', contactMode: 'current' };
+      this.issued.set(`${id}/result`, {});
+      publish();
+      // A page that advertises streaming but stops sending frames must not
+      // burn the full request timeout: two frames arrive within ~120 ms at
+      // 25 Hz, so a short budget is enough to tell the two apart.
+      const streamDeadline =
+        this.started + settleMs + STREAM_CONFIRM_TIMEOUT_MS;
+      for (;;) {
+        check();
+        const settledAt = this.started + settleMs;
+        const ready = this.readings.filter((entry) => entry.at >= settledAt);
+        if (ready.length >= 2) {
+          const latest = ready[ready.length - 1];
+          const earlier = ready.find(
+            (entry) => latest.at - entry.at >= CONFIRM_INTERVAL_MS,
+          );
+          if (
+            earlier &&
+            this.current &&
+            matches(earlier.reading, latest.reading) &&
+            matches(latest.reading, this.current)
+          ) {
+            this.evidence.outcome = latest.reading.point
+              ? 'touched'
+              : 'no_touch';
+            return latest.reading.point;
+          }
+        }
+        if (performance.now() >= streamDeadline)
+          throw new RobotArmError(
+            'PHONE_STEP_TIMEOUT',
+            'The phone page advertised streamed results but did not confirm the step',
+            504,
+          );
+        await new Promise<void>((resolve) => {
+          const wake = () => {
+            clearTimeout(timer);
+            host.signal.removeEventListener('abort', wake);
+            this.wake = undefined;
+            resolve();
+          };
+          const timer = setTimeout(wake, 25);
+          this.wake = wake;
+          host.signal.addEventListener('abort', wake, { once: true });
+          if (host.signal.aborted) wake();
+        });
+      }
+    };
     try {
+      if (this.streaming) return await streamed();
       const id = this.evidence.sampleId;
       let previous = await read(id, 'prepare');
       // Two independent browser reads while the arm is still. A late change gets one recheck.
@@ -323,6 +425,7 @@ export class StationaryPhoneObservation {
       );
     } finally {
       this.step = undefined;
+      this.readings.length = 0;
     }
   }
 }

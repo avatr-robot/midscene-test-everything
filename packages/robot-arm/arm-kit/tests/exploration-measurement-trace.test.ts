@@ -38,11 +38,16 @@ const round = (value: number, digits = 3) =>
 
 /** Work budget per scenario; a speed change may only lower these. */
 const BUDGETS: Record<string, { moves: number; phoneResults: number }> = {
-  fast: { moves: 27, phoneResults: 52 },
-  standard: { moves: 163, phoneResults: 286 },
+  fast: { moves: 27, phoneResults: 26 },
+  standard: { moves: 163, phoneResults: 143 },
+  // Streaming trades host requests for pushed frames: the page sends several
+  // frames per confirmation, but the host only issues one prepare request.
+  stream: { moves: 27, phoneResults: 300 },
 };
 
-async function trace(mode: 'fast' | 'standard') {
+type Scenario = 'fast' | 'standard' | 'stream';
+
+async function trace(mode: Scenario) {
   const f = await fixture();
   rstest.useFakeTimers({
     toFake: [
@@ -95,6 +100,7 @@ async function trace(mode: 'fast' | 'standard') {
       layout,
       contact: touching ? { id: 'pen', motionRevision: 0, point } : undefined,
       targetReady: capture?.target.id,
+      streamStepFeedback: mode === 'stream',
       stepFeedback: step
         ? {
             ...step,
@@ -118,7 +124,7 @@ async function trace(mode: 'fast' | 'standard') {
     layout,
     f.tool.offsetMm,
     () => queueMicrotask(send),
-    (mode === 'fast' ? 'slide' : 'standard') as AutomaticExplorationMode,
+    (mode === 'standard' ? 'standard' : 'slide') as AutomaticExplorationMode,
   );
   send();
   const timer = setInterval(send, 20);
@@ -188,7 +194,7 @@ async function trace(mode: 'fast' | 'standard') {
         toolGeometryRevision: f.tool.geometryRevision,
         screenGeometryRevision: f.screen.geometryRevision,
       },
-      mode === 'fast',
+      mode !== 'standard',
     );
     const toSample = (point: {
       contact: { x: number; y: number; z: number };
@@ -257,10 +263,10 @@ async function trace(mode: 'fast' | 'standard') {
   }
 }
 
-it.each(['fast', 'standard'])(
+it.each(['fast', 'standard', 'stream'])(
   'keeps the %s measurement trace and work budget stable',
   async (mode) => {
-    const measured = await trace(mode as 'fast' | 'standard');
+    const measured = await trace(mode as Scenario);
     const goldenPath = GOLDEN;
     const readGolden = async () => {
       try {
@@ -288,6 +294,13 @@ it.each(['fast', 'standard'])(
     const budget = BUDGETS[mode];
     expect(measured.moves).toBeLessThanOrEqual(budget.moves);
     expect(measured.phoneResults).toBeLessThanOrEqual(budget.phoneResults);
+    // Streaming must not change what is measured, only how it is reported.
+    if (mode === 'stream') {
+      expect(measured.trace.samples).toEqual(golden.fast.samples);
+      expect(measured.trace.moves).toEqual(golden.fast.moves);
+      expect(measured.trace.evidence).toEqual(golden.fast.evidence);
+      expect(measured.trace.timing).toEqual(golden.fast.timing);
+    }
   },
   40000,
 );

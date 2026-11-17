@@ -181,6 +181,14 @@ export class CalibrationPhoneSession {
         'INVALID_PHONE_TOUCH',
         'Invalid touch diagnostics version',
       );
+    if (
+      input.streamStepFeedback !== undefined &&
+      typeof input.streamStepFeedback !== 'boolean'
+    )
+      throw new RobotArmError(
+        'INVALID_PHONE_TOUCH',
+        'Invalid step streaming capability',
+      );
     validateLayout(input.layout, this.markerCodes);
     const validPoint = (p: WebPoint) =>
       p &&
