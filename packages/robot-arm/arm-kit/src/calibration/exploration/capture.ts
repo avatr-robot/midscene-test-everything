@@ -178,6 +178,7 @@ export class AutomaticCapture {
       tool: ToolProfile;
       webToImage: number[];
       minimumTravelTipZMm?: number;
+      onTiming?(event: string, elapsedMs: number): void;
     },
   ) {
     this.reference = structuredClone(home);
@@ -418,6 +419,7 @@ export class AutomaticCapture {
         mode: this.mode === 'standard' ? 'standard' : 'fast-horizontal',
         collection: this.mode === 'slide' ? 'slide' : 'tap',
         horizontalConfirmed: this.mode !== 'standard',
+        onTiming: config.onTiming,
       },
     );
     this.captured = true;

@@ -160,6 +160,7 @@ export async function runAutoExploration(
   options: AutoExplorationOptions,
 ) {
   const fast = options.mode === 'fast-horizontal';
+  const timing = options.onTiming;
   let recoverySteps = 0;
   if (fast && session.auto)
     session.auto.fastAdaptation = {
@@ -214,32 +215,40 @@ export async function runAutoExploration(
     motion = moveOptions,
   ) => {
     const pose = poseAt(contact);
-    await assertPage();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let measured: CartesianPose | undefined;
+    const started = performance.now();
     try {
-      measured = await Promise.race([
-        host.move(pose, ctx, motion.speed, motion.acceleration),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            Promise.resolve(host.stop?.()).catch(() => undefined);
-            reject(
-              new RobotArmError(
-                'AUTO_MOVE_TIMEOUT',
-                `The robot did not complete the step at Z ${contact.z.toFixed(1)} mm within ${STEP_TIMEOUT_MS / 1000} s; the automatic exploration was stopped`,
-                504,
-              ),
-            );
-          }, STEP_TIMEOUT_MS);
-        }),
-      ]);
+      await assertPage();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let measured: CartesianPose | undefined;
+      try {
+        measured = await Promise.race([
+          host.move(pose, ctx, motion.speed, motion.acceleration),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              Promise.resolve(host.stop?.()).catch(() => undefined);
+              reject(
+                new RobotArmError(
+                  'AUTO_MOVE_TIMEOUT',
+                  `The robot did not complete the step at Z ${contact.z.toFixed(1)} mm within ${STEP_TIMEOUT_MS / 1000} s; the automatic exploration was stopped`,
+                  504,
+                ),
+              );
+            }, STEP_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      await host.stable(pose, ctx);
+      // Always report the readback: a commanded contact height is not evidence,
+      // and the safety floor must be checked against where the tool actually is.
+      return contactPoint(
+        measured ?? (await host.currentPose()),
+        tool.offsetMm,
+      );
     } finally {
-      if (timer) clearTimeout(timer);
+      timing?.('movl', performance.now() - started);
     }
-    await host.stable(pose, ctx);
-    // Always report the readback: a commanded contact height is not evidence,
-    // and the safety floor must be checked against where the tool actually is.
-    return contactPoint(measured ?? (await host.currentPose()), tool.offsetMm);
   };
 
   const page = structuredClone(
@@ -360,16 +369,21 @@ export async function runAutoExploration(
     settleMs = searchWaitMs,
     allowBriefContactGaps?: boolean,
   ) => {
+    const started = performance.now();
     try {
-      return await observeOnce(purpose, settleMs, allowBriefContactGaps);
-    } catch (error) {
-      if (
-        !(error instanceof RobotArmError) ||
-        error.code !== 'PHONE_STEP_TIMEOUT'
-      )
-        throw error;
-      host.check();
-      return observeOnce(purpose, settleMs, allowBriefContactGaps);
+      try {
+        return await observeOnce(purpose, settleMs, allowBriefContactGaps);
+      } catch (error) {
+        if (
+          !(error instanceof RobotArmError) ||
+          error.code !== 'PHONE_STEP_TIMEOUT'
+        )
+          throw error;
+        host.check();
+        return observeOnce(purpose, settleMs, allowBriefContactGaps);
+      }
+    } finally {
+      timing?.('phone-confirmation', performance.now() - started);
     }
   };
   const touchAt = async (
@@ -418,6 +432,7 @@ export async function runAutoExploration(
     const probeAt = async (z: number, name: string, motion = moveOptions) => {
       checkDepth(z, name);
       await preflight({ x, y, z }, name, motion);
+      timing?.('probe-move', 0);
       const measured = await moveTo({ x, y, z }, motion);
       checkDepth(z, name, measured.z);
       return measured;
@@ -463,6 +478,7 @@ export async function runAutoExploration(
     await assertPage();
     let approach = { x, y, z: zHigh };
     if (!skipApproach) {
+      const travelStarted = performance.now();
       const current = contactPoint(await host.currentPose(), tool.offsetMm);
       const safeZ = Math.max(
         current.z + TRAVERSE_CLEARANCE_MM,
@@ -483,6 +499,7 @@ export async function runAutoExploration(
         await preflight({ x, y, z: zHigh }, `${label} approach`);
         approach = await moveTo({ x, y, z: zHigh });
       }
+      timing?.('point-travel', performance.now() - travelStarted);
     } else if (fast) {
       approach = contactPoint(await host.currentPose(), tool.offsetMm);
     }
@@ -752,6 +769,7 @@ export async function runAutoExploration(
   // Require the current phone protocol before submitting the first motion.
   await observe('preflight', 0);
   const startContact = contactPoint(start, tool.offsetMm);
+  const initialStarted = performance.now();
   let first: SampledTouch | undefined;
   try {
     first = await touchAt(
@@ -786,6 +804,7 @@ export async function runAutoExploration(
         }
       }
   }
+  timing?.('initial-search', performance.now() - initialStarted);
   if (!first)
     throw new RobotArmError(
       'TOUCH_NOT_FOUND',

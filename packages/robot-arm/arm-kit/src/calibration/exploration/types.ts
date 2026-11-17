@@ -114,6 +114,8 @@ export interface AutoExplorationOptions {
   mode?: 'standard' | 'fast-horizontal';
   collection?: 'tap' | 'slide';
   horizontalConfirmed?: boolean;
+  /** Optional timing sink; events carry the elapsed wall time of one stage. */
+  onTiming?(event: string, elapsedMs: number): void;
 }
 export interface AutoExplorationHost {
   currentPose(): Promise<CartesianPose>;

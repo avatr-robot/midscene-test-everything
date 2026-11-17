@@ -312,8 +312,11 @@ describe('first-time automatic exploration', () => {
             expect(previousHeld).toBe(false);
         },
       };
+      const samplingTiming = new Map<string, number>();
       const job = runAutoExploration(host as never, session, ctx, {
         startPose: pose(100, -50, startZ),
+        onTiming: (event) =>
+          samplingTiming.set(event, (samplingTiming.get(event) ?? 0) + 1),
         ...(isFast
           ? {
               mode: 'fast-horizontal' as const,
@@ -376,6 +379,12 @@ describe('first-time automatic exploration', () => {
           return;
         }
         const result = fit();
+        // Timing events are the evidence a speed change is read from.
+        expect(samplingTiming.get('movl')).toBeGreaterThan(0);
+        expect(samplingTiming.get('phone-confirmation')).toBeGreaterThan(0);
+        expect(samplingTiming.get('initial-search')).toBe(1);
+        if (isFast)
+          expect(samplingTiming.get('point-travel')).toBeGreaterThan(0);
         // Predicted press heights may locate the next move, never the plane.
         const fitPoints = [
           ...collection.probes,

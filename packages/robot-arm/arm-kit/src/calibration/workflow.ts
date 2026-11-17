@@ -1848,6 +1848,14 @@ export class CalibrationWorkflow {
             409,
           );
       };
+      const samplingTiming = new Map<string, { count: number; ms: number }>();
+      const trackTiming = (event: string, elapsedMs: number) => {
+        const previous = samplingTiming.get(event) ?? { count: 0, ms: 0 };
+        samplingTiming.set(event, {
+          count: previous.count + 1,
+          ms: previous.ms + elapsedMs,
+        });
+      };
       try {
         await measurements.run(
           {
@@ -1870,6 +1878,7 @@ export class CalibrationWorkflow {
                 : Number.NEGATIVE_INFINITY,
               this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
             ),
+            onTiming: trackTiming,
             screen: {
               ...input.motion!,
               id: s.id,
@@ -1888,7 +1897,9 @@ export class CalibrationWorkflow {
         await this.assertMechanicalFrame(true);
         checkCollecting();
         this.fitMeasurements();
+        this.logSamplingTiming(s.id, samplingTiming);
       } catch (error) {
+        this.logSamplingTiming(s.id, samplingTiming);
         if (
           !lastMoveConfirmed ||
           !isRobotArmError(error) ||
@@ -2009,6 +2020,27 @@ export class CalibrationWorkflow {
             : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }
     this.changed();
+  }
+
+  /**
+   * Sampling stages are a fixed cost; log them per attempt so a speed change can
+   * be read off one normal run instead of a dedicated experiment.
+   */
+  private logSamplingTiming(
+    attemptId: string,
+    timing: ReadonlyMap<string, { count: number; ms: number }>,
+  ) {
+    if (!timing.size) return;
+    log('Automatic sampling timing', {
+      attemptId,
+      deviceId: this.options.deviceId,
+      timing: Object.fromEntries(
+        [...timing].map(([event, entry]) => [
+          event,
+          { count: entry.count, ms: Math.round(entry.ms) },
+        ]),
+      ),
+    });
   }
 
   private fitMeasurements() {
