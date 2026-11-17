@@ -130,15 +130,22 @@ export interface Mg400Options {
    * yields early to the 30004 stream (see `isSampleReusable`).
    */
   statePollIntervalMs?: number;
+  /**
+   * Send `RobotMode()`, `GetErrorID()` and `GetPose()` as one dashboard write.
+   * Off by default (`MIDSCENE_MG400_PIPELINE=1` enables it); a failed batch
+   * disables it for the rest of the adapter's life.
+   */
+  pipelineStateQueries?: boolean;
   /** Reported whenever the effective actual-state source changes. */
   onFeedbackStatus?: (status: RobotArmFeedbackStatus) => void;
 }
 /**
  * Opt-in: independent state queries share one write. The controller frames
  * commands by syntax rather than by line, so this must be verified on the
- * installed firmware before it becomes the default.
+ * installed firmware before it becomes the default. A batch that does not
+ * produce one reply per command disables the optimization for this adapter.
  */
-const PIPELINE_STATE_QUERIES = process.env.MIDSCENE_MG400_PIPELINE === '1';
+const PIPELINE_STATE_QUERIES_ENV = 'MIDSCENE_MG400_PIPELINE';
 const DEFAULTS = {
   httpPort: MG400_HTTP_PORT,
   clearFaultsTransport: 'studio',
@@ -152,6 +159,7 @@ const DEFAULTS = {
   enableTimeoutMs: 15000,
   verifyReachability: true,
   statePollIntervalMs: 200,
+  pipelineStateQueries: false,
 } as const;
 /** How long every lifecycle command except `enable()` gets to confirm. */
 const LIFECYCLE_TIMEOUT_MS = 5000;
@@ -810,6 +818,13 @@ export class Mg400Adapter implements RobotArmAdapter {
   private readonly controller: Mg400ControllerClient;
   private readonly motionSettings: Mg400MotionSettingsClient;
   private lastFaultSampleAt = 0;
+  /**
+   * Pipelined state queries are opt-in per adapter. A batch that fails (a
+   * missing reply, an extra reply, or an unparsable one) turns this off for
+   * the lifetime of the instance, so a reconnect falls back to one command per
+   * write instead of failing every poll.
+   */
+  private pipelineStateQueries = false;
   private sequenceOwner?: object;
   private releaseSequence?: () => void;
   readonly id = 'dobot-mg400';
@@ -1095,6 +1110,9 @@ export class Mg400Adapter implements RobotArmAdapter {
     if (!options.host)
       throw new RobotArmError('INVALID_CONFIG', 'MG400 host is required');
     this.config = { ...DEFAULTS, ...options };
+    this.pipelineStateQueries =
+      options.pipelineStateQueries ??
+      process.env[PIPELINE_STATE_QUERIES_ENV] === '1';
     this.connectionIdentity = `${options.host}:${this.config.dashboardPort}:${this.config.motionPort}`;
     for (const port of [
       this.config.dashboardPort,
@@ -2054,7 +2072,7 @@ export class Mg400Adapter implements RobotArmAdapter {
         ? candidate
         : undefined;
     if (
-      PIPELINE_STATE_QUERIES &&
+      this.pipelineStateQueries &&
       !feedback &&
       this.poseDialect !== 'kinematic'
     ) {
@@ -2105,8 +2123,19 @@ export class Mg400Adapter implements RobotArmAdapter {
           !(error instanceof RobotArmError) ||
           (error.details?.vendorCode !== -30001 &&
             error.details?.vendorCode !== -30002)
-        )
+        ) {
+          // One reply per command is the whole premise of the batch. A timeout,
+          // protocol error or parse error means this firmware does not frame it
+          // that way, so stop batching for this adapter and surface the failure.
+          if (this.pipelineStateQueries) {
+            this.pipelineStateQueries = false;
+            logMg400('Pipelined state queries disabled after a batch failure', {
+              code: error instanceof RobotArmError ? error.code : 'UNKNOWN',
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
           throw error;
+        }
       }
     }
     let mode: number;
