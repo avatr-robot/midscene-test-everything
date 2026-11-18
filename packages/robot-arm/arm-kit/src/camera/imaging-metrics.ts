@@ -559,11 +559,11 @@ function rgbPatchMeans(pixels: Uint8Array) {
 }
 
 export function exposureCalibrationScore(metrics: LumaMetrics) {
-  const targetError = Math.abs(metrics.mean - 225) / 225;
+  const targetError = Math.abs(metrics.mean - 205) / 205;
   const highlightPenalty =
-    metrics.overExposedRatio * 24 + Math.max(0, metrics.p99 - 246) / 8;
+    metrics.overExposedRatio * 40 + Math.max(0, metrics.p99 - 238) / 6;
   const shadowPenalty =
-    metrics.underExposedRatio * 8 + Math.max(0, 175 - metrics.mean) / 80;
+    metrics.underExposedRatio * 10 + Math.max(0, 165 - metrics.mean) / 70;
   return targetError + highlightPenalty + shadowPenalty;
 }
 
@@ -579,11 +579,10 @@ export async function measureWhiteBalance(
       screen.correction.sourceHeight !== source.height
     )
       return [];
-    let red = 0;
-    let green = 0;
-    let blue = 0;
-    let weight = 0;
-    let samples = 0;
+    const patches: Array<{
+      redGreenRatio: number;
+      blueGreenRatio: number;
+    }> = [];
     for (const region of CALIBRATION_TONE_REGIONS) {
       const [r, g, b] = rgbPatchMeans(
         samplePerspectiveRgb(
@@ -595,26 +594,40 @@ export async function measureWhiteBalance(
         ),
       );
       const level = (r + g + b) / 3;
-      if (level < 18 || level > 246 || g <= 0) continue;
-      const patchWeight = Math.min(level, 245 - level);
-      red += r * patchWeight;
-      green += g * patchWeight;
-      blue += b * patchWeight;
-      weight += patchWeight;
-      samples += 1;
+      const maxChannel = Math.max(r, g, b);
+      const minChannel = Math.min(r, g, b);
+      if (
+        level < 24 ||
+        level > 242 ||
+        maxChannel >= 248 ||
+        minChannel <= 6 ||
+        g < 18
+      )
+        continue;
+      patches.push({
+        redGreenRatio: r / g,
+        blueGreenRatio: b / g,
+      });
     }
-    if (!samples || weight <= 0) return [];
-    const redGreenRatio = red / green;
-    const blueGreenRatio = blue / green;
+    if (patches.length < 2) return [];
+    const errors = patches.map(
+      ({ redGreenRatio, blueGreenRatio }) =>
+        Math.abs(Math.log(Math.max(0.001, redGreenRatio))) +
+        Math.abs(Math.log(Math.max(0.001, blueGreenRatio))),
+    );
+    const redGreenRatio = Math.exp(
+      median(patches.map((patch) => Math.log(patch.redGreenRatio))),
+    );
+    const blueGreenRatio = Math.exp(
+      median(patches.map((patch) => Math.log(patch.blueGreenRatio))),
+    );
     return [
       {
         screenId: screen.screenId,
-        score:
-          Math.abs(Math.log(Math.max(0.001, redGreenRatio))) +
-          Math.abs(Math.log(Math.max(0.001, blueGreenRatio))),
+        score: 0.65 * median(errors) + 0.35 * Math.max(...errors),
         redGreenRatio,
         blueGreenRatio,
-        samples,
+        samples: patches.length,
       },
     ];
   });
@@ -650,13 +663,13 @@ function toneScore(levels: readonly number[]) {
   const monotonic = levels.every(
     (value, index) => index === 0 || levels[index - 1]! >= value - 0.5,
   );
-  const targetError = Math.abs(midtone - 142) / 142;
-  const whiteError = Math.abs(white - 232) / 232;
-  const blackError = Math.abs(black - 18) / 18;
-  const spreadError = Math.abs(spread - 205) / 205;
+  const targetError = Math.abs(midtone - 140) / 140;
+  const whiteError = Math.abs(white - 220) / 220;
+  const blackError = Math.abs(black - 24) / 24;
+  const spreadError = Math.abs(spread - 196) / 196;
   const clipping =
-    Math.max(0, white - 247) / 8 +
-    Math.max(0, 5 - black) / 5 +
+    Math.max(0, white - 244) / 6 +
+    Math.max(0, 6 - black) / 6 +
     (monotonic ? 0 : 0.5);
   return {
     score:

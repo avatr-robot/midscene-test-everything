@@ -138,6 +138,37 @@ async function calibrationPattern(warm = false) {
 }
 
 describe('camera imaging', () => {
+  it('rejects neutral patches with a clipped colour channel', async () => {
+    const strips = Array.from({ length: 7 }, (_, index) => {
+      const offset = index * 2;
+      return `<rect x="${Math.floor((index * 400) / 7)}" y="584" width="${Math.ceil(
+        400 / 7,
+      )}" height="192" fill="rgb(${220 + offset},245,255)"/>`;
+    }).join('');
+    const jpeg = await sharp(
+      Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><rect width="400" height="800" fill="#cfcfcf"/>${strips}</svg>`,
+      ),
+    )
+      .jpeg({ quality: 100 })
+      .toBuffer();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+
+    await expect(
+      measureWhiteBalance(jpeg, [{ screenId: 'screen', correction }]),
+    ).resolves.toBeUndefined();
+  });
+
   it('measures neutral white balance and a monotonic seven-step tone chart', async () => {
     const correction: CameraCorrection = {
       points: {
@@ -599,6 +630,56 @@ describe('camera imaging', () => {
     }
   });
 
+  it('invalidates a persisted v5 profile with clipped white balance', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const screenId = 'screen';
+    const fingerprint = createHash('sha256')
+      .update(JSON.stringify([screenId, correction]))
+      .digest('hex');
+    await writeFile(
+      cameraImagingFile(directory, control.deviceId),
+      JSON.stringify({
+        version: 5,
+        cameraId: control.deviceId,
+        rois: [{ screenId, fingerprint }],
+        focus: { value: 45, score: 1 },
+        exposure: { value: -8 },
+        whiteBalance: { value: 2000 },
+        brightness: { value: 120 },
+        contrast: { value: 160 },
+        calibratedAt: new Date().toISOString(),
+      }),
+    );
+    const imaging = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    try {
+      await imaging.load();
+      imaging.registerScreen(screenId, () => correction);
+      await imaging.resumeStored();
+      expect(imaging.status().state).toBe('idle');
+      expect(control.setCalls).toEqual([]);
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('restores the full camera profile and releases it to the original modes', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
@@ -621,7 +702,7 @@ describe('camera imaging', () => {
     await writeFile(
       file,
       JSON.stringify({
-        version: 5,
+        version: 6,
         cameraId: control.deviceId,
         rois: [{ screenId, fingerprint }],
         focus: { value: 45, score: 1 },

@@ -13,6 +13,8 @@ const calibrationZh: Record<string, string> = {
     '轮廓与手机屏幕不符。仍要应用吗？',
   Apply: '应用',
   Cancel: '取消',
+  Save: '保存',
+  'Screen name saved': '屏幕名称已保存',
   'Perspective applied': '已应用透视',
   'Perspective not applied': '尚未应用透视',
   'Clear Perspective': '清除透视',

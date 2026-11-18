@@ -28,8 +28,10 @@ import {
   type ScreenDeviceSummary,
   type TargetDisplaySession,
 } from '@midscene/robotics-shared/marker-contracts';
+import { nextScreenName } from '../screen-naming.js';
 import type { PlaygroundDevices } from './devices.js';
 import { phoneFingerprint } from './preview-perspectives.js';
+export { nextScreenName } from '../screen-naming.js';
 
 type SavedPage = {
   id: string;
@@ -75,15 +77,6 @@ function defaultScreenName(ua: string, id: string, browserPlatform?: string) {
   return `${hint.slice(0, 31)} · ${screenPageLabel(id)}`;
 }
 
-/** A new screen gets the next free number, so the stage labels stay distinct. */
-export function nextScreenName(screens: readonly { name: string }[]) {
-  const taken = new Set(
-    screens.map((screen) => screen.name.trim().toLocaleLowerCase()),
-  );
-  let index = screens.length + 1;
-  while (taken.has(`screen ${index}`)) index++;
-  return `Screen ${index}`;
-}
 /** A phone credential stays stable while its role moves between home, markers and mapping. */
 class ScreenPage {
   readonly phoneSocket: PhoneSocketServer;
@@ -321,7 +314,9 @@ export class ScreenCalibration {
     return task;
   }
   private screen(id: string) {
-    const target = this.devices.screens().find((t) => t.id === id);
+    const target =
+      this.devices.screenTarget(id) ??
+      this.devices.screens().find((t) => t.id === id);
     if (!target)
       throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
     return target;
@@ -649,6 +644,7 @@ export class ScreenCalibration {
       Object.assign(page.saved, saved);
     }
     await this.store.updateScreenTarget(targetId, { pageKey });
+    await this.devices.commitAddedScreen(targetId);
     await this.syncDefaultScreenName(page);
     this.pageHosts.add(targetId);
     host.service.resumePhonePage();
@@ -1022,9 +1018,12 @@ export class ScreenCalibration {
       return { session: this.snapshot(session), target };
     }
     if (input.action === 'remove') {
-      if (!session.targets.some((t) => t.id === input.targetId))
-        throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
-      await this.removeScreen(this.screen(input.targetId!));
+      // Older clients exposed target removal inside Add Screen. Keep that
+      // request harmless: a duplicate is idempotent and image calibration is
+      // camera-wide, so dropping a pending target must not release it.
+      const target = session.targets.find((item) => item.id === input.targetId);
+      if (!target) return this.snapshot(session);
+      await this.removeScreen(this.screen(target.id), { discard: true });
       return this.snapshot(session);
     }
     if (input.action === 'cancel') {
@@ -1376,6 +1375,8 @@ export class ScreenCalibration {
         () => assertObservation(target.id),
       );
       session.applied.set(target.id, mappingError);
+      if (mappingError === undefined)
+        await this.devices.commitAddedScreen(target.id);
       host.service.finishMarkerDisplay(
         session.requests.get(target.id)!,
         mappingError === undefined,
@@ -1412,10 +1413,12 @@ export class ScreenCalibration {
     role?: 'markers' | 'mapping';
     keepBinding?: boolean;
     onlyIfEmpty?: boolean;
+    screenIds?: string[];
     targets?: { id: string; token: string }[];
   }) {
     if (input.action === 'list')
       return this.serialize(async () => {
+        await this.devices.pruneUnusedScreenTargets(input.cameraId);
         await this.adoptExistingPages();
         for (const saved of this.store.list().screenPages ?? [])
           await this.page(saved);
@@ -1518,6 +1521,23 @@ export class ScreenCalibration {
       });
       return { path: `/#bind=${token}`, expiresAt };
     }
+    if (input.action === 'discard-added-screen') {
+      const target = this.devices.screenTarget(input.id!, true);
+      if (!target)
+        throw new RobotArmError('INVALID_ARGUMENT', 'Screen not found');
+      if (target.cameraId !== input.cameraId)
+        throw new RobotArmError(
+          'PROFILE_MISMATCH',
+          'Screen belongs to another camera',
+          409,
+        );
+      if (target.archived) {
+        this.devices.discardAddedScreen(target.id);
+        return {};
+      }
+      await this.removeScreen(target, { discard: true });
+      return {};
+    }
     if (input.action === 'delete-screen') {
       if (
         input.onlyIfEmpty &&
@@ -1554,20 +1574,38 @@ export class ScreenCalibration {
           'INVALID_ARGUMENT',
           'Camera is required to clear perspectives',
         );
-      await this.devices.cameras.clearPerspective(cameraId);
-      for (const target of this.devices
+      const cameraScreens = this.devices
         .screens()
-        .filter((screen) => screen.cameraId === cameraId)) {
+        .filter((screen) => screen.cameraId === cameraId);
+      const requested = input.screenIds ? new Set(input.screenIds) : undefined;
+      const targets = requested
+        ? cameraScreens.filter((screen) => requested.has(screen.id))
+        : cameraScreens;
+      if (requested?.size && !targets.length)
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'None of the selected screens belong to this camera',
+        );
+      if (!requested) await this.devices.cameras.clearPerspective(cameraId);
+      for (const target of targets) {
         const entry = this.devices.entries.get(target.id);
         const host = entry?.host ?? (await entry?.hostOpening);
         if (host) await host.service.clearMapping();
         else await this.store.saveCalibrationMapping(target.id);
+        await entry?.camera.clearPerspective();
         await this.devices.cameras.clearPerspective(cameraId, target.id);
       }
       return {};
     }
     if (input.action === 'rename-screen') {
       const name = input.name!.trim();
+      const target = this.screen(input.id!);
+      if (target.cameraId !== input.cameraId)
+        throw new RobotArmError(
+          'PROFILE_MISMATCH',
+          'Screen belongs to another camera',
+          409,
+        );
       await this.store.updateScreenTarget(input.id!, { name });
       for (const session of this.sessions.values()) {
         const target = session.targets.find((t) => t.id === input.id);
@@ -1714,14 +1752,23 @@ export class ScreenCalibration {
       cameraId,
       pageKey,
     }: { id: string; cameraId: string; pageKey?: string },
-    options: { onlyIfEmpty?: boolean; deletePerspective?: boolean } = {},
+    options: {
+      onlyIfEmpty?: boolean;
+      discard?: boolean;
+      deletePerspective?: boolean;
+    } = {},
   ) {
     // Forgetting an offline phone must also work with its camera unplugged.
-    const entry = options.deletePerspective
-      ? (this.devices.entries.get(id) ?? (await this.devices.opening.get(id)))
-      : await this.devices.open(id);
+    const entry =
+      options.onlyIfEmpty || options.discard
+        ? this.devices.entries.get(id)
+        : options.deletePerspective
+          ? (this.devices.entries.get(id) ??
+            (await this.devices.opening.get(id)))
+          : await this.devices.open(id);
     if (
       options.onlyIfEmpty &&
+      !options.discard &&
       (entry?.camera.getCorrection() ||
         entry?.camera.hasSavedPerspective() ||
         this.store.deviceBinding(id))
@@ -1736,16 +1783,23 @@ export class ScreenCalibration {
     const page = savedPage && this.pages.get(savedPage.id);
     if (page) await this.release(page, true);
     await this.ensureTarget(id);
-    const host = entry?.host ?? (await entry?.hostOpening);
-    if (host) await host.service.clearMapping();
-    else await this.store.saveCalibrationMapping(id);
-    if (options.deletePerspective)
-      await this.devices.cameras.clearPerspective(
-        cameraId,
-        id === cameraId ? undefined : id,
-      );
-    else await entry?.camera.clearCorrection();
+    if (options.onlyIfEmpty || options.discard) {
+      // Discarding a never-calibrated Add Screen target must not release
+      // camera-level imaging shared by the camera's existing screens.
+      await this.store.saveCalibrationMapping(id);
+    } else {
+      const host = entry?.host ?? (await entry?.hostOpening);
+      if (host) await host.service.clearMapping();
+      else await this.store.saveCalibrationMapping(id);
+      if (options.deletePerspective)
+        await this.devices.cameras.clearPerspective(
+          cameraId,
+          id === cameraId ? undefined : id,
+        );
+      else await entry?.camera.clearCorrection();
+    }
     await this.store.archiveScreenTarget(id);
+    this.devices.discardAddedScreen(id);
     if (page) page.saved.targetId = undefined;
     this.pageHosts.delete(id);
     for (const session of this.sessions.values()) {
@@ -1793,7 +1847,9 @@ export class ScreenCalibration {
     if (
       pageKey &&
       pageKey !== page.saved.pageKey &&
-      (target.hasSavedPerspective || this.store.deviceBinding(target.id))
+      (this.devices.screens().find((screen) => screen.id === target.id)
+        ?.hasSavedPerspective ||
+        this.store.deviceBinding(target.id))
     )
       throw new RobotArmError(
         'PAGE_ALREADY_BOUND',
@@ -1841,6 +1897,7 @@ export class ScreenCalibration {
     await this.store.updateScreenTarget(saved.targetId, {
       pageKey: page.saved.pageKey,
     });
+    await this.devices.commitAddedScreen(saved.targetId);
     await this.syncDefaultScreenName(page);
     host.service.resumePhonePage();
     page.assign(host, mode, display.id);

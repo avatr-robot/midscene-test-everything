@@ -13,3 +13,19 @@ export function shouldShowScreenOutlines(
 ) {
   return !applying && !CALIBRATING_IMAGING_STATES.has(imaging?.state ?? 'idle');
 }
+
+export function shouldHideSelectedScreenOutline(input: {
+  awaitingOriginTap: boolean;
+  markerAdd: boolean;
+  markerOpen: boolean | string;
+  screenId: string;
+  selectedId: string;
+  step: number;
+}) {
+  return (
+    input.step === 1 &&
+    !input.markerAdd &&
+    (input.awaitingOriginTap || Boolean(input.markerOpen)) &&
+    input.screenId === input.selectedId
+  );
+}

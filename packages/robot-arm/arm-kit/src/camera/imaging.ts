@@ -38,7 +38,7 @@ interface StoredCameraControl {
 }
 
 interface StoredCameraImaging {
-  version: 1 | 2 | 3 | 4 | 5;
+  version: 1 | 2 | 3 | 4 | 5 | 6;
   cameraId: string;
   rois: Array<{ screenId: string; fingerprint: string }>;
   focus: { value: number; score: number };
@@ -64,8 +64,8 @@ const MAX_CALIBRATION_EXPOSURE_ITERATIONS = 6;
 const MAX_STEP_UNITS = 3;
 const CONTROL_SETTLE_MS = 120;
 const GAIN_CANDIDATES = [8, 16, 24, 32, 48, 64, 96] as const;
-const BRIGHTNESS_OFFSETS = [-12, -8, -4, 0, 4, 8, 12] as const;
-const CONTRAST_OFFSETS = [-24, -16, -8, 0, 8, 16, 24] as const;
+const BRIGHTNESS_OFFSETS = [-8, -4, 0, 4, 8] as const;
+const CONTRAST_OFFSETS = [-16, -8, 0, 8, 16] as const;
 const LOCAL_TONE_OFFSETS = [-1, 0, 1] as const;
 
 function autoExposureNumberEnv(
@@ -208,13 +208,15 @@ export class CameraImagingController {
         ),
       ) as StoredCameraImaging;
       if (
-        !([1, 2, 3, 4, 5] as const).includes(value.version) ||
+        !([1, 2, 3, 4, 5, 6] as const).includes(value.version) ||
         value.cameraId !== this.camera.id ||
         !Array.isArray(value.rois) ||
         !Number.isFinite(value.focus?.value) ||
         !Number.isFinite(value.exposure?.value)
       )
         return;
+      // Version 5 could persist a clipped white-balance and tone result.
+      if (value.version === 5) return;
       this.stored = value;
       this.statusValue = {
         state: 'idle',
@@ -451,6 +453,16 @@ export class CameraImagingController {
         : undefined;
 
       this.statusValue = {
+        state: 'tone',
+        exposure: exposure?.value,
+        gain: gain?.value,
+        message: 'Balancing brightness and contrast across all screens',
+        updatedAt: Date.now(),
+      };
+      const tone = await this.tuneBrightnessAndContrast(screens);
+      if (!tone) warnings.push('Brightness and contrast could not be measured');
+
+      this.statusValue = {
         state: 'white-balance',
         exposure: exposure?.value,
         gain: gain?.value,
@@ -460,17 +472,6 @@ export class CameraImagingController {
       const whiteBalance = await this.searchWhiteBalance(screens);
       if (!whiteBalance)
         warnings.push('White balance could not be measured from the screen');
-
-      this.statusValue = {
-        state: 'tone',
-        exposure: exposure?.value,
-        gain: gain?.value,
-        ...(whiteBalance ? { whiteBalance: whiteBalance.value } : {}),
-        message: 'Balancing brightness and contrast across all screens',
-        updatedAt: Date.now(),
-      };
-      const tone = await this.tuneBrightnessAndContrast(screens);
-      if (!tone) warnings.push('Brightness and contrast could not be measured');
 
       this.statusValue = {
         state: 'focus',
@@ -538,7 +539,7 @@ export class CameraImagingController {
       if (finalTone && finalTone.white > 247)
         warnings.push('The white calibration bar remains clipped');
       const stored: StoredCameraImaging = {
-        version: 5,
+        version: 6,
         cameraId: this.camera.id,
         rois: screens.map((screen) => ({
           screenId: screen.screenId,
@@ -720,6 +721,10 @@ export class CameraImagingController {
     const controls = await this.ensureControls();
     const control = (await controls.read()).whiteBalance;
     if (!control?.supportsManual) return undefined;
+    const initialReading = await measureWhiteBalance(
+      await this.freshFrame(),
+      screens,
+    );
     const step = Math.max(1, Math.abs(control.step || 1));
     const span = Math.max(step, control.max - control.min);
     const coarse = Array.from({ length: 5 }, (_, index) =>
@@ -727,8 +732,14 @@ export class CameraImagingController {
     );
     let best:
       | { value: number; score: number; reading: WhiteBalanceReading }
-      | undefined;
-    for (const value of uniqueCandidates(coarse)) {
+      | undefined = initialReading && {
+      value: control.value,
+      score:
+        initialReading.score +
+        distancePenalty(control.value, control.default, control, 0.03),
+      reading: initialReading,
+    };
+    for (const value of uniqueCandidates([control.value, ...coarse])) {
       await controls.set('whiteBalance', value, 'manual');
       await delay(CONTROL_SETTLE_MS);
       const reading = await measureWhiteBalance(
@@ -737,7 +748,7 @@ export class CameraImagingController {
       );
       if (!reading) continue;
       const score =
-        reading.score + distancePenalty(value, control.default, control, 0.012);
+        reading.score + distancePenalty(value, control.default, control, 0.03);
       if (
         !best ||
         score < best.score - 1e-9 ||
@@ -768,8 +779,12 @@ export class CameraImagingController {
       );
       if (!reading) continue;
       const score =
-        reading.score + distancePenalty(value, control.default, control, 0.012);
+        reading.score + distancePenalty(value, control.default, control, 0.03);
       if (score < best.score - 1e-9) best = { value, score, reading };
+    }
+    if (best.reading.score > 0.08) {
+      await this.restoreControls(controls, { whiteBalance: control });
+      return undefined;
     }
     await controls.set('whiteBalance', best.value, 'manual');
     return { ...best.reading, value: best.value };
@@ -803,11 +818,11 @@ export class CameraImagingController {
                 brightnessValue,
                 brightness.default,
                 brightness,
-                0.04,
+                0.1,
               )
             : 0) +
           (contrast
-            ? distancePenalty(contrastValue, contrast.default, contrast, 0.025)
+            ? distancePenalty(contrastValue, contrast.default, contrast, 0.12)
             : 0),
         brightnessValue,
         contrastValue,
