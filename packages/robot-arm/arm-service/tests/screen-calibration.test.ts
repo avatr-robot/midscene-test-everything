@@ -313,9 +313,13 @@ it('applies passing multi-screen results after marker display ends', async () =>
     expect(phone.targetHost.service.phoneObservation()).toBeDefined();
   }
 
+  let finishImaging!: () => void;
+  const imagingPending = new Promise<void>((resolve) => {
+    finishImaging = resolve;
+  });
   const firstImagingCalibration = rstest
     .spyOn(phones[0]!.targetHost.service, 'startImagingCalibration')
-    .mockResolvedValue();
+    .mockReturnValue(imagingPending);
   const secondImagingCalibration = rstest
     .spyOn(phones[1]!.targetHost.service, 'startImagingCalibration')
     .mockResolvedValue();
@@ -330,6 +334,7 @@ it('applies passing multi-screen results after marker display ends', async () =>
   expect(
     f.devices.entries.get(phones[1]!.targetId)?.camera.getCorrection(),
   ).toBeDefined();
+  finishImaging();
 }, 20_000);
 it('waits for the iPhone origin before projecting its full display from the markers', async () => {
   const f = await fixture();

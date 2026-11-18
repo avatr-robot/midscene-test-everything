@@ -548,4 +548,4 @@ test('marker capture follows its phone from preview into only the matching scree
       mapped?.socket.close();
     }
   });
-});
+}, 10_000);

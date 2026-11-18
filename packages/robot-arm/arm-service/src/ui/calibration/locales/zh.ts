@@ -2363,6 +2363,8 @@ export const zh: Record<string, string> = {
     '已自动锁定焦距，曝光正在自动监测。',
   'Finish camera mapping to calibrate focus and exposure automatically.':
     '完成相机映射后将自动标定焦距和曝光。',
+  'Could not calibrate the camera image.': '无法校准相机画面。',
+  'Timed out while calibrating the camera image.': '校准相机画面超时。',
   'Clear Applied Perspective': '清除当前透视（保留屏幕）',
   'Calibrating camera intrinsics': '正在调整相机内参',
   ...setupZh,

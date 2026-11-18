@@ -80,6 +80,7 @@ import {
 } from './marker-client';
 import { hasMultipleCalibrationTargets } from './multi-screen-review';
 import { rawCameraPreviewUrl } from './preview-url';
+import { shouldShowScreenOutlines } from './screen-outline-visibility';
 import { shouldShowScreenPicker } from './screen-picker';
 import {
   calibrationTargetsAfterPairing,
@@ -739,34 +740,42 @@ function GuidedContent({
    * Every screen with a saved perspective is drawn on the live preview at
    * once; the selected one carries the freshest correction and the verdict.
    */
-  const asideOutlines = knownScreens.flatMap((entry) => {
-    const fresh = config?.deviceId === entry.id ? config.correction : undefined;
-    const quad =
-      entry.id === activeId ? (fresh ?? entry.correction) : entry.correction;
-    if (
-      !quad ||
-      (step === 1 &&
-        (awaitingOriginTap || Boolean(markerOpen)) &&
-        entry.id === selectedId)
-    )
-      return [];
-    return [
-      {
-        id: entry.id,
-        name: entry.name,
-        correction: quad,
-        previewPositions:
-          entry.id === activeId && !outlineBlocked
-            ? activeConfig
-              ? activeConfig.previewPositions
-              : entry.previewPositions
-            : undefined,
-        active: entry.id === activeId,
-        validity:
-          entry.id === activeId ? perspective.summary?.state : undefined,
-      },
-    ];
-  });
+  const asideOutlines = shouldShowScreenOutlines(
+    controller.setup.imaging,
+    applying,
+  )
+    ? knownScreens.flatMap((entry) => {
+        const fresh =
+          config?.deviceId === entry.id ? config.correction : undefined;
+        const quad =
+          entry.id === activeId
+            ? (fresh ?? entry.correction)
+            : entry.correction;
+        if (
+          !quad ||
+          (step === 1 &&
+            (awaitingOriginTap || Boolean(markerOpen)) &&
+            entry.id === selectedId)
+        )
+          return [];
+        return [
+          {
+            id: entry.id,
+            name: entry.name,
+            correction: quad,
+            previewPositions:
+              entry.id === activeId && !outlineBlocked
+                ? activeConfig
+                  ? activeConfig.previewPositions
+                  : entry.previewPositions
+                : undefined,
+            active: entry.id === activeId,
+            validity:
+              entry.id === activeId ? perspective.summary?.state : undefined,
+          },
+        ];
+      })
+    : [];
   const progressClient = useMemo(
     () =>
       createCalibrationClient({
@@ -854,12 +863,10 @@ function GuidedContent({
       if (imaging?.state === 'ready') return;
       if (imaging?.state === 'error' || imaging?.state === 'unsupported')
         throw new Error(
-          imaging.message ?? 'Could not calibrate camera focus and exposure.',
+          imaging.message ?? 'Could not calibrate the camera image.',
         );
       if (Date.now() >= deadline)
-        throw new Error(
-          'Timed out while calibrating camera focus and exposure.',
-        );
+        throw new Error('Timed out while calibrating the camera image.');
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }, [client]);
@@ -925,6 +932,7 @@ function GuidedContent({
         pendingAddedScreen.current = undefined;
         await refresh();
         if (currentBase.current !== base) return;
+        setMarkerOpen(false);
         setReview(undefined);
         setReviewOpen(false);
       } catch (cause) {

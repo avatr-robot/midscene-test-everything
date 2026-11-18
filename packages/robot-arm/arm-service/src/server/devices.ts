@@ -173,7 +173,7 @@ export class PlaygroundDevices {
     if (!connected.length)
       throw new RobotArmError(
         'PHONE_UNAVAILABLE',
-        'Reconnect the phone calibration page before measuring focus and exposure.',
+        'Reconnect the phone calibration page before tuning the camera image.',
         409,
       );
     const richPatternHosts = connected.filter((host) =>
@@ -182,7 +182,7 @@ export class PlaygroundDevices {
     if (richPatternHosts.length !== connected.length)
       throw new RobotArmError(
         'PHONE_PAGE_OUTDATED',
-        'Reload every phone calibration page before measuring focus and exposure.',
+        'Reload every phone calibration page before tuning the camera image.',
         409,
       );
     for (const host of richPatternHosts)
@@ -202,7 +202,7 @@ export class PlaygroundDevices {
     )
       throw new RobotArmError(
         'PHONE_PAGE_OUTDATED',
-        'The phone did not display the focus and exposure pattern. Reload the calibration page and retry.',
+        'The phone did not display the camera imaging pattern. Reload the calibration page and retry.',
         409,
       );
   }

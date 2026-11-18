@@ -1392,7 +1392,11 @@ export class ScreenCalibration {
       targets.every((target) => session.applied.get(target.id) === undefined)
     ) {
       const imagingHost = this.devices.entries.get(targets[0]!.id)?.host;
-      await imagingHost?.service.startImagingCalibration();
+      // Imaging can run longer than the marker request budget. The workbench
+      // polls setup.imaging until it reaches ready or error.
+      void imagingHost?.service
+        .startImagingCalibration()
+        .catch(() => undefined);
     }
     return response();
   }
