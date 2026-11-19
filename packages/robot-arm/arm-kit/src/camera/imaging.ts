@@ -282,7 +282,7 @@ export class CameraImagingController {
     };
   }
 
-  private async ensureControls(): Promise<CameraHardwareControl> {
+  private async getControls(): Promise<CameraHardwareControl | undefined> {
     if (!this.controls && this.controlFactory) {
       try {
         this.controls = await this.controlFactory();
@@ -296,13 +296,34 @@ export class CameraImagingController {
         );
       }
     }
-    if (!this.controls)
-      throw new RobotArmError(
-        'VISION_UNAVAILABLE',
-        'This camera does not expose imaging controls',
-        409,
-      );
     return this.controls;
+  }
+
+  private async ensureControls(): Promise<CameraHardwareControl> {
+    const controls = await this.getControls();
+    if (controls) return controls;
+    throw new RobotArmError(
+      'VISION_UNAVAILABLE',
+      'This camera does not expose imaging controls',
+      409,
+    );
+  }
+
+  private setUnsupported(): CameraImagingStatus {
+    this.statusValue = {
+      state: 'unsupported',
+      message: 'This camera does not expose focus and exposure controls',
+      updatedAt: Date.now(),
+    };
+    return this.status();
+  }
+
+  private async readManualControls() {
+    const controls = await this.getControls();
+    if (!controls) return undefined;
+    const { focus, exposure } = await controls.read();
+    if (!focus?.supportsManual || !exposure?.supportsManual) return undefined;
+    return { controls, values: { focus, exposure } };
   }
 
   async releaseForCorrection(): Promise<void> {
@@ -310,38 +331,40 @@ export class CameraImagingController {
     this.applied = false;
     this.extremeDirection = undefined;
     this.extremeCount = 0;
-    if (this.controls || this.controlFactory) {
-      try {
-        const controls = await this.ensureControls();
-        const current = await controls.read();
-        if (this.stored?.original) {
-          await this.restoreControls(controls, this.stored.original);
-        } else {
-          if (current.focus?.supportsAuto)
-            await controls.set('focus', current.focus.value, 'auto');
-          if (current.exposure?.supportsAuto)
-            await controls.set('exposure', current.exposure.value, 'auto');
-          if (current.whiteBalance?.supportsAuto)
-            await controls.set(
-              'whiteBalance',
-              current.whiteBalance.value,
-              'auto',
-            );
-        }
-      } catch (error) {
-        this.statusValue = {
-          state: 'error',
-          message: error instanceof Error ? error.message : String(error),
-          updatedAt: Date.now(),
-        };
+    try {
+      const reading = await this.readManualControls();
+      if (!reading) {
+        this.setUnsupported();
         return;
       }
+      const { controls } = reading;
+      const current = await controls.read();
+      if (this.stored?.original) {
+        await this.restoreControls(controls, this.stored.original);
+      } else {
+        if (current.focus?.supportsAuto)
+          await controls.set('focus', current.focus.value, 'auto');
+        if (current.exposure?.supportsAuto)
+          await controls.set('exposure', current.exposure.value, 'auto');
+        if (current.whiteBalance?.supportsAuto)
+          await controls.set(
+            'whiteBalance',
+            current.whiteBalance.value,
+            'auto',
+          );
+      }
+    } catch (error) {
+      this.statusValue = {
+        state: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        updatedAt: Date.now(),
+      };
+      return;
     }
     this.statusValue = {
-      state: this.controls ? 'released' : 'unsupported',
-      message: this.controls
-        ? 'Camera imaging controls are released for perspective correction'
-        : 'This camera cannot release imaging controls through the API',
+      state: 'released',
+      message:
+        'Camera imaging controls are released for perspective correction',
       updatedAt: Date.now(),
     };
   }
@@ -374,7 +397,11 @@ export class CameraImagingController {
       return;
     }
     try {
-      const controls = await this.ensureControls();
+      const controls = await this.getControls();
+      if (!controls) {
+        this.setUnsupported();
+        return;
+      }
       await controls.set('exposure', this.stored.exposure.value, 'manual');
       await controls.set('focus', this.stored.focus.value, 'manual');
       for (const [property, value] of [
@@ -424,18 +451,16 @@ export class CameraImagingController {
         'Perspective correction is required before camera imaging calibration',
         409,
       );
-    const controls = await this.ensureControls().catch((error) => {
+    const reading = await this.readManualControls().catch((error) => {
       this.statusValue = {
-        state:
-          error instanceof RobotArmError &&
-          error.message.includes('does not expose')
-            ? 'unsupported'
-            : 'error',
+        state: 'error',
         message: error instanceof Error ? error.message : String(error),
         updatedAt: Date.now(),
       };
       throw error;
     });
+    if (!reading) return this.setUnsupported();
+    const { controls } = reading;
 
     this.stopMonitor();
     this.applied = false;
