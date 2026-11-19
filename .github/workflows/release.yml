@@ -2,6 +2,15 @@ name: Publish npm packages
 
 on:
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: Release type
+        type: choice
+        required: true
+        default: stable
+        options:
+          - stable
+          - prepatch
 
 permissions:
   contents: read
@@ -27,15 +36,29 @@ jobs:
           node-version: '24.13.0'
           registry-url: https://registry.npmjs.org
           cache: pnpm
-      - name: Check release versions
+      - name: Prepare release versions
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
           pnpm --filter './packages/**' -r exec node -e '
-            const { name, version } = require("./package.json");
-            if (version === "0.0.0" || !/^\d+\.\d+\.\d+$/.test(version)) {
-              throw new Error(name + " needs a stable release version above 0.0.0");
+            const fs = require("node:fs");
+            const pkg = require("./package.json");
+            const { version } = pkg;
+            if (!/^\d+\.\d+\.\d+$/.test(version)) {
+              throw new Error(pkg.name + " needs a stable base version");
+            }
+            if (process.env.RELEASE_TYPE === "prepatch") {
+              const [major, minor, patch] = version.split(".");
+              pkg.version = major + "." + minor + "." + (Number(patch) + 1) + "-beta." + process.env.GITHUB_RUN_NUMBER;
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+              console.log(pkg.name, pkg.version);
+            } else if (version === "0.0.0") {
+              throw new Error(pkg.name + " needs a stable release version above 0.0.0");
             }'
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
       - name: Publish new workspace versions to npm
-        run: pnpm --filter './packages/**' -r publish --access public --no-git-checks
+        env:
+          RELEASE_TAG: ${{ inputs.release_type == 'prepatch' && 'beta' || 'latest' }}
+        run: pnpm --filter './packages/**' -r publish --access public --no-git-checks --tag "$RELEASE_TAG"

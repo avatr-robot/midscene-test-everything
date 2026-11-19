@@ -44,14 +44,21 @@ Open a pull request against `main` from a branch for your change. Use scoped Con
 
 ## Publishing to npm
 
-Version `0.0.0` is reserved for empty placeholders. Before the first release,
+Version `0.0.0` is reserved for empty placeholders. Before the first stable release,
 give all nine packages under `packages/` a stable version above `0.0.0` and
 merge the version changes into `main`. For later releases, bump the packages
 that changed, including consumers that need updated `workspace:*` dependencies.
 
 Run **Actions → Publish npm packages → Run workflow** on `main`. The workflow
 builds and tests the workspace, then pnpm publishes unpublished versions with
-the `latest` tag. If a publish is interrupted, rerun the same commit.
+the `latest` tag when you select `stable`.
+
+Select `prepatch` to publish all packages under the `beta` tag. The runner
+increments each package’s patch version and appends `-beta.<run number>`
+before building and packing. For example, a package at `0.0.0` becomes
+`0.0.1-beta.1` on workflow run 1. The versions in Git stay at their stable
+base. To resume an interrupted release with the same versions, rerun the
+original workflow run.
 
 Each npm package must authorize the GitHub Actions trusted publisher for
 `web-infra-dev/midscene-test-everything`, workflow `release.yml`, with direct
