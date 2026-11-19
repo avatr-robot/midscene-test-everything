@@ -41,3 +41,18 @@ Keep the root READMEs focused on the project overview and quick start. Update bo
 ## Pull requests
 
 Open a pull request against `main` from a branch for your change. Use scoped Conventional Commits for commit messages, for example `fix(ios-airlink): handle a disconnected device`. Summarize what changed and complete the [PR checklist](./.github/pull_request_template.md) with the checks you ran.
+
+## Publishing to npm
+
+Version `0.0.0` is reserved for empty placeholders. Before the first release,
+give all nine packages under `packages/` a stable version above `0.0.0` and
+merge the version changes into `main`. For later releases, bump the packages
+that changed, including consumers that need updated `workspace:*` dependencies.
+
+Run **Actions → Publish npm packages → Run workflow** on `main`. The workflow
+builds and tests the workspace, then pnpm publishes unpublished versions with
+the `latest` tag. If a publish is interrupted, rerun the same commit.
+
+Each npm package must authorize the GitHub Actions trusted publisher for
+`web-infra-dev/midscene-test-everything`, workflow `release.yml`, with direct
+publishing allowed and the environment field empty.
