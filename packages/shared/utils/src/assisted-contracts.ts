@@ -362,6 +362,8 @@ export interface CalibrationImagingStatus {
     | 'idle'
     | 'released'
     | 'exposure'
+    | 'white-balance'
+    | 'tone'
     | 'focus'
     | 'ready'
     | 'error'
@@ -370,6 +372,11 @@ export interface CalibrationImagingStatus {
   focus?: number;
   /** DirectShow exposure value in the camera's reported hardware range. */
   exposure?: number;
+  gain?: number;
+  /** DirectShow white balance value, normally a colour temperature in kelvin. */
+  whiteBalance?: number;
+  brightness?: number;
+  contrast?: number;
   updatedAt?: number;
 }
 export interface WebCalibrationSample {
