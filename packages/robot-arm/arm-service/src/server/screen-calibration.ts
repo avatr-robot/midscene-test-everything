@@ -88,6 +88,7 @@ class ScreenPage {
   private listeners = new Set<() => void>();
   private selectionTimer?: ReturnType<typeof setTimeout>;
   private unsubscribe?: () => void;
+  private operatorReleased = false;
   private browserInstance?: { id: string; visible: boolean; lastSeen: number };
   constructor(
     readonly saved: SavedPage,
@@ -168,6 +169,12 @@ class ScreenPage {
       : undefined;
     this.changed();
   }
+  markOperatorReleased() {
+    this.operatorReleased = true;
+  }
+  wasReleasedByOperator() {
+    return this.operatorReleased;
+  }
   assign(
     host: CalibrationHost | undefined,
     mode: ScreenPage['mode'],
@@ -181,6 +188,7 @@ class ScreenPage {
       this.phoneSocket.renew();
     }
     this.unsubscribe?.();
+    if (host) this.operatorReleased = false;
     this.host = host;
     this.mode = mode;
     this.targetDisplayId = displayId;
@@ -396,6 +404,7 @@ export class ScreenCalibration {
       const page = await this.page(saved);
       const stage = host.service.status()?.stage;
       if (
+        page.wasReleasedByOperator() ||
         page.host ||
         page.mode !== 'waiting' ||
         (stage &&
@@ -1687,6 +1696,7 @@ export class ScreenCalibration {
     }
     if (input.action === 'release') {
       await this.release(page, input.keepBinding);
+      if (input.keepBinding) page.markOperatorReleased();
       return {};
     }
     if (input.action === 'rename') {

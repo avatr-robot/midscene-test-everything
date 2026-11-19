@@ -88,6 +88,7 @@ import {
 import { shouldShowScreenPicker } from './screen-picker';
 import {
   calibrationTargetsAfterPairing,
+  connectedCalibrationScreenId,
   needsPhoneConnectionBeforeAddScreen,
   selectableScreens,
 } from './screen-selection';
@@ -394,6 +395,16 @@ function GuidedContent({
     },
     [requestScreen],
   );
+  const connectedScreenId = connectedCalibrationScreenId(
+    knownScreens,
+    cameraId,
+    phoneReadiness.connection?.devices ?? [],
+    selectedId,
+  );
+  useEffect(() => {
+    if (connectedScreenId && connectedScreenId !== selectedId)
+      selectScreen(connectedScreenId);
+  }, [connectedScreenId, selectScreen, selectedId]);
   const currentStep = useRef(step);
   currentStep.current = step;
   const reportedSingleFailure = useRef<string>();

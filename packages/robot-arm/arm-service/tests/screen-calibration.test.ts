@@ -1051,6 +1051,22 @@ it('keeps paired pages at home on restart until their own calibration screen ope
   expect(host.service.status()).toBeNull();
   expect(f.adapter.movements).toHaveLength(0);
 });
+it('keeps a page home after the operator restores it and opens the screen again', async () => {
+  const f = await fixture();
+  const { page, targetId } = await f.connect();
+  await f.service.pageAction({
+    action: 'release',
+    id: page.saved.id,
+    keepBinding: true,
+  });
+  expect(page.mode).toBe('waiting');
+
+  await f.service.pageAction({ action: 'list', cameraId: 'cam' });
+  await f.service.resumeBoundPage(await f.devices.ensureHost(targetId));
+
+  expect(page.mode).toBe('waiting');
+  expect(page.host).toBeUndefined();
+});
 it('removes a forgotten phone and its perspective from saved screens and open marker sessions', async () => {
   const f = await fixture();
   const android = await f.connect();
