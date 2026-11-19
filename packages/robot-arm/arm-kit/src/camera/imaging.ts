@@ -64,6 +64,9 @@ const MAX_CALIBRATION_EXPOSURE_ITERATIONS = 6;
 const MAX_STEP_UNITS = 3;
 const CONTROL_SETTLE_MS = 120;
 const GAIN_CANDIDATES = [8, 16, 24, 32, 48, 64, 96] as const;
+const GAIN_RANGE_FRACTIONS = [
+  0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64,
+] as const;
 const BRIGHTNESS_OFFSETS = [-8, -4, 0, 4, 8] as const;
 const CONTRAST_OFFSETS = [-16, -8, 0, 8, 16] as const;
 const LOCAL_TONE_OFFSETS = [-1, 0, 1] as const;
@@ -127,6 +130,18 @@ function quantizeControl(value: number, control: CameraControlValue) {
     control.min + Math.round((value - control.min) / step) * step,
     control.min,
     control.max,
+  );
+}
+
+function gainCandidates(control: CameraControlValue) {
+  const preferred = GAIN_CANDIDATES.filter(
+    (value) => value >= control.min && value <= control.max,
+  );
+  if (preferred.length > 0) return preferred;
+  const span = control.max - control.min;
+  if (!(span > 0)) return [];
+  return GAIN_RANGE_FRACTIONS.map((fraction) =>
+    quantizeControl(control.min + span * fraction, control),
   );
 }
 
@@ -689,9 +704,7 @@ export class CameraImagingController {
         classifyExposureExtreme(best.metrics) === 'too-dark')
     ) {
       let bestGainScore = best.score;
-      for (const candidate of GAIN_CANDIDATES) {
-        if (candidate > gain.max) break;
-        const gainValue = quantizeControl(candidate, gain);
+      for (const gainValue of uniqueCandidates(gainCandidates(gain))) {
         await controls.set('gain', gainValue, 'manual');
         await delay(CONTROL_SETTLE_MS);
         const reading = await this.currentCalibrationExposureReading();

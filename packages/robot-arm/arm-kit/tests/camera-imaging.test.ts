@@ -557,6 +557,130 @@ describe('camera imaging', () => {
     }
   }, 30_000);
 
+  it('calibrates an AVFoundation-style camera without Windows tone controls', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const jpeg = await calibrationPattern();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const stream = {
+      getInfo: () => ({
+        state: 'running',
+        width: 400,
+        height: 800,
+        fps: 30,
+        frameId: 1,
+        hasFrame: true,
+        actualFps: 30,
+      }),
+      getFrame: async () => ({
+        id: 1,
+        capturedAt: Date.now(),
+        jpeg,
+      }),
+    };
+    const control = new FakeCameraControl();
+    control.values = {
+      focus: {
+        property: 'focus',
+        value: 0.35,
+        mode: 'auto',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: 0.35,
+        supportsAuto: true,
+        supportsManual: true,
+      },
+      exposure: {
+        property: 'exposure',
+        value: -6,
+        mode: 'auto',
+        min: -12,
+        max: -1,
+        step: 1,
+        default: -6,
+        supportsAuto: true,
+        supportsManual: true,
+      },
+      gain: {
+        property: 'gain',
+        value: 100,
+        mode: 'auto',
+        min: 100,
+        max: 1600,
+        step: 1,
+        default: 100,
+        supportsAuto: true,
+        supportsManual: true,
+      },
+      whiteBalance: {
+        property: 'whiteBalance',
+        value: 5_000,
+        mode: 'auto',
+        min: 2_000,
+        max: 10_000,
+        step: 100,
+        default: 5_000,
+        supportsAuto: true,
+        supportsManual: true,
+      },
+      brightness: {
+        property: 'brightness',
+        value: 0,
+        mode: 'auto',
+        min: 0,
+        max: 0,
+        step: 1,
+        default: 0,
+        supportsAuto: false,
+        supportsManual: false,
+      },
+      contrast: {
+        property: 'contrast',
+        value: 0,
+        mode: 'auto',
+        min: 0,
+        max: 0,
+        step: 1,
+        default: 0,
+        supportsAuto: false,
+        supportsManual: false,
+      },
+    };
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'macOS Camera', backend: 'avfoundation' },
+      stream as never,
+      directory,
+      control,
+    );
+    imaging.registerScreen('screen', () => correction);
+    try {
+      const status = await imaging.calibrate();
+      expect(status.state).toBe('ready');
+      expect(control.values.focus.mode).toBe('manual');
+      expect(control.values.exposure.mode).toBe('manual');
+      expect(control.values.whiteBalance.mode).toBe('manual');
+      expect(
+        control.setCalls.some(
+          (call) =>
+            call.property === 'brightness' || call.property === 'contrast',
+        ),
+      ).toBe(false);
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('restores and clears focus and exposure with the same perspective', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
@@ -763,6 +887,17 @@ describe('camera imaging', () => {
   it('raises gain only after the frame-safe exposure range cannot reach target', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
+    control.values.gain = {
+      property: 'gain',
+      value: 100,
+      mode: 'manual',
+      min: 100,
+      max: 1600,
+      step: 1,
+      default: 100,
+      supportsAuto: false,
+      supportsManual: true,
+    };
     control.values.exposure = {
       ...control.values.exposure,
       value: -8,
@@ -827,7 +962,7 @@ describe('camera imaging', () => {
         254,
         96 +
           (control.values.exposure.value + 11) * 4 +
-          control.values.gain.value * 1.35,
+          (control.values.gain.value - 100) * 1.35,
       );
       return {
         selected: {
@@ -851,7 +986,7 @@ describe('camera imaging', () => {
         { screenId: 'screen', correction },
       ]);
       expect(result.value).toBe(-5);
-      expect(result.gain).toBeGreaterThan(0);
+      expect(result.gain).toBeGreaterThan(100);
       expect(control.values.exposure).toMatchObject({
         value: -5,
         mode: 'manual',
