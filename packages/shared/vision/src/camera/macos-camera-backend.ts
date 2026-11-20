@@ -1,14 +1,16 @@
 import { execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { promises as fs, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { RobotVisionError } from './errors.js';
 import { JpegProcessCameraSource } from './jpeg-process-camera-source.js';
 import { buildCameraApp, openCameraApp } from './macos-camera-app.js';
 import { MacosCameraHardwareControl } from './macos-camera-control.js';
+import {
+  compileMacosCameraExecutable,
+  macosCameraSourceHash,
+} from './macos-camera-native.js';
 import type {
   CameraBackend,
   CameraDevice,
@@ -24,7 +26,14 @@ interface NativeDevice {
   uid: string;
   name: string;
   deviceType?: string;
+  usbLocationId?: number;
   formats: { width: number; height: number; minFps: number; maxFps: number }[];
+}
+
+export function macosCameraControlTarget(
+  device: Pick<NativeDevice, 'uid' | 'usbLocationId'>,
+) {
+  return device.usbLocationId ? `uvc:${device.usbLocationId}` : device.uid;
 }
 
 function defaultCaptureSettings(device: NativeDevice) {
@@ -84,7 +93,10 @@ export class MacosCameraBackend implements CameraBackend {
   private readonly cameraAppDirectory?: string;
   private appPromise?: Promise<string>;
   private helperPromise?: Promise<string>;
-  private deviceCache = new Map<string, Pick<NativeDevice, 'uid' | 'name'>>();
+  private deviceCache = new Map<
+    string,
+    Pick<NativeDevice, 'uid' | 'name' | 'usbLocationId'>
+  >();
 
   constructor(options: MacosCameraBackendOptions = {}) {
     this.cameraAppDirectory =
@@ -137,6 +149,10 @@ export class MacosCameraBackend implements CameraBackend {
           (item.deviceType === undefined ||
             (typeof item.deviceType === 'string' &&
               item.deviceType.length > 0)) &&
+          (item.usbLocationId === undefined ||
+            (Number.isInteger(item.usbLocationId) &&
+              item.usbLocationId > 0 &&
+              item.usbLocationId <= 0xffff_ffff)) &&
           Array.isArray(item.formats) &&
           item.formats.every(
             (format: NativeDevice['formats'][number]) =>
@@ -165,6 +181,7 @@ export class MacosCameraBackend implements CameraBackend {
         backend: 'avfoundation' as const,
         deviceType: device.deviceType,
         uid: device.uid,
+        usbLocationId: device.usbLocationId,
         native: device,
       })),
       { includeVirtual: this.includeVirtualDevices },
@@ -181,7 +198,11 @@ export class MacosCameraBackend implements CameraBackend {
     this.deviceCache = new Map(
       physical.map((device) => [
         device.id,
-        { uid: device.uid, name: device.name },
+        {
+          uid: device.uid,
+          name: device.name,
+          usbLocationId: device.usbLocationId,
+        },
       ]),
     );
     return physical.map(
@@ -234,8 +255,10 @@ export class MacosCameraBackend implements CameraBackend {
   ): Promise<CameraHardwareControl | undefined> {
     const device = await this.cachedDevice(deviceId);
     if (!device) return undefined;
-    const control = new MacosCameraHardwareControl(deviceId, device.uid, () =>
-      this.controlExecutable(),
+    const control = new MacosCameraHardwareControl(
+      deviceId,
+      this.helperPath ? device.uid : macosCameraControlTarget(device),
+      () => this.controlExecutable(),
     );
     await control.open();
     return control;
@@ -289,24 +312,7 @@ export class MacosCameraBackend implements CameraBackend {
   }
 
   private async compileHelper(): Promise<string> {
-    const source = fileURLToPath(
-      new URL('../../native/macos-camera.swift', import.meta.url),
-    );
-    let contents: Buffer;
-    try {
-      contents = await fs.readFile(source);
-    } catch (error) {
-      throw new RobotVisionError(
-        'STREAM_FAILED',
-        `macOS camera helper source not found: ${source}`,
-        error,
-      );
-    }
-    const digest = createHash('sha256')
-      .update(contents)
-      .update(process.arch)
-      .digest('hex')
-      .slice(0, 16);
+    const digest = await macosCameraSourceHash();
     const directory = join(
       tmpdir(),
       `midscene-robot-vision-${process.getuid?.() ?? 'user'}`,
@@ -316,11 +322,7 @@ export class MacosCameraBackend implements CameraBackend {
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     const candidate = `${binary}-${process.pid}`;
     try {
-      await execFileAsync('/usr/bin/swiftc', ['-O', source, '-o', candidate], {
-        encoding: 'utf8',
-        timeout: 120_000,
-        maxBuffer: 1024 * 1024,
-      });
+      await compileMacosCameraExecutable(candidate);
       await fs.rename(candidate, binary);
       return binary;
     } catch (error) {

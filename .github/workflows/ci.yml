@@ -123,5 +123,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Typecheck AVFoundation helper
-        run: xcrun swiftc -typecheck packages/shared/vision/native/macos-camera.swift
+      - name: Typecheck and link camera helper
+        run: |
+          set -euo pipefail
+          native=packages/shared/vision/native
+          object="$RUNNER_TEMP/macos-camera-uvc.o"
+          xcrun --sdk macosx clang -fobjc-arc -fblocks -c "$native/macos-camera-uvc.m" -o "$object"
+          xcrun --sdk macosx swiftc -typecheck -import-objc-header "$native/macos-camera-uvc.h" "$native/macos-camera.swift"
+          xcrun --sdk macosx swiftc -O "$native/macos-camera.swift" "$object" \
+            -import-objc-header "$native/macos-camera-uvc.h" \
+            -framework IOKit \
+            -o "$RUNNER_TEMP/midscene-camera"

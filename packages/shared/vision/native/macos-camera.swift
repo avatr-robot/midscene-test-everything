@@ -11,6 +11,7 @@ struct DeviceInfo: Encodable {
     let name: String
     let deviceType: String
     let formats: [CaptureMode]
+    let usbLocationId: UInt32?
 }
 
 struct CaptureMode: Encodable {
@@ -18,6 +19,20 @@ struct CaptureMode: Encodable {
     let height: Int32
     let minFps: Double
     let maxFps: Double
+}
+
+struct UVCDeviceInfo: Decodable {
+    let locationId: UInt32
+    let vendorId: UInt32
+    let productId: UInt32
+    let name: String
+    let serialNumber: String
+}
+
+struct UVCDeviceListResponse: Decodable {
+    let ok: Bool
+    let devices: [UVCDeviceInfo]?
+    let error: String?
 }
 
 struct ControlRequest: Decodable {
@@ -28,7 +43,7 @@ struct ControlRequest: Decodable {
     let mode: String?
 }
 
-struct ControlValue: Encodable {
+struct ControlValue: Codable {
     let property: String
     let value: Double
     let mode: String
@@ -52,20 +67,10 @@ struct ControlResponse: Encodable {
     let error: String?
 }
 
-final class ControlCompletionState {
-    private let lock = NSLock()
-    private var finished = false
-
-    func finish(_ action: () -> Void) {
-        lock.lock()
-        if finished {
-            lock.unlock()
-            return
-        }
-        finished = true
-        lock.unlock()
-        action()
-    }
+struct UVCControlResponse: Decodable {
+    let ok: Bool
+    let controls: [String: ControlValue]?
+    let error: String?
 }
 
 func cameras() -> [AVCaptureDevice] {
@@ -133,375 +138,60 @@ func fail(_ message: String) -> Never {
     exit(1)
 }
 
-func clampControl(_ value: Double, _ min: Double, _ max: Double) -> Double {
-    Swift.max(min, Swift.min(max, value))
+func takeNativeString(_ pointer: UnsafeMutablePointer<CChar>) -> String {
+    defer { MidsceneUVCFreeString(pointer) }
+    return String(cString: pointer)
 }
 
-func controlMode(manual: Bool) -> String {
-    manual ? "manual" : "auto"
-}
-
-func exposureBounds(_ device: AVCaptureDevice) -> (min: Double, max: Double) {
-    let advertisedMin = CMTimeGetSeconds(device.activeFormat.minExposureDuration)
-    let advertisedMax = CMTimeGetSeconds(device.activeFormat.maxExposureDuration)
-    let minSeconds = advertisedMin.isFinite && advertisedMin > 0
-        ? advertisedMin
-        : 0.000_001
-    let maxSeconds = advertisedMax.isFinite && advertisedMax >= minSeconds
-        ? advertisedMax
-        : 1
-    return (
-        min: floor(log2(minSeconds)),
-        max: ceil(log2(maxSeconds))
-    )
-}
-
-func exposureValue(_ duration: CMTime) -> Double {
-    let seconds = CMTimeGetSeconds(duration)
-    return log2(seconds.isFinite && seconds > 0 ? seconds : 0.000_001)
-}
-
-func supportsAutoExposure(_ device: AVCaptureDevice) -> Bool {
-    device.isExposureModeSupported(.continuousAutoExposure) ||
-        device.isExposureModeSupported(.autoExpose)
-}
-
-func readFocus(_ device: AVCaptureDevice) -> ControlValue? {
-    let supportsManual = device.isLockingFocusWithCustomLensPositionSupported
-    let supportsAuto = device.isFocusModeSupported(.continuousAutoFocus) ||
-        device.isFocusModeSupported(.autoFocus)
-    guard supportsManual || supportsAuto else { return nil }
-    let value = Double(device.lensPosition)
-    return ControlValue(
-        property: "focus",
-        value: value,
-        mode: controlMode(manual: device.focusMode == .locked),
-        min: 0,
-        max: 1,
-        step: 0.01,
-        defaultValue: value,
-        supportsAuto: supportsAuto,
-        supportsManual: supportsManual
-    )
-}
-
-func readExposure(_ device: AVCaptureDevice) -> ControlValue? {
-    let supportsManual = device.isExposureModeSupported(.custom)
-    let supportsAuto = supportsAutoExposure(device)
-    guard supportsManual || supportsAuto else { return nil }
-    let bounds = exposureBounds(device)
-    let value = clampControl(
-        exposureValue(device.exposureDuration),
-        bounds.min,
-        bounds.max
-    )
-    return ControlValue(
-        property: "exposure",
-        value: value,
-        mode: controlMode(manual: device.exposureMode == .custom),
-        min: bounds.min,
-        max: bounds.max,
-        step: 1,
-        defaultValue: value,
-        supportsAuto: supportsAuto,
-        supportsManual: supportsManual
-    )
-}
-
-func readGain(_ device: AVCaptureDevice) -> ControlValue? {
-    let supportsManual = device.isExposureModeSupported(.custom)
-    let supportsAuto = supportsAutoExposure(device)
-    let minISO = Double(device.activeFormat.minISO)
-    let maxISO = Double(device.activeFormat.maxISO)
-    guard supportsManual || supportsAuto,
-          minISO.isFinite,
-          maxISO.isFinite,
-          maxISO >= minISO,
-          maxISO > 0 else { return nil }
-    let value = clampControl(Double(device.iso), minISO, maxISO)
-    return ControlValue(
-        property: "gain",
-        value: value,
-        mode: controlMode(manual: device.exposureMode == .custom),
-        min: minISO,
-        max: maxISO,
-        step: 1,
-        defaultValue: value,
-        supportsAuto: supportsAuto,
-        supportsManual: supportsManual
-    )
-}
-
-func readWhiteBalance(_ device: AVCaptureDevice) -> ControlValue? {
-    let supportsManual = device.isLockingWhiteBalanceWithCustomDeviceGainsSupported
-    let supportsAuto = device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) ||
-        device.isWhiteBalanceModeSupported(.autoWhiteBalance)
-    guard supportsManual || supportsAuto else { return nil }
-    let temperature = device.temperatureAndTintValues(
-        for: device.deviceWhiteBalanceGains
-    ).temperature
-    let value = clampControl(Double(temperature), 2_000, 10_000)
-    return ControlValue(
-        property: "whiteBalance",
-        value: value,
-        mode: controlMode(manual: device.whiteBalanceMode == .locked),
-        min: 2_000,
-        max: 10_000,
-        step: 100,
-        defaultValue: value,
-        supportsAuto: supportsAuto,
-        supportsManual: supportsManual
-    )
-}
-
-func readControls(_ device: AVCaptureDevice) -> [String: ControlValue] {
-    var controls: [String: ControlValue] = [:]
-    if let focus = readFocus(device) { controls["focus"] = focus }
-    if let exposure = readExposure(device) { controls["exposure"] = exposure }
-    if let gain = readGain(device) { controls["gain"] = gain }
-    if let whiteBalance = readWhiteBalance(device) {
-        controls["whiteBalance"] = whiteBalance
-    }
-    return controls
-}
-
-func waitForControl(_ operation: (@escaping (Error?) -> Void) -> Void) throws {
-    let semaphore = DispatchSemaphore(value: 0)
-    var operationError: Error?
-    operation { error in
-        operationError = error
-        semaphore.signal()
-    }
-    guard semaphore.wait(timeout: .now() + 3) == .success else {
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Camera control timed out"]
-        )
-    }
-    if let operationError { throw operationError }
-}
-
-func runLockedControl(
-    _ device: AVCaptureDevice,
-    operation: (@escaping (Error?) -> Void) -> Void
-) throws {
-    let state = ControlCompletionState()
+func uvcDevices() -> [UVCDeviceInfo] {
+    guard let pointer = MidsceneUVCDeviceListJSON() else { return [] }
+    let data = Data(takeNativeString(pointer).utf8)
     do {
-        try waitForControl { completion in
-            operation { error in
-                state.finish {
-                    device.unlockForConfiguration()
-                    completion(error)
-                }
-            }
-        }
+        let response = try JSONDecoder().decode(
+            UVCDeviceListResponse.self,
+            from: data
+        )
+        return response.ok ? response.devices ?? [] : []
     } catch {
-        state.finish {
-            device.unlockForConfiguration()
-        }
-        throw error
+        return []
     }
 }
 
-func setAutoExposure(_ device: AVCaptureDevice) {
-    if device.isExposureModeSupported(.continuousAutoExposure) {
-        device.exposureMode = .continuousAutoExposure
-    } else {
-        device.exposureMode = .autoExpose
-    }
+func normalizedHardwareName(_ value: String) -> String {
+    let scalars = value
+        .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        .unicodeScalars
+        .filter(CharacterSet.alphanumerics.contains)
+    return String(String.UnicodeScalarView(scalars))
 }
 
-func setFocus(_ device: AVCaptureDevice, value: Double, mode: String) throws {
-    try device.lockForConfiguration()
-    if mode == "auto" {
-        defer { device.unlockForConfiguration() }
-        if device.isFocusModeSupported(.continuousAutoFocus) {
-            device.focusMode = .continuousAutoFocus
-        } else if device.isFocusModeSupported(.autoFocus) {
-            device.focusMode = .autoFocus
-        } else {
-            throw NSError(
-                domain: "MidsceneCameraControl",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Automatic focus is unavailable"]
-            )
-        }
-        return
+func matchingUVCDevice(
+    for camera: AVCaptureDevice,
+    devices: [UVCDeviceInfo]
+) -> UVCDeviceInfo? {
+    let uid = camera.uniqueID.lowercased()
+    let serialMatches = devices.filter {
+        $0.serialNumber.count >= 4 &&
+            uid.contains($0.serialNumber.lowercased())
     }
-    guard device.isLockingFocusWithCustomLensPositionSupported else {
-        device.unlockForConfiguration()
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 3,
-            userInfo: [NSLocalizedDescriptionKey: "Manual focus is unavailable"]
-        )
-    }
-    let lensPosition = Float(clampControl(value, 0, 1))
-    try runLockedControl(device) { completion in
-        device.setFocusModeLocked(
-            lensPosition: lensPosition,
-            completionHandler: { _ in completion(nil) }
-        )
-    }
-}
+    if serialMatches.count == 1 { return serialMatches[0] }
 
-func lockedExposureDuration(_ device: AVCaptureDevice, value: Double) -> CMTime {
-    let bounds = exposureBounds(device)
-    let seconds = clampControl(pow(2, value), pow(2, bounds.min), pow(2, bounds.max))
-    return CMTime(seconds: seconds, preferredTimescale: 1_000_000_000)
-}
+    let deviceName = normalizedHardwareName(camera.localizedName)
+    let named = devices.filter {
+        normalizedHardwareName($0.name) == deviceName
+    }
+    if named.count == 1 { return named[0] }
 
-func setExposure(
-    _ device: AVCaptureDevice,
-    value: Double,
-    mode: String,
-    iso: Float? = nil
-) throws {
-    try device.lockForConfiguration()
-    if mode == "auto" {
-        setAutoExposure(device)
-        device.unlockForConfiguration()
-        return
+    let containsName = devices.filter {
+        let hardwareName = normalizedHardwareName($0.name)
+        return hardwareName.count >= 4 &&
+            (hardwareName.contains(deviceName) || deviceName.contains(hardwareName))
     }
-    guard device.isExposureModeSupported(.custom) else {
-        device.unlockForConfiguration()
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 5,
-            userInfo: [NSLocalizedDescriptionKey: "Manual exposure is unavailable"]
-        )
-    }
-    let duration = lockedExposureDuration(device, value: value)
-    let selectedISO = Swift.max(
-        device.activeFormat.minISO,
-        Swift.min(device.activeFormat.maxISO, iso ?? device.iso)
-    )
-    try runLockedControl(device) { completion in
-        device.setExposureModeCustom(
-            duration: duration,
-            iso: selectedISO,
-            completionHandler: { _ in completion(nil) }
-        )
-    }
-}
+    if containsName.count == 1 { return containsName[0] }
 
-func setGain(_ device: AVCaptureDevice, value: Double, mode: String) throws {
-    try device.lockForConfiguration()
-    if mode == "auto" {
-        setAutoExposure(device)
-        device.unlockForConfiguration()
-        return
-    }
-    guard device.isExposureModeSupported(.custom) else {
-        device.unlockForConfiguration()
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 6,
-            userInfo: [NSLocalizedDescriptionKey: "Manual gain is unavailable"]
-        )
-    }
-    let iso = Float(clampControl(
-        value,
-        Double(device.activeFormat.minISO),
-        Double(device.activeFormat.maxISO)
-    ))
-    let duration = device.exposureDuration
-    try runLockedControl(device) { completion in
-        device.setExposureModeCustom(
-            duration: duration,
-            iso: iso,
-            completionHandler: { _ in completion(nil) }
-        )
-    }
-}
-
-func normalizedWhiteBalanceGains(
-    _ gains: AVCaptureDevice.WhiteBalanceGains,
-    maximum: Float
-) -> AVCaptureDevice.WhiteBalanceGains {
-    AVCaptureDevice.WhiteBalanceGains(
-        redGain: Swift.max(1, Swift.min(maximum, gains.redGain)),
-        greenGain: Swift.max(1, Swift.min(maximum, gains.greenGain)),
-        blueGain: Swift.max(1, Swift.min(maximum, gains.blueGain))
-    )
-}
-
-func setWhiteBalance(
-    _ device: AVCaptureDevice,
-    value: Double,
-    mode: String
-) throws {
-    try device.lockForConfiguration()
-    if mode == "auto" {
-        defer { device.unlockForConfiguration() }
-        if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
-            device.whiteBalanceMode = .continuousAutoWhiteBalance
-        } else if device.isWhiteBalanceModeSupported(.autoWhiteBalance) {
-            device.whiteBalanceMode = .autoWhiteBalance
-        } else {
-            throw NSError(
-                domain: "MidsceneCameraControl",
-                code: 7,
-                userInfo: [NSLocalizedDescriptionKey: "Automatic white balance is unavailable"]
-            )
-        }
-        return
-    }
-    guard device.isLockingWhiteBalanceWithCustomDeviceGainsSupported else {
-        device.unlockForConfiguration()
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 8,
-            userInfo: [NSLocalizedDescriptionKey: "Manual white balance is unavailable"]
-        )
-    }
-    let current = device.temperatureAndTintValues(
-        for: device.deviceWhiteBalanceGains
-    )
-    let target = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
-        temperature: Float(clampControl(value, 2_000, 10_000)),
-        tint: current.tint
-    )
-    let gains = normalizedWhiteBalanceGains(
-        device.deviceWhiteBalanceGains(for: target),
-        maximum: device.maxWhiteBalanceGain
-    )
-    try runLockedControl(device) { completion in
-        device.setWhiteBalanceModeLocked(
-            with: gains,
-            completionHandler: { _ in completion(nil) }
-        )
-    }
-}
-
-func setControl(_ device: AVCaptureDevice, request: ControlRequest) throws {
-    guard let property = request.property,
-          let value = request.value,
-          let mode = request.mode,
-          mode == "auto" || mode == "manual" else {
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 9,
-            userInfo: [NSLocalizedDescriptionKey: "Camera control value is invalid"]
-        )
-    }
-    switch property {
-    case "focus":
-        try setFocus(device, value: value, mode: mode)
-    case "exposure":
-        try setExposure(device, value: value, mode: mode)
-    case "gain":
-        try setGain(device, value: value, mode: mode)
-    case "whiteBalance":
-        try setWhiteBalance(device, value: value, mode: mode)
-    default:
-        throw NSError(
-            domain: "MidsceneCameraControl",
-            code: 10,
-            userInfo: [NSLocalizedDescriptionKey: "Unsupported camera property: \(property)"]
-        )
-    }
+    if serialMatches.count == 1 { return serialMatches[0] }
+    if devices.count == 1 { return devices[0] }
+    return nil
 }
 
 func writeControlResponse(_ response: ControlResponse) {
@@ -515,11 +205,79 @@ func writeControlResponse(_ response: ControlResponse) {
     }
 }
 
-func runControl(_ uid: String) -> Never {
-    authorizeCamera()
-    guard let device = cameras().first(where: { $0.uniqueID == uid }) else {
-        fail("Camera UID not found: \(uid)")
+func queryUVCControls(
+    _ device: UnsafeMutableRawPointer
+) throws -> UVCControlResponse {
+    guard let pointer = MidsceneUVCDeviceQueryJSON(device) else {
+        throw NSError(
+            domain: "MidsceneCameraControl",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "UVC query returned no response"]
+        )
     }
+    let data = Data(takeNativeString(pointer).utf8)
+    let response = try JSONDecoder().decode(UVCControlResponse.self, from: data)
+    if !response.ok {
+        throw NSError(
+            domain: "MidsceneCameraControl",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey:
+                response.error ?? "UVC camera query failed"]
+        )
+    }
+    return response
+}
+
+func setUVCControl(
+    _ device: UnsafeMutableRawPointer,
+    property: String,
+    value: Double,
+    mode: String
+) throws {
+    guard let pointer = MidsceneUVCDeviceSetJSON(
+        device,
+        property,
+        value,
+        mode
+    ) else {
+        throw NSError(
+            domain: "MidsceneCameraControl",
+            code: 3,
+            userInfo: [NSLocalizedDescriptionKey: "UVC set returned no response"]
+        )
+    }
+    let data = Data(takeNativeString(pointer).utf8)
+    let response = try JSONDecoder().decode(UVCControlResponse.self, from: data)
+    if !response.ok {
+        throw NSError(
+            domain: "MidsceneCameraControl",
+            code: 4,
+            userInfo: [NSLocalizedDescriptionKey:
+                response.error ?? "UVC camera command failed"]
+        )
+    }
+}
+
+func openUVCControl(_ target: String) -> UnsafeMutableRawPointer? {
+    if target.hasPrefix("uvc:"),
+       let location = UInt32(target.dropFirst(4)) {
+        return MidsceneUVCDeviceCreateForLocation(location)
+    }
+    guard let camera = cameras().first(where: { $0.uniqueID == target }),
+          let match = matchingUVCDevice(for: camera, devices: uvcDevices())
+    else { return nil }
+    return MidsceneUVCDeviceCreateForLocation(match.locationId)
+}
+
+func runControl(_ target: String) -> Never {
+    guard let device = openUVCControl(target) else {
+        fail(
+            "No standard UVC controls found for \(target). " +
+            "Built-in and Continuity cameras do not expose USB UVC controls."
+        )
+    }
+    defer { MidsceneUVCDeviceDestroy(device) }
+
     writeControlResponse(
         ControlResponse(id: "ready", ok: true, controls: nil, error: nil)
     )
@@ -529,8 +287,9 @@ func runControl(_ uid: String) -> Never {
             guard let data = line.data(using: .utf8) else {
                 throw NSError(
                     domain: "MidsceneCameraControl",
-                    code: 11,
-                    userInfo: [NSLocalizedDescriptionKey: "Camera control request is not UTF-8"]
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Camera control request is not UTF-8"]
                 )
             }
             request = try JSONDecoder().decode(ControlRequest.self, from: data)
@@ -545,19 +304,37 @@ func runControl(_ uid: String) -> Never {
             )
             continue
         }
+
         do {
             switch request.action {
             case "query":
+                let response = try queryUVCControls(device)
                 writeControlResponse(
                     ControlResponse(
                         id: request.id,
                         ok: true,
-                        controls: readControls(device),
+                        controls: response.controls,
                         error: nil
                     )
                 )
             case "set":
-                try setControl(device, request: request)
+                guard let property = request.property,
+                      let value = request.value,
+                      let mode = request.mode,
+                      mode == "auto" || mode == "manual" else {
+                    throw NSError(
+                        domain: "MidsceneCameraControl",
+                        code: 6,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Camera control value is invalid"]
+                    )
+                }
+                try setUVCControl(
+                    device,
+                    property: property,
+                    value: value,
+                    mode: mode
+                )
                 writeControlResponse(
                     ControlResponse(
                         id: request.id,
@@ -579,8 +356,9 @@ func runControl(_ uid: String) -> Never {
             default:
                 throw NSError(
                     domain: "MidsceneCameraControl",
-                    code: 12,
-                    userInfo: [NSLocalizedDescriptionKey: "Unknown camera control action: \(request.action)"]
+                    code: 7,
+                    userInfo: [NSLocalizedDescriptionKey:
+                        "Unknown camera control action: \(request.action)"]
                 )
             }
         } catch {
@@ -682,6 +460,7 @@ if args.count == 3 && args[1] == "control" {
     runControl(args[2])
 }
 if args.count == 2 && args[1] == "list" {
+    let uvc = uvcDevices()
     let devices = cameras().map { device in
         let formats = device.formats.flatMap { format -> [CaptureMode] in
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
@@ -690,8 +469,13 @@ if args.count == 2 && args[1] == "list" {
                             minFps: range.minFrameRate, maxFps: range.maxFrameRate)
             }
         }
-        return DeviceInfo(uid: device.uniqueID, name: device.localizedName,
-                          deviceType: device.deviceType.rawValue, formats: formats)
+        return DeviceInfo(
+            uid: device.uniqueID,
+            name: device.localizedName,
+            deviceType: device.deviceType.rawValue,
+            formats: formats,
+            usbLocationId: matchingUVCDevice(for: device, devices: uvc)?.locationId
+        )
     }
     do {
         let data = try JSONEncoder().encode(devices)
@@ -704,7 +488,7 @@ if args.count == 2 && args[1] == "list" {
 
 let appCapture = args.count == 10 && args[8] == "--socket"
 guard (args.count == 8 || appCapture), args[1] == "capture" else {
-    fail("Usage: macos-camera list | control <uid> | capture <uid> <width> <height> <fps> <horizontalFlip> <verticalFlip>")
+    fail("Usage: macos-camera list | control <uid-or-uvc-location> | capture <uid> <width> <height> <fps> <horizontalFlip> <verticalFlip>")
 }
 if appCapture {
     connectToService(args[9])
