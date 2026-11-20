@@ -111,3 +111,17 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+  macos-native:
+    name: macOS native camera
+    runs-on: macos-14
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Typecheck AVFoundation helper
+        run: xcrun swiftc -typecheck packages/shared/vision/native/macos-camera.swift

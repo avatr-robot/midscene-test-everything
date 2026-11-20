@@ -87,7 +87,12 @@ export class MacosCameraBackend implements CameraBackend {
   private deviceCache = new Map<string, Pick<NativeDevice, 'uid' | 'name'>>();
 
   constructor(options: MacosCameraBackendOptions = {}) {
-    this.cameraAppDirectory = options.cameraAppDirectory;
+    this.cameraAppDirectory =
+      options.cameraAppDirectory ||
+      process.env.ROBOT_VISION_MACOS_CAMERA_APP_DIR ||
+      (process.platform === 'darwin'
+        ? join(tmpdir(), 'midscene-robot-vision-apps')
+        : undefined);
     this.helperPath =
       options.helperPath || process.env.ROBOT_VISION_MACOS_CAMERA_HELPER_PATH;
     this.includeVirtualDevices =
@@ -227,18 +232,22 @@ export class MacosCameraBackend implements CameraBackend {
   async openHardwareControl(
     deviceId: string,
   ): Promise<CameraHardwareControl | undefined> {
-    // The bundled macOS helper captures video. Numeric camera controls require
-    // an explicitly configured helper that implements the control protocol.
-    if (!this.helperPath) return undefined;
-
-    if (!this.deviceCache.has(deviceId)) await this.listDevices();
-    const device = this.deviceCache.get(deviceId);
+    const device = await this.cachedDevice(deviceId);
     if (!device) return undefined;
     const control = new MacosCameraHardwareControl(deviceId, device.uid, () =>
-      this.getHelper(),
+      this.controlExecutable(),
     );
     await control.open();
     return control;
+  }
+
+  private async cachedDevice(deviceId: string) {
+    let device = this.deviceCache.get(deviceId);
+    if (!device) {
+      await this.listDevices();
+      device = this.deviceCache.get(deviceId);
+    }
+    return device;
   }
 
   private getCameraApp(): Promise<string> {
@@ -249,6 +258,17 @@ export class MacosCameraBackend implements CameraBackend {
       },
     );
     return this.appPromise;
+  }
+
+  private async controlExecutable(): Promise<string> {
+    if (this.cameraAppDirectory && !this.helperPath)
+      return join(
+        await this.getCameraApp(),
+        'Contents',
+        'MacOS',
+        'MidsceneCamera',
+      );
+    return this.getHelper();
   }
 
   private getHelper(): Promise<string> {

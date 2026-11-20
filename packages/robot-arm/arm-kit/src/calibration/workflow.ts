@@ -1112,6 +1112,14 @@ export class CalibrationWorkflow {
       return this.configuration.clearMapping();
     });
   }
+  /** Apply a manual perspective without replaying marker or imaging calibration. */
+  async rebindCameraMapping() {
+    return this.configureSetup(async () => {
+      const setup = await this.configuration.rebindCurrentMapping();
+      if (setup.mapping) this.mappingCheck = 'confirmed';
+      return setup;
+    });
+  }
   private async configureSetup(
     work: () => AssistedCalibrationSetup | Promise<AssistedCalibrationSetup>,
   ) {
