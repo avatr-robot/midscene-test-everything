@@ -1,9 +1,16 @@
 import type { CameraCorrection } from '@midscene/robotics-shared/contracts';
+import * as React from 'react';
 import { useRef } from 'react';
 import { label as defaultLabel } from './labels.js';
 
 const corners = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as const;
 const labels = ['TL', 'TR', 'BR', 'BL'];
+
+function outlinePoints({ points }: CameraCorrection) {
+  return corners
+    .map((corner) => `${points[corner].x},${points[corner].y}`)
+    .join(' ');
+}
 
 /** Screen rings and outline migrated from robot-vision's CalibrationPreview. */
 export function CameraCornerEditor({
@@ -12,10 +19,17 @@ export function CameraCornerEditor({
   disabled,
   onChange,
   onDragging,
+  overlays = [],
   translate = defaultLabel,
 }: {
   translate?: typeof defaultLabel;
   onDragging?(active: boolean): void;
+  overlays?: ReadonlyArray<{
+    id: string;
+    name: string;
+    value: CameraCorrection;
+    active: boolean;
+  }>;
   value: CameraCorrection;
   src: string;
   disabled: boolean;
@@ -65,14 +79,20 @@ export function CameraCornerEditor({
           viewBox={`0 0 ${value.sourceWidth} ${value.sourceHeight}`}
         >
           <title>{translate('Screen outline')}</title>
-          <polygon
-            points={corners
-              .map(
-                (corner) =>
-                  `${value.points[corner].x},${value.points[corner].y}`,
-              )
-              .join(' ')}
-          />
+          {overlays.length === 0 && <polygon points={outlinePoints(value)} />}
+          {overlays.map((overlay) => (
+            <polygon
+              key={overlay.id}
+              className={
+                overlay.active
+                  ? 'camera-corner-overlay camera-corner-overlay-active'
+                  : 'camera-corner-overlay'
+              }
+              points={outlinePoints(overlay.value)}
+            >
+              <title>{overlay.name}</title>
+            </polygon>
+          ))}
         </svg>
         {corners.map((corner, index) => (
           <button

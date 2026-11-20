@@ -566,28 +566,26 @@ function GuidedContent({
    * mapping, so the later steps and the marker review read one geometry.
    */
   const applyCorrection = useCallback(
-    async (correction: CameraCorrection) => {
-      const saved = await markerRequest<Configuration>(
-        `${base}/camera/correction`,
-        correction,
-      );
+    async (
+      updates: ReadonlyArray<{
+        screenId: string;
+        correction: CameraCorrection;
+      }>,
+    ) => {
+      for (const update of updates)
+        await markerRequest<Configuration>(
+          `/api/devices/${encodeURIComponent(update.screenId)}/calibration/camera/correction`,
+          update.correction,
+        );
       // Page mapping needs the saved tool setup; a bench that has not saved it
-      // yet keeps the perspective and maps during the tool step.
+      // yet keeps the perspective and maps during the tool step. The host
+      // rebinds an existing mapping to the manual corners without replaying
+      // marker detection or camera imaging calibration.
       if (currentBase.current !== base) return;
-      if (saved.output) {
-        try {
-          await client.mapAssistedCalibration(saved.output);
-          if (currentBase.current === base) setMappingError(undefined);
-        } catch (cause) {
-          if (currentBase.current === base)
-            setMappingError(
-              cause instanceof Error ? cause.message : String(cause),
-            );
-        }
-      }
+      setMappingError(undefined);
       await refresh();
     },
-    [base, client, refresh],
+    [base, refresh],
   );
   /**
    * Clearing keeps the screen, its page link and its marker slot; only the
@@ -885,20 +883,28 @@ function GuidedContent({
   };
   const waitForImagingCalibration = useCallback(async () => {
     const deadline = Date.now() + 30_000;
-    for (;;) {
-      const setup = await client.assistedCalibrationSetup();
-      const imaging = setup.imaging;
-      if (imaging?.state === 'ready' || imaging?.state === 'unsupported')
-        return;
-      if (imaging?.state === 'error')
-        throw new Error(
-          imaging.message ?? 'Could not calibrate the camera image.',
+    try {
+      while (currentBase.current === base) {
+        const { imaging } = await client.assistedCalibrationSetup();
+        if (imaging?.state === 'ready' || imaging?.state === 'unsupported')
+          return;
+        if (imaging?.state === 'error')
+          throw new Error(
+            imaging.message ?? 'Could not calibrate the camera image.',
+          );
+        if (Date.now() >= deadline)
+          throw new Error('Timed out while calibrating the camera image.');
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    } catch (cause) {
+      if (currentBase.current === base)
+        void message.warning(
+          calibrationErrorText(
+            cause instanceof Error ? cause.message : String(cause),
+          ),
         );
-      if (Date.now() >= deadline)
-        throw new Error('Timed out while calibrating the camera image.');
-      await new Promise((resolve) => setTimeout(resolve, 100));
     }
-  }, [client]);
+  }, [base, client, message]);
   const detected = useCallback(
     async (
       _session: unknown,
@@ -957,6 +963,7 @@ function GuidedContent({
         if (failures.length) throw new Error(failures.join('\n'));
         mappingApplied = true;
         await waitForImagingCalibration();
+        if (currentBase.current !== base) return;
         void message.success(t('Camera mapping applied automatically'));
         pendingAddedScreen.current = undefined;
         await refresh();
@@ -1534,12 +1541,9 @@ function GuidedContent({
                       perspectiveOpen={perspectiveEditor}
                       onPerspectiveOpenChange={(open) => {
                         // Placing the corners by hand is a deliberate choice:
-                        // keep the automatic pass from opening over the editor.
+                        // keep the automatic pass from opening over the editor
+                        // while retaining the existing camera imaging profile.
                         if (open) autoDetectStarted.current = selectedId;
-                        if (open)
-                          void controller
-                            .releaseImaging()
-                            .catch(() => undefined);
                         setPerspectiveEditor(open);
                       }}
                       output={
@@ -1610,7 +1614,6 @@ function GuidedContent({
                       onConfirm={async () => {
                         try {
                           await controller.map(config.output);
-                          await waitForImagingCalibration();
                         } catch (cause) {
                           if (currentBase.current === base)
                             setMappingError(
@@ -1620,8 +1623,10 @@ function GuidedContent({
                             );
                           return;
                         }
-                        if (currentBase.current === base)
-                          setMappingError(undefined);
+                        if (currentBase.current !== base) return;
+                        await waitForImagingCalibration();
+                        if (currentBase.current !== base) return;
+                        setMappingError(undefined);
                         await refresh();
                       }}
                       onClear={clearCorrection}
@@ -2018,6 +2023,7 @@ function GuidedContent({
               if (failures.length) setError(failures.join('\n'));
               if (failures.length) throw new Error(failures.join('\n'));
               await waitForImagingCalibration();
+              if (currentBase.current !== base) return;
               pendingAddedScreen.current = undefined;
               await refresh();
               if (currentBase.current !== base) return;
