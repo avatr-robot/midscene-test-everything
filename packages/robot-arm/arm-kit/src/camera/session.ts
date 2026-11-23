@@ -33,6 +33,11 @@ import {
 } from './perspective-monitor.js';
 import { PerspectiveTransformer } from './perspective-transformer.js';
 import { checkPerspectiveValidity } from './perspective-validity.js';
+import { rectifiedPreviewPool } from './rectified-preview-pool.js';
+import {
+  type RectifiedPreviewOptions,
+  transformRectifiedPreview,
+} from './rectified-preview-transform.js';
 import type {
   CameraBackend,
   CameraDevice,
@@ -473,12 +478,22 @@ export class CameraSession implements CalibrationVision {
   /** Rectify the frame received by the live preview without requesting another. */
   async rectifiedFrame(
     jpeg: Buffer,
-    options: {
-      maxSide?: number;
-      maxPixels?: number;
-      sampling?: 'bilinear' | 'nearest';
-    } = {},
+    options: RectifiedPreviewOptions = {},
   ): Promise<Buffer> {
+    const request = this.rectifiedPreviewRequest(options);
+    return transformRectifiedPreview(jpeg, request, this.transformer);
+  }
+  /** Move CPU-bound live preview rectification off the HTTP event-loop thread. */
+  async rectifiedPreviewFrame(
+    jpeg: Buffer,
+    options: RectifiedPreviewOptions = {},
+  ): Promise<Buffer> {
+    return rectifiedPreviewPool.transform(
+      jpeg,
+      this.rectifiedPreviewRequest(options),
+    );
+  }
+  private rectifiedPreviewRequest(options: RectifiedPreviewOptions = {}) {
     const correction = this.correction;
     const target = this.getRectifiedPreviewTarget();
     if (!correction || !target)
@@ -487,35 +502,7 @@ export class CameraSession implements CalibrationVision {
         'Save perspective correction before viewing the corrected preview',
         409,
       );
-    const size = jpegSize(jpeg);
-    if (
-      size.width !== correction.sourceWidth ||
-      size.height !== correction.sourceHeight
-    )
-      throw new RobotArmError(
-        'VISION_BINDING_CHANGED',
-        'Camera image dimensions changed; repeat correction',
-        409,
-      );
-    let width = target.width;
-    let height = target.height;
-    let scale = 1;
-    if (options.maxSide)
-      scale = Math.min(scale, options.maxSide / Math.max(width, height));
-    if (options.maxPixels)
-      scale = Math.min(scale, Math.sqrt(options.maxPixels / (width * height)));
-    if (scale < 1) {
-      width = Math.max(1, Math.round(width * scale));
-      height = Math.max(1, Math.round(height * scale));
-    }
-    return this.transformer.transform(jpeg, {
-      points: correction.points,
-      // The preview target already describes the intended output orientation.
-      rotation: target.rotation,
-      targetWidth: width,
-      targetHeight: height,
-      sampling: options.sampling,
-    });
+    return { correction, target, options };
   }
   async snapshot(options: CalibrationVisionOptions): Promise<VisionSnapshot> {
     // correctedFrame already requests a fresh frame and verifies its dimensions.
@@ -774,6 +761,7 @@ export class CameraSessionManager {
       this.sessions.clear();
       this.screenSessions.clear();
       this.owners.clear();
+      await rectifiedPreviewPool.close();
     })();
     return this.closing;
   }

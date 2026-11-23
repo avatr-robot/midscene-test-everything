@@ -28,8 +28,10 @@ import type { InputAction } from '@midscene/universal-device/protocol';
 import { createDeviceHandler } from '@midscene/universal-device/server';
 import { PlaygroundArmControls } from './arm-controls.js';
 import {
+  CORRECTED_PREVIEW_OPTIONS,
   type CameraPreviewView,
   clearStandaloneCorrection,
+  rectifyPreviewFrame,
   registerClientPreview,
   saveStandaloneCorrection,
   streamCameraPreview,
@@ -258,10 +260,7 @@ export async function startPlaygroundHost({
                   previous = frame.id;
                   return {
                     sequence: frame.id,
-                    jpeg: await entry.camera.rectifiedFrame(frame.jpeg, {
-                      maxSide: 900,
-                      sampling: 'nearest',
-                    }),
+                    jpeg: await rectifyPreviewFrame(entry.camera, frame),
                   };
                 },
                 async close() {},

@@ -3,8 +3,8 @@ import { useEffect, useRef } from 'react';
 import { label as defaultLabel } from './labels.js';
 import { type PreviewPixels, rectifyPreview } from './rectify-preview.js';
 
-/** The preview only needs enough pixels to fit the dialog panel. */
-const MAX_PREVIEW_SIDE = 720;
+/** Keep small text readable when the fitted preview is enlarged on screen. */
+const MAX_PREVIEW_SIDE = 1600;
 
 export function CorrectedPreview({
   correction,
