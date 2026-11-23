@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>拍摄讲解 · 阿维塔工程师为什么用机械臂测车机</title>
+<style>
+  @page { size: A4; margin: 14mm 12mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; max-width: 960px; padding: 32px 24px; color: #1f2329; font: 14px/1.7 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  .meta { color: #646a73; margin-bottom: 28px; }
+  h2 { font-size: 20px; margin: 36px 0 6px; padding-bottom: 6px; border-bottom: 2px solid #1f2329; }
+  h2 + p { color: #646a73; margin-top: 4px; }
+  h3 { font-size: 16px; margin: 26px 0 8px; }
+  .page { break-before: page; }
+
+  /* teleprompter */
+  .cue { break-inside: avoid; margin: 22px 0; padding: 18px 22px; border-left: 4px solid #1f2329; background: #f5f6f7; border-radius: 0 8px 8px 0; }
+  .cue.vo { border-left-color: #3370ff; }
+  .cue .head { display: flex; gap: 14px; align-items: baseline; font-size: 13px; color: #646a73; margin-bottom: 8px; }
+  .cue .head b { color: #1f2329; font-size: 15px; }
+  .cue .line { font-size: 26px; line-height: 1.75; font-weight: 500; letter-spacing: .5px; }
+  .cue .line i { font-style: normal; color: #b0b5bd; margin: 0 4px; }
+  .cue .tip { margin-top: 8px; font-size: 13px; color: #8f5b00; }
+  .narr { break-inside: avoid; margin: 14px 0; padding: 10px 16px; border: 1px dashed #c3c7cd; border-radius: 8px; color: #646a73; }
+
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 4px; font-size: 13px; }
+  th, td { border: 1px solid #dee0e3; padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: #f5f6f7; font-weight: 600; white-space: nowrap; }
+  td.id { font-weight: 700; white-space: nowrap; }
+  td.when { white-space: nowrap; color: #646a73; font-variant-numeric: tabular-nums; }
+  tr { break-inside: avoid; }
+  table { break-inside: avoid; }
+  h3 { break-after: avoid; }
+  ul.todo { break-inside: avoid; }
+  .todo { color: #8f5b00; }
+  ul { padding-left: 20px; margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<h1>拍摄讲解 · 阿维塔工程师为什么用机械臂测车机</h1>
+<div class="meta">配合分镜预演视频 storyboard.mp4 使用 · 成片约 90 秒 · 时间码对应预演视频</div>
+
+<h2>一、工程师提词稿</h2>
+<p>工程师按下面的稿子念。“ / ”是换气停顿；每段标了目标时长，语速放慢、不赶。蓝色边框的段落是画外音，可以在出镜时一起录，剪辑时盖上其他画面。虚线框是旁白，不需要工程师念。</p>
+
+<div class="narr">① 开场（0:00）旁白，非工程师：这块屏幕，每天会被点上几千次。点它的，不是人。</div>
+
+<div class="cue">
+  <div class="head"><b>② 讲述 · 起</b><span>出镜</span><span>约 9 秒</span></div>
+  <div class="line">刚开始做车机自动化的时候，<i>/</i>我们觉得，<i>/</i>安卓那一套就够了。<br>ADB 连上，<i>/</i>脚本一跑，<i>/</i>用例也写了不少。</div>
+</div>
+
+<div class="cue">
+  <div class="head"><b>③ 讲述 · 转折</b><span>出镜开头，后半段盖画面</span><span>约 14 秒</span></div>
+  <div class="line">但后来我们发现，<i>/</i>ADB 点的是系统坐标，<i>/</i>不是用户的手指。<br>触控慢了半拍，<i>/</i>按钮被弹窗挡住，<i>/</i>脚本照样显示通过。<br>而量产车一关调试口，<i>/</i>脚本就彻底失效了。</div>
+  <div class="tip">这段原因是暂拟的，请工程师按真实经历改写，长度保持在 3 句以内。</div>
+</div>
+
+<div class="narr">④ 车场全景（0:35）旁白，非工程师：现在，这片场地里，有二十台车在同时跑测试。每台车，配一根机械臂、一个摄像头，昼夜不停。</div>
+
+<div class="cue vo">
+  <div class="head"><b>⑤ 测试闭环</b><span>画外音</span><span>约 17 秒</span></div>
+  <div class="line">我们一直觉得，<i>/</i>端到端测试的本质，<i>/</i>是去模拟一个真实的人。<br>我看到了什么，<i>/</i>我操作了什么，<i>/</i>界面给了我什么反馈。<br>到了 AI 时代，<i>/</i>这件事终于可以真正做到。<br>我们想在这个方向上，<i>/</i>做一些探索。</div>
+  <div class="tip">“端到端”直接念中文，字幕会标 E2E。“看到、操作、反馈”三个词稍微重读，画面会跟着点亮。</div>
+</div>
+
+<div class="cue vo">
+  <div class="head"><b>⑥ 工业产品 · 小团队</b><span>出镜 + 画外音</span><span>约 11 秒</span></div>
+  <div class="line">今天，<i>/</i>机械臂、<i>/</i>工业相机，<i>/</i>都已经是很成熟的工业产品。<br>哪怕是一个小团队，<i>/</i>也能把它们搭成一套复杂又稳定的系统，<i>/</i>解决一个很大的问题。</div>
+  <div class="tip">重点落在“复杂又稳定”和“很大的问题”，不是强调产品成熟。</div>
+</div>
+
+<div class="cue">
+  <div class="head"><b>⑦ 踩坑</b><span>出镜开头，列举时盖图示</span><span>约 7 秒</span></div>
+  <div class="line">当然，<i>/</i>坑也不少：<br>机械臂的力度，<i>/</i>相机的画面矫正，<i>/</i>还有量产前的批量部署。</div>
+  <div class="tip">三个例子之间停顿清楚，画面会逐个点亮。</div>
+</div>
+
+<div class="cue">
+  <div class="head"><b>⑧ 结语</b><span>出镜</span><span>约 5 秒</span></div>
+  <div class="line">这些经验，<i>/</i>我们都开源了，<i>/</i>希望和整个社区，<i>/</i>多一些交流。</div>
+</div>
+
+<h3>录制建议</h3>
+<ul>
+  <li>每段至少录 3 条，其中 1 条比稿子慢一些，方便剪辑卡点。</li>
+  <li>画外音段落（⑤、⑥）在出镜时一起录；如果现场环境吵，另找安静房间补录一遍。</li>
+  <li>全程领夹麦，再加一支机顶麦做备份。</li>
+</ul>
+
+<h2 class="page">二、镜头清单</h2>
+<p>按拍摄地点分组，方便集中拍摄。“用在”一列是镜头在预演视频里出现的段落和时间码；“时长”是成片需要的长度，实拍建议每条多录 3 倍以上。</p>
+
+<h3>A. 工程师采访位（测试车旁）</h3>
+<table>
+  <tr><th>编号</th><th>镜头</th><th>机位 / 运动</th><th>用在</th><th>时长</th></tr>
+  <tr><td class="id">A1</td><td>工程师坐在测试车旁讲述，背景虚化成车场</td><td>正面中景，固定</td><td class="when">② ③ ⑥ ⑦ ⑧</td><td>全部台词</td></tr>
+  <tr><td class="id">A2</td><td>同上，作为切换用的第二机位</td><td>侧面近景，固定</td><td class="when">② ③ ⑥ ⑦ ⑧</td><td>全部台词</td></tr>
+</table>
+
+<h3>B. 车内（机械臂装在主驾和副驾中间、中控台后方）</h3>
+<table>
+  <tr><th>编号</th><th>镜头</th><th>机位 / 运动</th><th>用在</th><th>时长</th></tr>
+  <tr><td class="id">B1</td><td>车机屏幕亮起，机械臂从中控台后方伸出，点击“空调”</td><td>后排视角，从屏幕特写由近到远拉开，露出前排座椅和整根机械臂</td><td class="when">① 0:00–0:08</td><td>8 秒</td></tr>
+  <tr><td class="id">B2</td><td>机械臂依次点击两个按钮</td><td>主驾视角，画面左下能看到方向盘</td><td class="when">④ 0:40–0:42</td><td>2 秒</td></tr>
+  <tr><td class="id">B3</td><td>机械臂点击</td><td>副驾视角</td><td class="when">⑥ 1:05–1:06</td><td>1 秒</td></tr>
+  <tr><td class="id">B4</td><td>机械臂连续点击，展示机械臂和摄像头的整套装置</td><td>后排视角，由近到远</td><td class="when">⑥ 1:07–1:09</td><td>2 秒</td></tr>
+  <tr><td class="id">B5</td><td>机械臂收回，屏幕变暗</td><td>后排视角，由近到远，与 B1 呼应</td><td class="when">⑧ 1:25–1:28</td><td>3 秒</td></tr>
+  <tr><td class="id">B6</td><td>测试摄像头拍到的画面：空调界面，机械臂从屏幕下方伸入，点“−”两下，温度 24° → 22°</td><td>车内测试摄像头视角，固定；与 D2 同一条用例同步录</td><td class="when">⑤ 0:46–1:02</td><td>16 秒</td></tr>
+  <tr><td class="id">B7</td><td>测试摄像头本体，录制指示灯闪烁</td><td>微距，缓慢推近</td><td class="when">④ 0:42 · ⑥ 1:06</td><td>2 × 1 秒</td></tr>
+  <tr><td class="id">B8</td><td>真人手指点车机：屏幕卡顿转圈、系统弹窗挡住按钮</td><td>屏幕正面近景</td><td class="when">③ 0:22–0:31</td><td>5 秒</td></tr>
+</table>
+
+<h3>C. 车场外景</h3>
+<table>
+  <tr><th>编号</th><th>镜头</th><th>机位 / 运动</th><th>用在</th><th>时长</th></tr>
+  <tr><td class="id">C1</td><td>整个车场，每辆车里都有机械臂在动</td><td>无人机俯拍，横移</td><td class="when">④ 0:35–0:38 · ⑥ 1:11–1:14</td><td>3 + 3 秒</td></tr>
+  <tr><td class="id">C2</td><td>一整排测试车，车窗里能看到屏幕光和机械臂</td><td>低机位滑轨横移</td><td class="when">④ 0:38–0:40 · ⑥ 1:14–1:16</td><td>2 + 2 秒</td></tr>
+  <tr><td class="id">C3</td><td>车场从白天到深夜，车里屏幕一直亮着</td><td>固定机位延时摄影，需要提前一天架好</td><td class="when">④ 0:42–0:46</td><td>3 秒</td></tr>
+</table>
+
+<h3>D. 控制桌与屏幕录制</h3>
+<table>
+  <tr><th>编号</th><th>镜头</th><th>机位 / 运动</th><th>用在</th><th>时长</th></tr>
+  <tr><td class="id">D1</td><td>车旁的桌子上，工程师在电脑上操作用例</td><td>中景，能同时看到桌子和旁边的车</td><td class="when">⑤ 穿插</td><td>3 秒</td></tr>
+  <tr><td class="id">D2</td><td>Midscene Playground：输入“打开空调，把温度调到 22 度”，日志依次出现，断言通过</td><td>电脑屏幕直录</td><td class="when">⑤ 0:46–1:02</td><td>16 秒</td></tr>
+  <tr><td class="id">D3</td><td>终端运行 ADB 脚本，用例逐条通过</td><td>屏幕直录</td><td class="when">② 0:14–0:18</td><td>4 秒</td></tr>
+  <tr><td class="id">D4</td><td>终端 <code>adb shell input tap</code>，最后显示 128 / 128 PASSED</td><td>屏幕直录</td><td class="when">③ 0:22–0:31</td><td>5 秒</td></tr>
+  <tr><td class="id">D5</td><td>终端 <code>adb devices</code> 报 “no devices found”</td><td>屏幕直录</td><td class="when">③ 0:31–0:35</td><td>4 秒</td></tr>
+  <tr><td class="id">D6</td><td>GitHub 仓库页面 midscene-test-everything</td><td>屏幕直录，缓慢推近</td><td class="when">⑧ 1:24–1:25</td><td>2 秒</td></tr>
+</table>
+
+<h3>E. 后期动画（可替换为实拍）</h3>
+<table>
+  <tr><th>编号</th><th>内容</th><th>可替换的实拍素材</th><th>用在</th><th>时长</th></tr>
+  <tr><td class="id">E1</td><td>踩坑三栏图示：机械臂力度、相机画面矫正、量产前批量部署</td><td>力度计读数；矫正前后的相机画面对比；多台车同时标定的场面</td><td class="when">⑦ 1:18–1:23</td><td>5 秒</td></tr>
+  <tr><td class="id">E2</td><td>片尾卡：Midscene Test Everything × AVATR + GitHub 地址</td><td>—</td><td class="when">⑧ 1:28–1:33</td><td>5 秒</td></tr>
+</table>
+
+<h3>拍摄前需要确认</h3>
+<ul class="todo">
+  <li>转折原因（③）是否符合阿维塔的真实经历</li>
+  <li>车场实际车辆数（旁白暂写“二十台”）、场地室内还是室外</li>
+  <li>三个踩坑例子的具体数据和画面</li>
+  <li>演示用例（暂用“空调调到 22 度”）</li>
+  <li>车内、车机界面的保密范围；工程师姓名和职位；双方 Logo 授权</li>
+  <li>机械臂品牌标识不给特写</li>
+</ul>
+
+</body>
+</html>
