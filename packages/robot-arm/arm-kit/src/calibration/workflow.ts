@@ -854,6 +854,7 @@ export class CalibrationWorkflow {
         phoneDiagnostics: this.phoneStatus().diagnostics,
         phoneObservations: this.measurements?.phoneObservations,
         coarsePhoneObservations: this.measurements?.coarsePhoneObservations,
+        slideRecoveries: this.measurements?.slideRecoveries,
         capture: snapshot?.capture,
         points: snapshot?.points,
         verificationAttempts: s.verificationAttempts,
@@ -2101,7 +2102,10 @@ export class CalibrationWorkflow {
       // reference before waiting for a review of the new geometry.
       if (lastMoveConfirmed && s.explorationQuality?.warnings?.length)
         await travelToReference('return');
-      if (measurements.coarsePhoneObservations.length)
+      if (
+        measurements.coarsePhoneObservations.length ||
+        measurements.slideRecoveries.length
+      )
         void this.runtime.auditStore?.record({
           kind: 'calibration',
           id: s.id,
@@ -2110,6 +2114,7 @@ export class CalibrationWorkflow {
             stage: 'automatic-sampling',
             deviceId: this.options.deviceId,
             coarsePhoneObservations: measurements.coarsePhoneObservations,
+            slideRecoveries: measurements.slideRecoveries,
           }),
         });
     };

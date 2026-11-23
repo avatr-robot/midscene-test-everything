@@ -112,6 +112,12 @@ export interface ApplicationContext {
   directTravel?: { teaching: InstallationTeaching; minimumTipZMm: number };
   batchTransfer?: { travelTipZMm: number };
 }
+export interface SlideRecovery {
+  targetId: string;
+  phase: 'height' | 'grid';
+  cause: string;
+  switchedToVertical: boolean;
+}
 export interface AutoExplorationOptions {
   startPose: CartesianPose;
   page?: ScreenCalibSessionSummary;
@@ -120,6 +126,7 @@ export interface AutoExplorationOptions {
   horizontalConfirmed?: boolean;
   /** Optional timing sink; events carry the elapsed wall time of one stage. */
   onTiming?(event: string, elapsedMs: number): void;
+  onSlideRecovery?(recovery: SlideRecovery): void;
 }
 export interface AutoExplorationHost {
   currentPose(): Promise<CartesianPose>;

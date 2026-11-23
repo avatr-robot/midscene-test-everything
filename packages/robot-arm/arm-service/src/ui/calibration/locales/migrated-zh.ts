@@ -44,6 +44,8 @@ const teachingBoundaryZh: Record<string, string> = {
   'Preparing screen': '正在准备屏幕',
   'Transferring to screen': '正在转场到目标屏幕',
   'Exploring screen': '正在探索屏幕',
+  'The initial touch did not repeat from the calibration reference':
+    '从标定参考位复按时未能重复触发首触',
   'Waiting for stylus placement': '等待摆放触控笔',
   'Waiting for calibration acceptance': '等待标定验收',
   'All screens are fixed horizontally, the tool has elastic compliance, and the camera-near side is the bottom of the original image.':

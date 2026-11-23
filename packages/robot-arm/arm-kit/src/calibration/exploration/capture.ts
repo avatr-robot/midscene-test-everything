@@ -29,6 +29,7 @@ import type {
   ApplicationContext,
   AutoExplorationHost,
   ScreenCalibSessionSummary,
+  SlideRecovery,
   CalibrationSession as UpstreamSession,
 } from './types.js';
 
@@ -40,6 +41,7 @@ const fail = (message: string): never => {
 export class AutomaticCapture {
   readonly points: CapturedCalibrationPoint[] = [];
   readonly localPoints: CapturedCalibrationPoint[] = [];
+  readonly slideRecoveries: SlideRecovery[] = [];
   get allPoints() {
     return [...this.localPoints, ...this.points];
   }
@@ -183,6 +185,7 @@ export class AutomaticCapture {
     this.reference = structuredClone(home);
     this.points.length = 0;
     this.localPoints.length = 0;
+    this.slideRecoveries.length = 0;
     this.invalid = undefined;
     this.upstreamResult = undefined;
     this.streamingUnsupported = false;
@@ -442,6 +445,7 @@ export class AutomaticCapture {
         collection: this.mode === 'slide' ? 'slide' : 'tap',
         horizontalConfirmed: this.mode !== 'standard',
         onTiming: config.onTiming,
+        onSlideRecovery: (recovery) => this.slideRecoveries.push(recovery),
       },
     );
     this.captured = true;
