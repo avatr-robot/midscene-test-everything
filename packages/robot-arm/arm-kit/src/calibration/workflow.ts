@@ -30,6 +30,10 @@ import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
 import { verifyScreenVisibility } from './camera/visibility.js';
 import type { CalibrationVision } from './camera/vision.js';
+import {
+  CALIBRATION_LOGO_STROKE_COUNT,
+  type LogoCanvasSession,
+} from './draw-logo.js';
 import { AutomaticCapture } from './exploration/capture.js';
 import { fitExploration } from './exploration/fit.js';
 import { invertMapping, pointDistance, project } from './phone/geometry.js';
@@ -111,7 +115,8 @@ export class CalibrationWorkflow {
   };
   phoneHeartbeat() {
     // A keepalive cannot substitute for a fresh observation during motion.
-    if (!this.measuring()) this.phone.lastSeen = Date.now();
+    if (!this.measuring() && this.state?.logo?.state !== 'drawing')
+      this.phone.lastSeen = Date.now();
     if (this.state?.calibration) this.changed();
     void this.recoverSamplingSocket();
   }
@@ -735,6 +740,7 @@ export class CalibrationWorkflow {
                 : stage === 'verifying'
                   ? 'verify'
                   : stage,
+      logo: s.logo,
       imageTrial: Boolean(s.imageTrial && s.stage === 'verifying'),
       capture:
         s.stage === 'collecting' ||
@@ -1314,6 +1320,59 @@ export class CalibrationWorkflow {
         409,
       );
   }
+  private prepareLogoCanvas(
+    session: SessionState,
+    revision: number,
+  ): LogoCanvasSession | undefined {
+    const page = this.phone.update;
+    if (page?.logoCanvasSupported !== 2 || !session.mapping) return undefined;
+    const { layout } = session.mapping;
+    const id = randomUUID();
+    const assertPage = () => {
+      this.assertAttempt(revision);
+      const current = this.phone.assertConnected();
+      if (
+        current.pageId !== page.pageId ||
+        !sameLayout(current.layout, layout) ||
+        this.visibilityProbe
+      )
+        throw new RobotArmError(
+          'MAPPING_REQUIRED',
+          'Keep the same calibrated phone page open while drawing the logo',
+          409,
+        );
+      return current;
+    };
+    const check = () => {
+      if (assertPage().logoCanvasAck !== id)
+        throw new RobotArmError(
+          'PHONE_DISPLAY_NOT_READY',
+          'The phone drawing canvas is no longer ready',
+          409,
+        );
+    };
+    const drawing = { id, expectedStrokes: CALIBRATION_LOGO_STROKE_COUNT };
+    return {
+      viewport: layout,
+      minimumTravelTipZMm: this.batchTravelTipZMm,
+      prepare: async (signal) => {
+        signal.throwIfAborted();
+        session.logo = { ...drawing, state: 'drawing' };
+        this.changed();
+        const deadline = Date.now() + 4_000;
+        while (assertPage().logoCanvasAck !== id && Date.now() < deadline)
+          await delay(50, undefined, { signal });
+        check();
+      },
+      check,
+      finish: (error) => {
+        session.logo = error
+          ? { ...drawing, state: 'failed', error }
+          : { ...drawing, state: 'completed' };
+        this.changed();
+      },
+    };
+  }
   async command(
     id: string,
     action: AssistedCalibrationAction,
@@ -1810,8 +1869,9 @@ export class CalibrationWorkflow {
               }
             : undefined,
           () => this.assertAttempt(revision),
+          this.prepareLogoCanvas(s, revision),
         );
-        s.stage = 'completed';
+        if (this.attemptRevision === revision) s.stage = 'completed';
       } else
         throw new RobotArmError(
           'INVALID_COMMAND',

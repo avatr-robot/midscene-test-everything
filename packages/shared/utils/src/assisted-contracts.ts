@@ -240,6 +240,9 @@ export interface CalibrationPageUpdate {
   markersPainted?: boolean;
   markerRequest?: string;
   imagingPatternSupported?: true;
+  /** Version 2 supports the dual-logo canvas and its final signature. */
+  logoCanvasSupported?: 2;
+  logoCanvasAck?: string;
   visibilityProbeAck?: string;
   imagingPatternAck?: string;
   /** Painted height in CSS pixels when iOS sizes the first row around system overlays. */
@@ -288,7 +291,14 @@ export interface CalibrationPageUpdate {
     travelPx: number;
   }>;
 }
+export interface CalibrationLogoStatus {
+  id: string;
+  expectedStrokes: number;
+  state: 'drawing' | 'completed' | 'failed';
+  error?: string;
+}
 export interface CalibrationPageReply {
+  logo?: CalibrationLogoStatus;
   /** Briefly identify the phone selected in Playground. */
   selectionHint?: true;
   visibilityProbe?: {
@@ -424,6 +434,7 @@ export interface WebVerificationEvidence {
 }
 export interface AssistedCalibrationState {
   id: string;
+  logo?: CalibrationLogoStatus;
   cameraBoundaryPosition?: CartesianPose;
   cameraBoundaryEndPosition?: CartesianPose;
   teachingId?: string;

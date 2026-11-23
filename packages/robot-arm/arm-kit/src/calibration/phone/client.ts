@@ -6,6 +6,7 @@ import type {
   CalibrationPageUpdate,
   WebPoint,
 } from '../../assisted-contracts.js';
+import type { mountLogoCanvas } from './logo-canvas.js';
 
 /** Serialized into the phone HTML: keep runtime dependencies inside this function. */
 export function mountCalibrationPhonePage(
@@ -26,6 +27,7 @@ export function mountCalibrationPhonePage(
     detach(): void;
     resume(): void;
   },
+  mountDrawing: typeof mountLogoCanvas,
 ): void {
   const text = {
     keepOpen:
@@ -81,6 +83,12 @@ export function mountCalibrationPhonePage(
   const pageTitle = element('page-title');
   const selectionHint = element('selection-hint');
   element('selection-label').textContent = 'This device is selected';
+  const logo = mountDrawing(
+    element('logo-canvas') as HTMLCanvasElement,
+    element('logo-signature'),
+    element('logo-error'),
+    () => send(),
+  );
   const connection = element('connection');
   const errorDetail = element('error-detail');
   const target = element('target');
@@ -665,6 +673,7 @@ export function mountCalibrationPhonePage(
     }
     const previous = state;
     state = next;
+    logo.show(next.logo);
     if (
       previous?.view !== next.view ||
       previous?.markerRequest !== next.markerRequest ||
@@ -1093,6 +1102,15 @@ export function mountCalibrationPhonePage(
       fullscreen: fullscreenReady(),
       view: state?.view,
       imagingPatternSupported: true,
+      logoCanvasSupported: logo.supported ? 2 : undefined,
+      logoCanvasAck:
+        !switching &&
+        !document.hidden &&
+        fullscreenReady() &&
+        !probeId &&
+        (visualViewport?.scale || 1) === 1
+          ? logo.painted
+          : undefined,
       markersPainted,
       markerRequest: markersPainted ? state?.markerRequest : undefined,
       visibilityProbeAck: visibilityPainted === probeId ? probeId : undefined,
