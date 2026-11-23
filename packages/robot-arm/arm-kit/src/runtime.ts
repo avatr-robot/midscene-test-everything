@@ -11,6 +11,10 @@ import type {
   CalibrationBatchState,
 } from './assisted-contracts.js';
 import { assertParkingCorridor } from './calibration/camera-avoidance.js';
+import {
+  type LogoCanvasSession,
+  drawCalibrationLogo,
+} from './calibration/draw-logo.js';
 import { screenContactMm, screenPoseMm } from './calibration/geometry.js';
 import { savedCalibrationReference } from './calibration/reference-position.js';
 import { contactDepthMm, surfaceClearanceMm } from './calibration/surface.js';
@@ -837,6 +841,7 @@ export class RobotArmRuntime extends RobotKernel {
       | { protocol: 'auto-boundary-v1'; automatic?: boolean },
     binding?: DeviceBinding,
     guard?: () => void,
+    logo?: LogoCanvasSession,
   ): Promise<CalibrationProfile> {
     if (
       this.commandBusy ||
@@ -941,7 +946,8 @@ export class RobotArmRuntime extends RobotKernel {
         binding,
       );
       this.session = s;
-      this.release('completed');
+      if (logo) await this.drawAcceptedLogo(s, c, logo, signal);
+      this.release(signal.aborted ? 'stopped' : 'completed');
       return structuredClone(c);
     } finally {
       this.commandBusy = false;
@@ -1029,6 +1035,58 @@ export class RobotArmRuntime extends RobotKernel {
    */
   private lastStablePose?: CartesianPose;
   private screenSequence?: LinearMotionSequence;
+  private async drawAcceptedLogo(
+    session: CalibrationSession,
+    calibration: CalibrationProfile,
+    canvas: LogoCanvasSession,
+    signal: AbortSignal,
+  ) {
+    this.motionSubmitted = false;
+    const check = () => {
+      this.check();
+      canvas.check();
+    };
+    try {
+      await canvas.prepare(signal);
+      check();
+      const ctx = this.context(session);
+      if (canvas.minimumTravelTipZMm !== undefined)
+        ctx.minimumTravelTipZMm = Math.max(
+          ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+          canvas.minimumTravelTipZMm,
+        );
+      await this.ready(ctx.tool);
+      await drawCalibrationLogo(
+        this.screenMotionHost(),
+        calibration,
+        ctx,
+        canvas.viewport,
+        check,
+      );
+      await this.profileStore.clearOperation(session.id, check);
+      canvas.finish();
+    } catch (error) {
+      if (this.motionSubmitted || signal.aborted) {
+        this.requireRecovery('interruption');
+        if (!signal.aborted) this.stopGeneration++;
+        try {
+          await (this.stopPromise ?? this.controlledStop());
+          this.screenSequence?.dispose();
+          this.screenSequence = undefined;
+        } catch {
+          canvas.finish(
+            'Logo drawing stopped. Robot stop could not be confirmed.',
+          );
+          return;
+        }
+      } else {
+        // A sequence may have been prepared but not submitted when the canvas changed.
+        this.screenSequence?.dispose();
+        this.screenSequence = undefined;
+      }
+      canvas.finish(error instanceof Error ? error.message : String(error));
+    }
+  }
   private screenMotionHost(): ScreenMotionHost {
     return {
       adapter: this.adapter,
