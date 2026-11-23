@@ -1192,7 +1192,7 @@ export class CalibrationBatch {
                   row.status = 'completed';
                   row.calibrationProfileId = current.result!.id;
                   state.contextVersion = this.contextVersion(state.cameraId!);
-                  row.note = undefined;
+                  row.note = current.logo?.error;
                   row.error = undefined;
                 });
                 break;
