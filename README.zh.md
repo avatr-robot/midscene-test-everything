@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="Midscene Test Everything" width="160" src="https://github.com/user-attachments/assets/f60de3c1-dd6f-4213-97a1-85bf7c6e79e4"><br />
+  <img alt="Midscene Test Everything" width="160" src="./assets/midscene-test-everything-logo.png"><br />
 </p>
 
 <h1 align="center">Midscene Test Everything</h1>
@@ -10,8 +10,6 @@
 </p>
 
 <p align="center">
-  <a href="https://midscenejs.com/zh/universal-device/">文档</a> ·
-  <a href="https://github.com/web-infra-dev/midscene">Midscene.js</a> ·
   <a href="./README.md">English</a> / 简体中文
 </p>
 
