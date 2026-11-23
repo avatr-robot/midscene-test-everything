@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>分镜预演 · 阿维塔 × 机械臂车机测试</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14181d; --line: #262c34; --text: #e8ecf1; --dim: #8b95a3;
+    --accent: #36c5f0; --ok: #3ddc84; --warn: #f5b942; --err: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  .wrap { max-width: 1280px; margin: 24px auto; padding: 0 20px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 14px; }
+  .viewport { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; overflow: hidden; border-radius: 8px; }
+  .stage { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: 0 0; overflow: hidden; }
+  .scene { position: absolute; inset: 0; display: none; overflow: hidden; }
+  .scene svg { position: absolute; inset: 0; width: 1280px; height: 720px; }
+  .scene .shot { display: none; }
+  .sub { position: absolute; left: 0; right: 0; bottom: 46px; text-align: center; font-size: 30px; font-weight: 500; letter-spacing: 1px;
+         text-shadow: 0 2px 6px #000, 0 0 2px #000; pointer-events: none; z-index: 20; }
+  .chips { position: absolute; left: 0; right: 0; bottom: 112px; display: flex; justify-content: center; align-items: center; gap: 14px; z-index: 5; }
+  .chips .c { padding: 6px 24px; border-radius: 999px; font-size: 26px; font-weight: 600; background: rgba(0,0,0,.6); border: 2px solid #3a424d; color: #5d6774; transition: all .25s; }
+  .chips .c.on { color: #fff; border-color: var(--accent); background: rgba(54,197,240,.22); }
+  .chips .sep { color: #5d6774; font-size: 22px; }
+  .placeholder { position: absolute; z-index: 15; border: 2px dashed var(--warn); color: var(--warn); background: rgba(245,185,66,.08);
+                 padding: 4px 12px; border-radius: 6px; font-size: 18px; font-weight: 600; }
+  .controls { display: flex; align-items: center; gap: 14px; margin: 14px 0 8px; }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 16px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .time { font-variant-numeric: tabular-nums; color: var(--dim); }
+  .timeline { position: relative; height: 44px; display: flex; border-radius: 6px; overflow: hidden; cursor: pointer; background: var(--panel); }
+  .seg { height: 100%; border-right: 1px solid var(--bg); padding: 4px 8px; font-size: 12px; color: var(--dim); overflow: hidden; white-space: nowrap; }
+  .seg.active { color: var(--text); background: #1d2630; }
+  .timeline .vo { position: absolute; bottom: 4px; height: 4px; background: var(--accent); border-radius: 2px; opacity: .55; }
+  .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
+  .notes { display: grid; grid-template-columns: 220px 1fr; gap: 0 24px; margin-top: 18px; padding: 16px 20px; background: var(--panel); border-radius: 8px; }
+  .notes .shotname { font-size: 20px; font-weight: 600; }
+  .notes .range { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .notes dl { margin: 0; display: grid; grid-template-columns: 48px 1fr; gap: 6px 12px; }
+  .notes dt { color: var(--dim); }
+  .notes dd { margin: 0; }
+  .notes dd.todo { color: var(--warn); }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 10px; }
+  body.export .hint, body.export #play { display: none; }
+  body.export .wrap { margin: 20px auto; }
+  body.export .notes { min-height: 132px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>分镜预演 · 阿维塔工程师为什么用机械臂测车机（约 90 秒）</h1>
+  <div class="viewport" id="viewport">
+    <div class="stage" id="stage">
+      <div class="scene" id="s1"></div>
+      <div class="scene" id="s2"></div>
+      <div class="scene" id="s3"></div>
+      <div class="scene" id="s4"></div>
+      <div class="scene" id="s5"></div>
+      <div class="scene" id="s6"></div>
+      <div class="scene" id="s7"></div>
+      <div class="scene" id="s8"></div>
+      <div class="sub" id="sub"></div>
+    </div>
+  </div>
+  <div class="controls">
+    <button id="play">▶ 播放</button>
+    <span class="time" id="time"></span>
+  </div>
+  <div class="timeline" id="timeline"><div class="playhead" id="playhead"></div></div>
+  <div class="notes" id="notes"></div>
+  <div class="hint">空格：播放/暂停 · ←/→：前后 5 秒 · 点击时间轴跳转。蓝色细条是配音出现的位置。</div>
+</div>
+<audio id="audio" src="vo/full.mp3" preload="auto"></audio>
+
+<script>
+const DURATION = 93.5;
+const SCENES = [
+  { id: 's1', start: 0, end: 8, title: '① 开场', vo: [2.5, 6.4],
+    pic: '后排视角：从车机屏幕特写开始，机械臂从前排座椅中间（中控台后方）伸出点击，镜头由近到远拉开，露出前排座椅之间的整根机械臂。',
+    cam: '后排架滑轨或稳定器，由近到远慢拉；收同期点击声。不给机械臂品牌标识特写。' },
+  { id: 's2', start: 8, end: 20, title: '② 讲述 · 起', vo: [9.0, 17.9],
+    pic: '工程师坐在测试车旁，背景虚化成车场；讲到 ADB 时插入脚本运行的屏幕录制。',
+    cam: '正面中景 + 侧面近景两机位，领夹麦收同期。',
+    todo: '工程师姓名、职位' },
+  { id: 's3', start: 20, end: 35, title: '③ 讲述 · 转折', vo: [20.6, 34.2],
+    pic: '跟着台词插入三组画面：ADB 注入坐标 vs 真实手指；屏幕卡顿、弹窗挡住按钮，脚本照样 128/128 通过；调试口关闭后 adb 找不到设备。',
+    cam: '车机实拍卡顿和弹窗遮挡，终端画面屏幕直录。',
+    todo: '转折原因为暂拟文案，需和阿维塔确认真实经历' },
+  { id: 's4', start: 35, end: 46, title: '④ 车场全景', vo: [36.5, 43.7],
+    pic: '五个机位跟着台词切：俯拍车场 → 低机位横移整排车 → 主驾视角看机械臂点屏 → 摄像头特写 → 车场昼夜延时。',
+    cam: '无人机俯拍 + 滑轨低机位 + 主驾位固定机位 + 微距 + 延时摄影（建议提前一天架机位）。',
+    todo: '车辆数（文案暂写“二十台”）、场地室内还是室外' },
+  { id: 's5', start: 46, end: 62, title: '⑤ 测试闭环', vo: [47.0, 64.5],
+    pic: '工程师旁白讲端到端的本质。桌边电脑和车内摄像头交叉剪辑，“看到 → 操作 → 反馈”跟着画面依次亮起：截图定位 → 机械臂点击 → 温度变化、断言通过。',
+    cam: '电脑屏幕直录 + 车内摄像头视角（机械臂从中控台后方伸入画面），同一条用例实拍一遍完整流程。',
+    todo: '演示用例（暂用“空调调到 22 度”）' },
+  { id: 's6', start: 62, end: 76, title: '⑥ 工业产品 · 小团队', vo: [65.0, 75.6],
+    pic: '工程师说完上一句，跟着台词切：副驾视角的机械臂 → 摄像头特写 → 后排视角拉远看整套装置 → 工程师 → 俯拍整个车场（状态灯逐台亮绿）→ 低机位横移。',
+    cam: '副驾、后排各架一个机位；车场素材与 ④ 复用。' },
+  { id: 's7', start: 76, end: 83.5, title: '⑦ 踩坑', vo: [76.2, 82.9],
+    pic: '工程师开口后切三栏图示，跟着台词依次点亮：机械臂力度（落进安全区间）、相机画面矫正（畸变网格被拉直）、量产前批量部署（二十台车逐台标定上线）。',
+    cam: '三个例子都可以换成实拍：力度计读数、矫正前后画面对比、多台车同时标定的场面。',
+    todo: '三个踩坑例子的具体数据和画面，需和阿维塔确认' },
+  { id: 's8', start: 83.5, end: 93.5, title: '⑧ 结语 · 片尾', vo: [83.5, 88.0],
+    pic: '工程师一句话后切 GitHub 仓库页面，再切后排视角由近到远拉开、机械臂收回，最后是片尾卡。',
+    cam: '与 ② 同机位；后排镜头与 ① 呼应。',
+    todo: '双方 Logo 使用授权' },
+];
+const CUES = [
+  [2.5, 4.73, '这块屏幕，每天会被点上几千次。'],
+  [4.73, 6.6, '点它的，不是人。'],
+  [9.0, 12.24, '刚开始做车机自动化的时候，我们觉得，'],
+  [12.24, 13.9, '安卓那一套就够了。'],
+  [14.1, 17.9, 'ADB 连上，脚本一跑，用例也写了不少。'],
+  [20.6, 21.85, '但后来我们发现，'],
+  [22.3, 25.35, 'ADB 点的是系统坐标，不是用户的手指。'],
+  [25.9, 28.55, '触控慢了半拍，按钮被弹窗挡住，'],
+  [29.0, 30.3, '脚本照样显示通过。'],
+  [30.98, 32.4, '而量产车一关调试口，'],
+  [32.77, 34.0, '脚本就彻底失效了。'],
+  [36.5, 40.1, '现在，这片场地里，有二十台车在同时跑测试。'],
+  [40.28, 43.8, '每台车，配一根机械臂、一个摄像头，昼夜不停。'],
+  [47.0, 49.73, '我们一直觉得，端到端（E2E）测试的本质，'],
+  [49.8, 51.75, '是去模拟一个真实的人。'],
+  [52.3, 54.05, '我看到了什么，'],
+  [54.2, 55.75, '我操作了什么，'],
+  [55.9, 58.0, '界面给了我什么反馈。'],
+  [58.6, 61.6, '到了 AI 时代，这件事终于可以真正做到。'],
+  [61.8, 64.55, '我们想在这个方向上，做一些探索。'],
+  [65.0, 67.4, '今天，机械臂、工业相机，'],
+  [67.64, 69.4, '都已经是很成熟的工业产品。'],
+  [69.9, 71.3, '哪怕是一个小团队，'],
+  [71.66, 74.15, '也能把它们搭成一套复杂又稳定的系统，'],
+  [74.4, 75.65, '解决一个很大的问题。'],
+  [76.2, 77.65, '当然，坑也不少：'],
+  [78.15, 79.25, '机械臂的力度，'],
+  [79.48, 80.75, '相机的画面矫正，'],
+  [81.15, 82.95, '还有量产前的批量部署。'],
+  [83.5, 85.45, '这些经验，我们都开源了，'],
+  [85.84, 88.05, '希望和整个社区，多一些交流。'],
+];
+
+// ---------- helpers ----------
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const ease = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const prog = (t, a, b) => ease(clamp((t - a) / (b - a)));
+const lerp = (a, b, k) => a + (b - a) * k;
+const $ = (root, sel) => root.querySelector(sel);
+const fmt = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+const blink = (t, hz = 2) => Math.floor(t * hz) % 2 ? 1 : .2;
+const mix = (a, b, k) => '#' + [0, 2, 4].map(i => Math.round(lerp(parseInt(a.substr(i + 1, 2), 16), parseInt(b.substr(i + 1, 2), 16), clamp(k))).toString(16).padStart(2, '0')).join('');
+
+function addShot(el, markup, cls = '') {
+  el.insertAdjacentHTML('beforeend', `<svg viewBox="0 0 1280 720" class="shot ${cls}">${markup}</svg>`);
+  return el.lastElementChild;
+}
+// Show exactly one shot of a scene: `list` is [[from, to, element], ...] in absolute seconds.
+function cut(abs, list) {
+  let hit = null;
+  for (const [a, b, node] of list) if (abs >= a && abs < b) hit = node;
+  for (const [, , node] of list) node.style.display = node === hit ? 'block' : 'none';
+  return hit;
+}
+
+// Two-link arm drawn into an SVG <g>. Returns a setter for the fingertip.
+function makeArm(g, base, L1, L2, side = 1, scale = 1) {
+  const w = s => s * scale;
+  g.innerHTML = `
+    <rect x="${base.x - w(60)}" y="${base.y - w(10)}" width="${w(120)}" height="${w(40)}" rx="${w(8)}" fill="#3a424d"/>
+    <line class="s1o" stroke="#5d6774" stroke-width="${w(38)}" stroke-linecap="round"/>
+    <line class="s1" stroke="#cdd4dc" stroke-width="${w(28)}" stroke-linecap="round"/>
+    <line class="s2o" stroke="#5d6774" stroke-width="${w(28)}" stroke-linecap="round"/>
+    <line class="s2" stroke="#e3e8ee" stroke-width="${w(20)}" stroke-linecap="round"/>
+    <circle cx="${base.x}" cy="${base.y}" r="${w(26)}" fill="#2b323b" stroke="#6b7684" stroke-width="${w(4)}"/>
+    <circle class="j1" r="${w(16)}" fill="#2b323b" stroke="#6b7684" stroke-width="${w(4)}"/>
+    <circle class="tip" r="${w(9)}" fill="#9aa4b1"/>
+    <circle class="glow" r="${w(5)}" fill="#36c5f0" opacity="0"/>`;
+  const set = (sel, a, b) => { const l = $(g, sel); l.setAttribute('x1', a.x); l.setAttribute('y1', a.y); l.setAttribute('x2', b.x); l.setAttribute('y2', b.y); };
+  return (tx, ty, glow = 0) => {
+    const dx = tx - base.x, dy = ty - base.y;
+    const d = Math.max(1, Math.min(Math.hypot(dx, dy), L1 + L2 - 1));
+    const a = Math.atan2(dy, dx);
+    const off = Math.acos(clamp((L1 * L1 + d * d - L2 * L2) / (2 * L1 * d), -1, 1));
+    const e = { x: base.x + L1 * Math.cos(a + off * side), y: base.y + L1 * Math.sin(a + off * side) };
+    const p = { x: base.x + d * Math.cos(a), y: base.y + d * Math.sin(a) };
+    set('.s1o', base, e); set('.s1', base, e); set('.s2o', e, p); set('.s2', e, p);
+    const j = $(g, '.j1'); j.setAttribute('cx', e.x); j.setAttribute('cy', e.y);
+    for (const c of g.querySelectorAll('.tip,.glow')) { c.setAttribute('cx', p.x); c.setAttribute('cy', p.y); }
+    $(g, '.glow').setAttribute('opacity', glow);
+  };
+}
+
+// ---------- reusable shots ----------
+let ivCount = 0;
+function interview(el) {
+  const u = ++ivCount;
+  const bokeh = Array.from({ length: 26 }, (_, i) => {
+    const x = (i * 197) % 1280, y = 120 + (i * 83) % 420, r = 18 + (i * 37) % 46;
+    const c = ['#f5b942', '#36c5f0', '#ffffff', '#ff7b5d'][i % 4];
+    return `<circle cx="${x}" cy="${y}" r="${r}" fill="${c}" opacity="${.08 + (i % 5) * .03}"/>`;
+  }).join('');
+  const svg = addShot(el, `
+    <defs>
+      <linearGradient id="bgI${u}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b2430"/><stop offset="1" stop-color="#0a0d11"/></linearGradient>
+      <filter id="blurI${u}"><feGaussianBlur stdDeviation="14"/></filter>
+      <linearGradient id="rim${u}" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2a3340"/><stop offset="1" stop-color="#58677a"/></linearGradient>
+    </defs>
+    <g class="cam">
+      <rect width="1280" height="720" fill="url(#bgI${u})"/>
+      <g filter="url(#blurI${u})">
+        <path d="M80 520 Q160 400 380 390 L600 390 Q720 400 760 520 Z" fill="#2a3442"/>
+        <rect x="300" y="415" width="160" height="70" rx="10" fill="#36c5f0" opacity=".35"/>
+        ${bokeh}
+      </g>
+      <rect y="560" width="1280" height="160" fill="#0c0f13" opacity=".7"/>
+      <g class="person">
+        <path d="M640 720 Q650 520 820 500 Q990 520 1000 720 Z" fill="url(#rim${u})"/>
+        <rect x="795" y="440" width="50" height="70" rx="18" fill="#3a4554"/>
+        <ellipse cx="820" cy="380" rx="78" ry="92" fill="url(#rim${u})"/>
+        <path d="M748 340 Q760 270 830 280 Q900 285 896 350 Q870 310 820 318 Q770 320 748 340 Z" fill="#141a21"/>
+      </g>
+    </g>`, 'iv');
+  const cam = $(svg, '.cam'), person = $(svg, '.person');
+  return {
+    el: svg,
+    update(t, zoom, talking) {
+      cam.setAttribute('transform', `translate(820 400) scale(${zoom}) translate(-820 -400)`);
+      const nod = talking ? Math.sin(t * 5.2) * 1.2 + Math.sin(t * 2.1) * .8 : Math.sin(t * 1.3) * .4;
+      person.setAttribute('transform', `rotate(${nod} 820 600) translate(0 ${Math.sin(t * 1.6) * 2})`);
+    },
+  };
+}
+
+// Car cabin. The arm is mounted between the front seats, behind the centre console.
+// view: 'rear' (back-seat passenger), 'driver', 'passenger'.
+const TILES = [['导航', 560, 270], ['音乐', 720, 270], ['车辆', 560, 352], ['空调', 720, 352]];
+const ARM_REST = [690, 480];
+function cabin(el, view) {
+  const outside = Array.from({ length: 6 }, (_, i) => `
+    <rect x="${130 + i * 190}" y="${222 - (i % 2) * 8}" width="120" height="40" rx="14" fill="#2a3340"/>
+    <circle cx="${150 + i * 190}" cy="242" r="4" fill="#36c5f0" opacity=".7"/>`).join('');
+  const seats = view === 'rear' ? `
+    <path d="M40 720 L80 440 Q90 385 170 380 L400 380 Q475 385 485 440 L500 720 Z" fill="#07080a"/>
+    <rect x="195" y="290" width="180" height="104" rx="42" fill="#07080a"/>
+    <path d="M780 720 L795 440 Q805 385 880 380 L1110 380 Q1190 385 1200 440 L1240 720 Z" fill="#07080a"/>
+    <rect x="905" y="290" width="180" height="104" rx="42" fill="#07080a"/>` : '';
+  const wheel = view === 'passenger' ? '' :
+    `<g transform="translate(250 560)"><circle r="170" fill="none" stroke="#1a1e24" stroke-width="30"/><circle r="52" fill="#15191e"/><rect x="-170" y="-10" width="340" height="20" fill="#1a1e24"/></g>`;
+  const svg = addShot(el, `
+    <rect width="1280" height="720" fill="#07090b"/>
+    <g class="world">
+      <rect width="1280" height="320" fill="#1a222c"/>
+      ${outside}
+      <path d="M0 0 L200 0 L80 330 L0 330 Z" fill="#090b0e"/>
+      <path d="M1280 0 L1080 0 L1200 330 L1280 330 Z" fill="#090b0e"/>
+      <rect width="1280" height="44" fill="#090b0e"/>
+      <line x1="640" y1="44" x2="640" y2="80" stroke="#2b323b" stroke-width="8"/>
+      <rect x="606" y="76" width="68" height="36" rx="8" fill="#1c2026" stroke="#3a424d" stroke-width="2"/>
+      <circle cx="640" cy="94" r="11" fill="#05070a" stroke="#4a5360" stroke-width="3"/>
+      <circle class="led" cx="664" cy="84" r="3.5" fill="#ff5d5d"/>
+      <path d="M0 340 Q640 255 1280 340 L1280 720 L0 720 Z" fill="#121519"/>
+      <rect x="450" y="168" width="380" height="244" rx="18" fill="#05070a" stroke="#1f252d" stroke-width="5"/>
+      <g class="disp">
+        <rect x="466" y="184" width="348" height="212" rx="10" fill="#0f1a26"/>
+        <text x="482" y="214" fill="#cfe6ff" font-size="18" font-weight="600">09:41</text>
+        <text x="798" y="214" fill="#7d93ab" font-size="14" text-anchor="end">23°C</text>
+        ${TILES.map(([n, x, y]) => `<rect class="tile" x="${x - 72}" y="${y - 36}" width="144" height="72" rx="10" fill="#1a2b3d"/>
+          <text x="${x}" y="${y + 7}" fill="#cfe6ff" font-size="19" text-anchor="middle">${n}</text>`).join('')}
+        <circle class="ripple" r="0" fill="none" stroke="#36c5f0" stroke-width="3" opacity="0"/>
+      </g>
+      ${[0, 1, 2, 3].map(i => `<rect x="${500 + i * 75}" y="432" width="55" height="16" rx="5" fill="#1a1e24"/>`).join('')}
+      ${wheel}
+      <path d="M560 470 L720 470 L800 720 L480 720 Z" fill="#0b0d10"/>
+      <g class="arm"></g>
+      ${seats}
+    </g>`, `cabin ${view}`);
+  const setArm = makeArm($(svg, '.arm'), { x: 640, y: 650 }, 230, 220, 1, .7);
+  const world = $(svg, '.world'), disp = $(svg, '.disp'), tiles = svg.querySelectorAll('.tile'), rip = $(svg, '.ripple'), led = $(svg, '.led');
+  const defaults = { rear: [640, 380, 1], driver: [500, 330, 1.45], passenger: [790, 330, 1.45] }[view];
+  return {
+    el: svg,
+    update({ t = 0, cx = defaults[0], cy = defaults[1], s = defaults[2], tip = ARM_REST, press = 0, hl = -1, ripple = null, on = 1 }) {
+      world.setAttribute('transform', `translate(640 360) scale(${s}) translate(${-cx} ${-cy})`);
+      disp.setAttribute('opacity', on);
+      setArm(tip[0], tip[1] + (press ? 3 : 0), press ? 1 : 0);
+      tiles.forEach((el, i) => el.setAttribute('fill', i === hl ? '#2a5578' : '#1a2b3d'));
+      if (ripple) { rip.setAttribute('cx', ripple[0]); rip.setAttribute('cy', ripple[1]); rip.setAttribute('r', ripple[2] * 50); }
+      rip.setAttribute('opacity', ripple ? 1 - ripple[2] : 0);
+      led.setAttribute('opacity', blink(t));
+    },
+  };
+}
+// Arm choreography: visit tiles in order, tapping each. stops = [[time, tileIndex], ...]
+function tapPath(t, stops) {
+  let tip = ARM_REST, press = 0, hl = -1, ripple = null;
+  stops.forEach(([at, idx], i) => {
+    const from = i ? TILES[stops[i - 1][1]].slice(1) : ARM_REST, to = TILES[idx].slice(1);
+    if (t >= at - .5) tip = [lerp(from[0], to[0], prog(t, at - .5, at)), lerp(from[1], to[1], prog(t, at - .5, at))];
+    if (t > at && t < at + .22) { press = 1; hl = idx; }
+    if (t > at && t < at + .7) ripple = [...to, (t - at) / .7];
+  });
+  return { tip, press, hl, ripple };
+}
+
+const LOT = [];
+for (let row = 0; row < 2; row++) for (let i = 0; i < 10; i++) LOT.push({ x: 200 + i * 220, y: row ? 430 : 120, row });
+const PAINT = ['#c9ced6', '#3a4350', '#e8e8e8', '#5b6b7d'];
+function drone(el) {
+  const car = (c, k) => `
+    <g transform="translate(${c.x} ${c.y})">
+      <rect x="-6" y="-6" width="102" height="192" rx="34" fill="#000" opacity=".35"/>
+      <rect width="90" height="180" rx="30" fill="${PAINT[k % 4]}"/>
+      <rect x="10" y="${c.row ? 112 : 18}" width="70" height="44" rx="12" fill="#11161c"/>
+      <rect x="14" y="${c.row ? 70 : 64}" width="62" height="46" rx="6" fill="#0b1016"/>
+      <rect class="glow" x="30" y="${c.row ? 82 : 76}" width="30" height="12" rx="3" fill="#36c5f0"/>
+      <line class="tarm" x1="45" y1="${c.row ? 100 : 80}" x2="45" y2="${c.row ? 100 : 80}" stroke="#e3e8ee" stroke-width="5" stroke-linecap="round"/>
+      <circle class="status" cx="45" cy="${c.row ? 196 : -16}" r="7" fill="#3ddc84" opacity="0"/>
+    </g>`;
+  const svg = addShot(el, `
+    <g class="pan">
+      <rect x="-200" y="-100" width="2800" height="920" fill="#22262c"/>
+      ${Array.from({ length: 11 }, (_, i) => `<line x1="${170 + i * 220}" y1="100" x2="${170 + i * 220}" y2="320" stroke="#e8e2c9" stroke-width="4" opacity=".55"/>
+        <line x1="${170 + i * 220}" y1="410" x2="${170 + i * 220}" y2="630" stroke="#e8e2c9" stroke-width="4" opacity=".55"/>`).join('')}
+      <rect x="-200" y="340" width="2800" height="50" fill="#1c1f24"/>
+      ${LOT.map(car).join('')}
+    </g>
+    <rect width="1280" height="720" fill="url(#vigD)"/>
+    <defs><radialGradient id="vigD"><stop offset=".6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".6"/></radialGradient></defs>`, 'drone');
+  const pan = $(svg, '.pan'), arms = svg.querySelectorAll('.tarm'), glows = svg.querySelectorAll('.glow'), status = svg.querySelectorAll('.status');
+  return {
+    el: svg,
+    update({ t, x, statusOn = 0 }) {
+      pan.setAttribute('transform', `translate(${x} 0)`);
+      arms.forEach((a, i) => {
+        const ang = Math.sin(t * 2.2 + i * 1.7) * .9 + (LOT[i].row ? Math.PI / 2 : -Math.PI / 2);
+        a.setAttribute('x2', 45 + Math.cos(ang) * 26); a.setAttribute('y2', +a.getAttribute('y1') + Math.sin(ang) * 26);
+      });
+      glows.forEach((g, i) => g.setAttribute('opacity', .55 + .45 * Math.sin(t * 3 + i)));
+      status.forEach((s, i) => s.setAttribute('opacity', clamp(statusOn * 20 - (i % 10) * 1.5) * (.75 + .25 * Math.sin(t * 4 + i))));
+    },
+  };
+}
+
+const sideCar = (x, k) => `
+  <g transform="translate(${x} 0)">
+    <path d="M0 105 Q0 65 40 60 L110 55 Q150 5 210 0 L300 0 Q350 5 380 55 L380 105 Q380 125 360 125 L20 125 Q0 125 0 105 Z" fill="${PAINT[k % 4]}"/>
+    <path d="M125 55 Q160 15 210 12 L290 12 Q330 15 355 55 Z" fill="#0b1016"/>
+    <rect class="glow" x="200" y="30" width="44" height="18" rx="3" fill="#36c5f0"/>
+    <line class="sarm" x1="250" y1="58" x2="230" y2="40" stroke="#e3e8ee" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="85" cy="125" r="32" fill="#0a0b0d" stroke="#3a3f46" stroke-width="6"/>
+    <circle cx="300" cy="125" r="32" fill="#0a0b0d" stroke="#3a3f46" stroke-width="6"/>
+  </g>`;
+function dolly(el) {
+  const svg = addShot(el, `
+    <rect width="1280" height="720" fill="#14171c"/>
+    <g class="pillars">${Array.from({ length: 10 }, (_, i) => `<rect x="${i * 360}" y="0" width="70" height="560" fill="#1d2128"/>
+      <rect x="${i * 360 + 150}" y="40" width="120" height="10" rx="5" fill="#fff6dc" opacity=".8"/>`).join('')}</g>
+    <rect y="540" width="1280" height="180" fill="#202429"/>
+    <g class="row">${Array.from({ length: 10 }, (_, i) => `<g transform="translate(0 365) scale(1.3)">${sideCar(i * 460, i)}</g>`).join('')}</g>`, 'dolly');
+  const row = $(svg, '.row'), pillars = $(svg, '.pillars'), arms = svg.querySelectorAll('.sarm'), glows = svg.querySelectorAll('.glow');
+  return {
+    el: svg,
+    update({ t, u }) {
+      row.setAttribute('transform', `translate(${-60 - 260 * u} 0)`);
+      pillars.setAttribute('transform', `translate(${-130 * u} 0)`);
+      arms.forEach((a, i) => {
+        const ang = -Math.PI * .75 + Math.sin(t * 3 + i) * .45;
+        a.setAttribute('x2', 250 + Math.cos(ang) * 30); a.setAttribute('y2', 58 + Math.sin(ang) * 30);
+      });
+      glows.forEach((g, i) => g.setAttribute('opacity', .55 + .45 * Math.sin(t * 3 + i)));
+    },
+  };
+}
+
+function camClose(el) {
+  const svg = addShot(el, `
+    <rect width="1280" height="720" fill="#0e1115"/>
+    <g class="push">
+      <rect x="120" y="0" width="56" height="720" fill="#20252c"/>
+      <rect x="176" y="350" width="140" height="40" fill="#2a3038"/>
+      <rect x="300" y="220" width="520" height="300" rx="40" fill="#1c2026" stroke="#323942" stroke-width="4"/>
+      <circle cx="560" cy="370" r="125" fill="#0b0d10" stroke="#3a424d" stroke-width="12"/>
+      <circle cx="560" cy="370" r="84" fill="#04060a"/>
+      <rect x="520" y="330" width="70" height="40" rx="6" fill="#36c5f0" opacity=".35" transform="rotate(-12 560 370)"/>
+      <circle cx="528" cy="338" r="16" fill="#fff" opacity=".25"/>
+      <circle class="led" cx="770" cy="262" r="12" fill="#ff5d5d"/>
+      <text x="748" y="270" fill="#ff8a8a" font-size="20" font-family="Menlo,monospace" text-anchor="end">REC</text>
+      <rect x="900" y="200" width="300" height="190" rx="10" fill="#05070a" stroke="#2e333b" stroke-width="3"/>
+      <rect x="914" y="214" width="272" height="162" rx="6" fill="#0f1a26"/>
+      ${[[928, 250], [1058, 250], [928, 312], [1058, 312]].map(([x, y]) => `<rect x="${x}" y="${y}" width="116" height="52" rx="8" fill="#1a2b3d"/>`).join('')}
+      <text x="924" y="236" fill="#7d93ab" font-size="13" font-family="Menlo,monospace">CAM-07 · 1920×1080</text>
+    </g>`, 'camclose');
+  const push = $(svg, '.push'), led = $(svg, '.led');
+  return {
+    el: svg,
+    update({ t, k }) {
+      push.setAttribute('transform', `translate(560 370) scale(${lerp(1, 1.08, k)}) translate(-560 -370)`);
+      led.setAttribute('opacity', blink(t, 3));
+    },
+  };
+}
+
+// ---------- scene 1: open, back-seat view, near to far ----------
+const scene1 = (() => {
+  const el = document.getElementById('s1');
+  const c = cabin(el, 'rear');
+  c.el.style.display = 'block';
+  return t => {
+    const [, tx, ty] = TILES[3];
+    const reach = prog(t, 1.2, 2.5), back = prog(t, 3.4, 4.6) * .55;
+    const tip = [lerp(lerp(ARM_REST[0], tx, reach), ARM_REST[0], back), lerp(lerp(ARM_REST[1], ty, reach), ARM_REST[1], back)];
+    const k = prog(t, 3.0, 7.8);
+    c.update({
+      t, tip, on: prog(t, .6, 1.6),
+      press: t > 2.5 && t < 2.85, hl: t > 2.55 && t < 3.6 ? 3 : -1,
+      ripple: t > 2.55 && t < 3.35 ? [tx, ty, (t - 2.55) / .8] : null,
+      cx: lerp(tx, 640, k), cy: lerp(ty, 380, k), s: lerp(3, 1, k),
+    });
+  };
+})();
+
+// ---------- scene 2: interview + ADB b-roll ----------
+const scene2 = (() => {
+  const el = document.getElementById('s2');
+  const iv = interview(el);
+  iv.el.style.display = 'block';
+  el.insertAdjacentHTML('beforeend', `
+    <div class="lower" style="position:absolute;left:90px;top:520px;z-index:5">
+      <div class="placeholder" style="position:static;display:inline-block;font-size:24px">【姓名占位】</div>
+      <div style="font-size:20px;color:#cbd3dd;margin-top:8px">阿维塔 · 智能座舱测试工程师</div>
+    </div>
+    <div class="broll" style="position:absolute;inset:0;background:#0d1117;z-index:6;font:22px/1.7 Menlo,monospace;padding:90px 140px;color:#c9d1d9"></div>`);
+  const lower = $(el, '.lower'), broll = $(el, '.broll');
+  const lines = ['$ adb devices', 'List of devices attached', 'AVATR-HU-0137    device', '$ adb shell input tap 540 960',
+    '$ adb shell uiautomator dump', '$ ./run_cases.sh --suite cockpit', '  ✓ case_001 home_launch', '  ✓ case_002 open_music',
+    '  ✓ case_003 nav_search', '  ✓ case_004 hvac_toggle', '  …'];
+  return t => {
+    const abs = t + 8;
+    iv.update(t, lerp(1, 1.06, t / 12), abs > 9 && abs < 18);
+    lower.style.opacity = prog(abs, 9.3, 9.9) * (1 - prog(abs, 13.4, 13.9));
+    const on = abs >= 14.1 && abs < 18.4;
+    broll.style.display = on ? 'block' : 'none';
+    if (on) {
+      const n = Math.floor((abs - 14.1) / .38) + 1;
+      broll.innerHTML = lines.slice(0, n).map(l => `<div style="color:${l.includes('✓') ? '#3ddc84' : l.startsWith('$') ? '#e6edf3' : '#8b949e'}">${l}</div>`).join('');
+    }
+  };
+})();
+
+// ---------- scene 3: turning point ----------
+const scene3 = (() => {
+  const el = document.getElementById('s3');
+  const iv = interview(el);
+  iv.el.style.display = 'block';
+  el.insertAdjacentHTML('beforeend', `
+    <div class="split" style="position:absolute;inset:0;z-index:6;display:none">
+      <div style="position:absolute;left:0;top:0;width:640px;height:720px;background:#0d1117;font:24px/1.8 Menlo,monospace;padding:170px 60px;color:#c9d1d9">
+        <div>$ adb shell input tap 540 960</div>
+        <div style="color:#8b949e">→ 注入坐标 (540, 960)</div>
+        <div class="pass3" style="color:#3ddc84;font-size:46px;font-weight:700;margin-top:60px;opacity:0">✓ 128 / 128 PASSED</div>
+      </div>
+      <svg viewBox="0 0 1280 720">
+        <rect x="640" width="640" height="720" fill="#0a0c0f"/>
+        <rect x="700" y="190" width="520" height="320" rx="20" fill="#05070a" stroke="#1f252d" stroke-width="6"/>
+        <rect x="718" y="208" width="484" height="284" rx="12" fill="#0f1a26"/>
+        <rect x="860" y="300" width="200" height="90" rx="14" fill="#1a2b3d"/>
+        <text x="960" y="356" fill="#cfe6ff" font-size="30" text-anchor="middle">导航</text>
+        <g class="xhair">
+          <circle cx="960" cy="345" r="16" fill="none" stroke="#3ddc84" stroke-width="3"/>
+          <line x1="934" y1="345" x2="986" y2="345" stroke="#3ddc84" stroke-width="2"/>
+          <line x1="960" y1="319" x2="960" y2="371" stroke="#3ddc84" stroke-width="2"/>
+        </g>
+        <circle class="spin" cx="960" cy="345" r="34" fill="none" stroke="#36c5f0" stroke-width="6" stroke-dasharray="60 160" stroke-linecap="round" opacity="0"/>
+        <g class="popup" opacity="0">
+          <rect x="780" y="250" width="360" height="170" rx="16" fill="#e8ecf1"/>
+          <text x="960" y="312" fill="#1f2329" font-size="24" text-anchor="middle" font-weight="600">系统更新</text>
+          <text x="960" y="350" fill="#5b6370" font-size="18" text-anchor="middle">新版本已下载，是否立即安装？</text>
+          <rect x="890" y="372" width="140" height="34" rx="17" fill="#36c5f0"/>
+          <text x="960" y="395" fill="#00131c" font-size="16" text-anchor="middle">稍后</text>
+        </g>
+        <path class="hand" d="M0 0 q-14 -4 -16 -30 l-2 -120 q0 -16 14 -16 q14 0 14 16 l0 70 l60 10 q30 6 30 40 l0 90 l-100 0 Z" fill="#d9b49a"/>
+      </svg>
+    </div>
+    <div class="dead" style="position:absolute;inset:0;z-index:7;display:none;background:#0d1117;font:30px/1.9 Menlo,monospace;padding:220px 160px;color:#c9d1d9">
+      <div>$ adb devices</div>
+      <div style="color:#8b949e">List of devices attached</div>
+      <div class="e1" style="color:#ff5d5d;font-weight:700;margin-top:24px">error: no devices found</div>
+    </div>`);
+  const split = $(el, '.split'), hand = $(el, '.hand'), xhair = $(el, '.xhair'), spin = $(el, '.spin'),
+    popup = $(el, '.popup'), pass = $(el, '.pass3'), dead = $(el, '.dead'), e1 = $(el, '.e1');
+  return t => {
+    const abs = t + 20;
+    iv.update(t, lerp(1.08, 1.18, t / 15), abs > 20.6 && abs < 22.2);
+    split.style.display = abs >= 22.3 && abs < 30.9 ? 'block' : 'none';
+    xhair.setAttribute('opacity', prog(abs, 22.4, 22.7) * (1 - prog(abs, 25.6, 25.9)));
+    const k = prog(abs, 23.4, 24.0) * (1 - prog(abs, 24.9, 25.3)) + prog(abs, 25.5, 26.0) * (1 - prog(abs, 26.9, 27.4));
+    hand.setAttribute('transform', `translate(${lerp(1180, 975, k)} ${lerp(860, 515, k)})`);
+    spin.setAttribute('opacity', abs > 26.0 && abs < 27.3 ? 1 : 0);
+    spin.setAttribute('transform', `rotate(${abs * 400} 960 345)`);
+    popup.setAttribute('opacity', prog(abs, 27.2, 27.5));
+    pass.style.opacity = prog(abs, 29.0, 29.3);
+    dead.style.display = abs >= 30.9 ? 'block' : 'none';
+    e1.style.opacity = prog(abs, 32.6, 32.8);
+  };
+})();
+
+// ---------- scene 4: the lot, five angles ----------
+const scene4 = (() => {
+  const el = document.getElementById('s4');
+  const A = drone(el), B = dolly(el), C = cabin(el, 'driver'), D = camClose(el);
+  const E = addShot(el, `
+    <rect class="sky" width="1280" height="720"/>
+    <g class="stars">${Array.from({ length: 40 }, (_, i) => `<circle cx="${(i * 331) % 1280}" cy="${(i * 97) % 380}" r="${1 + i % 2}" fill="#fff"/>`).join('')}</g>
+    <circle class="sun" r="46" fill="#ffd27a"/>
+    <rect y="470" width="1280" height="250" fill="#14171c"/>
+    <g>${Array.from({ length: 9 }, (_, i) => `<g transform="translate(${-40 + i * 160} 420) scale(.38)">${sideCar(0, i)}</g>`).join('')}</g>
+    <rect class="shade" width="1280" height="720" fill="#000"/>
+    <text class="clock" x="1220" y="80" fill="#fff" font-size="54" font-family="Menlo,monospace" text-anchor="end">14:00</text>`, 'timelapse');
+  el.insertAdjacentHTML('beforeend', `
+    <div class="count" style="position:absolute;left:70px;top:50px;z-index:5;text-shadow:0 2px 10px #000">
+      <span class="n" style="font-size:110px;font-weight:700;line-height:1">0</span>
+      <span style="font-size:32px;margin-left:16px">台车 · 同时运行</span>
+    </div>
+    <div class="placeholder" style="left:70px;top:178px;font-size:15px">数量占位</div>`);
+  const count = $(el, '.count'), n = $(el, '.n'), ph = $(el, '.placeholder');
+  return t => {
+    const abs = t + 35;
+    const shot = cut(abs, [[35, 38.3, A.el], [38.3, 40.28, B.el], [40.28, 41.97, C.el], [41.97, 42.87, D.el], [42.87, 46, E]]);
+    if (shot === A.el) A.update({ t: abs, x: -700 * prog(abs, 35, 38.6) });
+    if (shot === B.el) B.update({ t: abs, u: abs - 38.3 });
+    if (shot === C.el) C.update({ t: abs, ...tapPath(abs, [[40.75, 0], [41.45, 1]]), cx: lerp(520, 500, prog(abs, 40.28, 41.97)) });
+    if (shot === D.el) D.update({ t: abs, k: prog(abs, 41.97, 42.87) });
+    count.style.display = ph.style.display = shot === B.el ? 'block' : 'none';
+    n.textContent = Math.round(20 * prog(abs, 38.4, 39.6));
+    const d = clamp((abs - 42.87) / 3.13);
+    $(E, '.sky').setAttribute('fill', d < .45 ? mix('#6fa8dc', '#f08a4b', d / .45) : mix('#f08a4b', '#0a0f1f', (d - .45) / .55));
+    $(E, '.sun').setAttribute('cx', lerp(200, 1100, d)); $(E, '.sun').setAttribute('cy', 140 + 520 * d * d);
+    $(E, '.stars').setAttribute('opacity', clamp((d - .6) / .3));
+    $(E, '.shade').setAttribute('opacity', .45 * d);
+    const hour = 14 + 12 * d;
+    $(E, '.clock').textContent = `${String(Math.floor(hour) % 24).padStart(2, '0')}:${String(Math.floor((hour % 1) * 60)).padStart(2, '0')}`;
+  };
+})();
+
+// ---------- scene 5: see / act / feedback ----------
+const scene5 = (() => {
+  const el = document.getElementById('s5');
+  el.innerHTML = `
+  <svg viewBox="0 0 1280 720"><g class="all">
+    <rect width="1280" height="720" fill="#0c0e11"/>
+    <rect x="40" y="70" width="560" height="380" rx="14" fill="#1a1d22" stroke="#2e333b" stroke-width="3"/>
+    <rect x="56" y="86" width="528" height="348" rx="6" fill="#f6f7f9"/>
+    <path d="M10 470 L630 470 L600 450 L40 450 Z" fill="#2a2f36"/>
+    <rect x="0" y="470" width="640" height="250" fill="#3b2f25"/>
+    <text x="76" y="118" font-size="17" font-weight="700" fill="#1f2329">Midscene Playground</text>
+    <text x="564" y="118" font-size="13" fill="#8a919c" text-anchor="end">AVATR-HU-0137 · 已连接</text>
+    <rect x="76" y="140" width="488" height="52" rx="8" fill="#fff" stroke="#36c5f0" stroke-width="2"/>
+    <text class="prompt" x="92" y="174" font-size="20" fill="#1f2329"></text>
+    <g class="logs" font-size="17"></g>
+    <rect x="636" width="8" height="720" fill="#000"/>
+    <rect x="644" width="636" height="720" fill="#07090b"/>
+    <rect x="690" y="110" width="550" height="360" rx="22" fill="#05070a" stroke="#1f252d" stroke-width="6"/>
+    <rect x="706" y="126" width="518" height="328" rx="12" fill="#0f1a26"/>
+    <text x="740" y="170" font-size="22" fill="#7d93ab">空调</text>
+    <circle cx="810" cy="300" r="44" fill="#1a2b3d"/><text x="810" y="314" font-size="44" fill="#cfe6ff" text-anchor="middle">−</text>
+    <circle cx="1120" cy="300" r="44" fill="#1a2b3d"/><text x="1120" y="314" font-size="40" fill="#cfe6ff" text-anchor="middle">+</text>
+    <text class="temp" x="965" y="325" font-size="86" font-weight="300" fill="#e8f3ff" text-anchor="middle">24°</text>
+    <text x="965" y="410" font-size="18" fill="#7d93ab" text-anchor="middle">自动 · 风量 3</text>
+    <g class="box" opacity="0">
+      <rect x="758" y="248" width="104" height="104" rx="10" fill="none" stroke="#36c5f0" stroke-width="3" stroke-dasharray="10 6"/>
+      <rect x="758" y="216" width="104" height="28" rx="4" fill="#36c5f0"/>
+      <text x="810" y="236" font-size="16" fill="#00131c" text-anchor="middle" font-weight="600">温度 −</text>
+    </g>
+    <circle class="ripple" cx="810" cy="300" r="0" fill="none" stroke="#36c5f0" stroke-width="4" opacity="0"/>
+    <g class="arm"></g>
+    <rect class="flash" x="644" width="636" height="720" fill="#fff" opacity="0"/>
+    <circle cx="680" cy="40" r="7" fill="#ff5d5d" class="rec"/>
+    <text x="696" y="47" font-size="18" fill="#e8ecf1" font-family="Menlo,monospace">REC · CAM-02</text>
+    <g class="pass" opacity="0">
+      <rect x="1000" y="40" width="220" height="56" rx="28" fill="#3ddc84"/>
+      <text x="1110" y="77" font-size="24" fill="#002a12" font-weight="700" text-anchor="middle">✓ 断言通过</text>
+    </g>
+  </g></svg>
+  <div class="chips"><span class="c">看到</span><span class="sep">→</span><span class="c">操作</span><span class="sep">→</span><span class="c">反馈</span></div>`;
+  // the arm reaches up from behind the centre console, i.e. from below the screen
+  const setArm = makeArm($(el, '.arm'), { x: 940, y: 800 }, 330, 300, -1);
+  const rest = [1000, 560];
+  const prompt = '打开空调，把温度调到 22 度';
+  const logs = [[52.3, '📷 截取车机画面'], [52.9, '🧠 定位：温度 “−” 按钮'], [54.2, '🦾 机械臂点击 × 2'], [56.1, '✓ aiAssert：温度显示 22°']];
+  const chipEls = el.querySelectorAll('.chips .c'), chips = $(el, '.chips');
+  return t => {
+    const abs = t + 46;
+    $(el, '.all').setAttribute('transform', `translate(640 360) scale(${lerp(1, 1.06, prog(abs, 58.6, 62))}) translate(-640 -360)`);
+    $(el, '.prompt').textContent = prompt.slice(0, Math.round(prompt.length * clamp((abs - 47.3) / 1.6)));
+    $(el, '.logs').innerHTML = logs.filter(([s]) => abs >= s).map(([, s], i) =>
+      `<text x="92" y="${240 + i * 40}" fill="${s.startsWith('✓') ? '#1a9d55' : '#3a404a'}">${s}</text>`).join('');
+    $(el, '.flash').setAttribute('opacity', abs > 52.3 ? .7 * (1 - clamp((abs - 52.3) / .35)) : 0);
+    $(el, '.box').setAttribute('opacity', prog(abs, 52.7, 53.0) * (1 - prog(abs, 56.3, 56.7)));
+    const reach = prog(abs, 53.6, 54.2) * (1 - prog(abs, 56.0, 56.8));
+    const tap = abs > 54.3 && abs < 54.55 || abs > 54.9 && abs < 55.15;
+    const bob = abs > 54.55 && abs < 54.9 ? 18 : 0;
+    setArm(lerp(rest[0], 810, reach), lerp(rest[1], 300, reach) + bob + (tap ? -3 : 0), tap ? 1 : 0);
+    const lastTap = abs > 54.9 ? 54.9 : 54.3, rr = clamp((abs - lastTap) / .6);
+    const rip = $(el, '.ripple'); rip.setAttribute('r', rr * 60); rip.setAttribute('opacity', abs > 54.3 && rr < 1 ? 1 - rr : 0);
+    $(el, '.temp').textContent = abs > 54.95 ? '22°' : abs > 54.35 ? '23°' : '24°';
+    $(el, '.pass').setAttribute('opacity', prog(abs, 56.0, 56.4));
+    $(el, '.rec').setAttribute('opacity', blink(abs));
+    chips.style.opacity = prog(abs, 51.8, 52.2) * (1 - prog(abs, 58.3, 58.8));
+    [52.3, 54.2, 55.9].forEach((s, i) => chipEls[i].classList.toggle('on', abs >= s));
+  };
+})();
+
+// ---------- scene 6: off-the-shelf industrial products, small team, big problem ----------
+const scene6 = (() => {
+  const el = document.getElementById('s6');
+  const iv = interview(el), P = cabin(el, 'passenger'), D = camClose(el), R = cabin(el, 'rear'), A = drone(el), B = dolly(el);
+  return t => {
+    const abs = t + 62;
+    const shot = cut(abs, [[62, 65.83, iv.el], [65.83, 66.66, P.el], [66.66, 67.64, D.el], [67.64, 69.9, R.el],
+      [69.9, 71.66, iv.el], [71.66, 74.4, A.el], [74.4, 76, B.el]]);
+    if (shot === iv.el) iv.update(t, abs < 69 ? 1.12 : 1.2, (abs < 64.5) || (abs > 69.9 && abs < 71.3));
+    if (shot === P.el) P.update({ t: abs, ...tapPath(abs, [[66.1, 1], [66.55, 3]]) });
+    if (shot === D.el) D.update({ t: abs, k: prog(abs, 66.66, 67.64) });
+    if (shot === R.el) {
+      const k = prog(abs, 67.64, 69.9);
+      R.update({ t: abs, ...tapPath(abs, [[68.2, 2], [69.0, 0]]), cy: lerp(400, 380, k), s: lerp(1.7, 1, k) });
+    }
+    if (shot === A.el) A.update({ t: abs, x: -200 - 600 * prog(abs, 71.66, 74.6), statusOn: prog(abs, 71.8, 73.4) });
+    if (shot === B.el) B.update({ t: abs, u: abs - 74.4 + 1 });
+  };
+})();
+
+// ---------- scene 7: pitfalls, listed ----------
+const scene7 = (() => {
+  const el = document.getElementById('s7');
+  const iv = interview(el);
+  const cols = [40, 453, 866], W = 374;
+  const grid = [];
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 5; c++) grid.push([cols[2] + 37 + c * 62, 190 + r * 62]);
+  const pit = addShot(el, `
+    <rect width="1280" height="720" fill="#07090b"/>
+    ${cols.map((x, i) => `<g class="pane">
+      <rect class="frame" x="${x}" y="110" width="${W}" height="460" rx="18" fill="#0f1318" stroke="#2a313a" stroke-width="2"/>
+      <text x="${x + W / 2}" y="80" fill="#e8ecf1" font-size="28" font-weight="600" text-anchor="middle">${['机械臂力度', '相机画面矫正', '量产前批量部署'][i]}</text>
+    </g>`).join('')}
+    <rect x="${cols[0] + 250}" y="170" width="16" height="250" rx="4" fill="#36c5f0" opacity=".5"/>
+    <g class="finger"><rect x="${cols[0] + 20}" y="282" width="200" height="26" rx="13" fill="#cdd4dc"/><circle cx="${cols[0] + 220}" cy="295" r="16" fill="#9aa4b1"/></g>
+    <rect x="${cols[0] + 40}" y="470" width="${W - 80}" height="18" rx="9" fill="#ff5d5d" opacity=".5"/>
+    <rect x="${cols[0] + 40 + (W - 80) * .35}" y="470" width="${(W - 80) * .3}" height="18" fill="#3ddc84" opacity=".8"/>
+    <path class="needle" d="M0 -6 L10 -22 L-10 -22 Z" fill="#fff"/>
+    <text class="force" x="${cols[0] + W / 2}" y="535" font-size="22" text-anchor="middle"></text>
+    <g class="lens" fill="none" stroke-width="2.5"></g>
+    <text class="lenslabel" x="${cols[1] + W / 2}" y="535" font-size="22" text-anchor="middle"></text>
+    ${grid.map(([x, y]) => `<rect class="unit" x="${x}" y="${y}" width="50" height="44" rx="10" fill="#1f252d"/>`).join('')}
+    <text class="fleet" x="${cols[2] + W / 2}" y="535" fill="#cbd3dd" font-size="22" text-anchor="middle"></text>`, 'pit');
+  const panes = pit.querySelectorAll('.pane'), units = pit.querySelectorAll('.unit');
+  const T = [78.15, 79.48, 81.15];
+  return t => {
+    const abs = t + 76;
+    const shot = cut(abs, [[76, 78.0, iv.el], [78.0, 83.5, pit]]);
+    if (shot === iv.el) { iv.update(t, 1.22, abs > 76.2 && abs < 77.65); return; }
+    panes.forEach((p, i) => {
+      p.setAttribute('opacity', abs >= T[i] ? 1 : .3);
+      $(p, '.frame').setAttribute('stroke', abs >= T[i] && (i === 2 || abs < T[i + 1]) ? '#36c5f0' : '#2a313a');
+    });
+    // force: too light, too hard, then inside the safe window
+    const f = abs < T[0] ? 0 : abs < T[0] + .4 ? .15 : abs < T[0] + .8 ? .9 : .5;
+    const press = abs >= T[0] && abs < T[0] + 1.1 && Math.sin((abs - T[0]) * 18) > 0 ? 1 : 0;
+    $(pit, '.finger').setAttribute('transform', `translate(${press * 14} 0)`);
+    $(pit, '.needle').setAttribute('transform', `translate(${cols[0] + 40 + (W - 80) * f} 470)`);
+    const okF = f > .3 && f < .7;
+    $(pit, '.force').textContent = abs < T[0] ? '' : f < .3 ? '太轻：点不上' : f > .7 ? '太重：误触' : '✓ 力度落在安全区间';
+    $(pit, '.force').setAttribute('fill', okF ? '#3ddc84' : '#ff8a8a');
+    // distortion: barrel-curved grid straightens out
+    const k = 1 - prog(abs, T[1] + .3, T[1] + 1.1);
+    const x0 = cols[1] + 47, y0 = 150, S = 280, cx = x0 + S / 2, cy = y0 + S / 2, lines = [];
+    for (let i = 0; i <= 6; i++) {
+      const p = i / 6, y = y0 + S * p, x = x0 + S * p, bow = (p - .5) * 2 * 34 * k;
+      lines.push(`<path d="M${x0} ${y} Q${cx} ${y + bow} ${x0 + S} ${y}"/>`, `<path d="M${x} ${y0} Q${x + bow} ${cy} ${x} ${y0 + S}"/>`);
+    }
+    $(pit, '.lens').innerHTML = lines.join('');
+    $(pit, '.lens').setAttribute('stroke', k < .05 ? '#3ddc84' : '#f5b942');
+    $(pit, '.lenslabel').textContent = abs < T[1] ? '' : k < .05 ? '✓ 已矫正' : '镜头畸变';
+    $(pit, '.lenslabel').setAttribute('fill', k < .05 ? '#3ddc84' : '#f5b942');
+    // fleet: units come online one by one
+    const done = abs < T[2] ? 0 : Math.min(20, Math.floor((abs - T[2]) / 1.5 * 20));
+    units.forEach((u, i) => u.setAttribute('fill', i < done ? '#3ddc84' : '#1f252d'));
+    $(pit, '.fleet').textContent = abs < T[2] ? '' : `${done} / 20 台已标定上线`;
+  };
+})();
+
+// ---------- scene 8: open source + end card ----------
+const scene8 = (() => {
+  const el = document.getElementById('s8');
+  const iv = interview(el), R = cabin(el, 'rear');
+  const repo = addShot(el, `
+    <rect width="1280" height="720" fill="#05070a"/>
+    <g class="win">
+      <rect x="110" y="60" width="1060" height="600" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+      <rect x="110" y="60" width="1060" height="46" rx="14" fill="#161b22"/>
+      <circle cx="140" cy="83" r="7" fill="#ff5f57"/><circle cx="162" cy="83" r="7" fill="#febc2e"/><circle cx="184" cy="83" r="7" fill="#28c840"/>
+      <rect x="230" y="70" width="700" height="26" rx="13" fill="#0d1117"/>
+      <text x="250" y="89" fill="#8b949e" font-size="15" font-family="Menlo,monospace">github.com/web-infra-dev/midscene-test-everything</text>
+      <text x="150" y="160" fill="#58a6ff" font-size="28">web-infra-dev / <tspan font-weight="700">midscene-test-everything</tspan></text>
+      <rect x="980" y="134" width="150" height="38" rx="8" fill="#21262d" stroke="#30363d"/>
+      <text x="1055" y="160" fill="#e6edf3" font-size="18" text-anchor="middle">★ Star</text>
+      ${['packages/robot-arm/arm-kit', 'packages/robot-arm/mg400-service', 'packages/ios-airlink', 'README.md'].map((f, i) => `
+        <rect x="150" y="${200 + i * 52}" width="480" height="46" fill="${i % 2 ? '#0d1117' : '#11161d'}"/>
+        <text x="170" y="${230 + i * 52}" fill="#c9d1d9" font-size="18" font-family="Menlo,monospace">${f}</text>`).join('')}
+      <text x="680" y="230" fill="#e6edf3" font-size="24" font-weight="700">🦾 Robot Arm × Physical Touchscreen</text>
+      <text x="680" y="270" fill="#8b949e" font-size="17">Spatial calibration · Motion primitives</text>
+      <text x="680" y="298" fill="#8b949e" font-size="17">Modular arm SDK · End-to-end demo</text>
+      <text x="680" y="350" fill="#8b949e" font-size="17">Special thanks to AVATR Robotic team</text>
+    </g>`, 'repo');
+  const card = addShot(el, `
+    <rect width="1280" height="720" fill="#000"/>
+    <text x="640" y="320" fill="#e8ecf1" font-size="54" font-weight="700" text-anchor="middle">Midscene Test Everything</text>
+    <text x="560" y="392" fill="#cbd3dd" font-size="30" text-anchor="end">Midscene.js</text>
+    <text x="600" y="392" fill="#5d6774" font-size="30" text-anchor="middle">×</text>
+    <rect x="640" y="362" width="170" height="44" rx="6" fill="none" stroke="#f5b942" stroke-width="2" stroke-dasharray="8 5"/>
+    <text x="725" y="392" fill="#f5b942" font-size="22" font-weight="600" text-anchor="middle">AVATR Logo</text>
+    <text x="640" y="470" fill="#36c5f0" font-size="22" font-family="Menlo,monospace" text-anchor="middle">github.com/web-infra-dev/midscene-test-everything</text>`, 'card');
+  return t => {
+    const abs = t + 83.5;
+    const shot = cut(abs, [[83.5, 84.64, iv.el], [84.64, 85.84, repo], [85.84, 88.4, R.el], [88.4, 93.5, card]]);
+    if (shot === iv.el) iv.update(t, 1.25, true);
+    if (shot === repo) $(repo, '.win').setAttribute('transform', `translate(640 360) scale(${lerp(1, 1.05, prog(abs, 84.64, 85.84))}) translate(-640 -360)`);
+    if (shot === R.el) {
+      const k = prog(abs, 85.84, 88.4), back = prog(abs, 86.6, 87.6);
+      const [, tx, ty] = TILES[1];
+      R.update({ t: abs, tip: [lerp(tx, ARM_REST[0], back), lerp(ty, ARM_REST[1], back)], s: lerp(2.2, 1, k), cx: lerp(tx, 640, k), cy: lerp(ty, 380, k), on: 1 - prog(abs, 87.6, 88.4) * .7 });
+    }
+    card.style.opacity = prog(abs, 88.4, 89.2);
+  };
+})();
+
+const UPDATERS = { s1: scene1, s2: scene2, s3: scene3, s4: scene4, s5: scene5, s6: scene6, s7: scene7, s8: scene8 };
+
+// ---------- player ----------
+const audio = document.getElementById('audio'), stage = document.getElementById('stage'), viewport = document.getElementById('viewport');
+const sub = document.getElementById('sub'), timeEl = document.getElementById('time'), playBtn = document.getElementById('play');
+const timeline = document.getElementById('timeline'), playhead = document.getElementById('playhead'), notes = document.getElementById('notes');
+
+SCENES.forEach(s => {
+  const seg = document.createElement('div');
+  seg.className = 'seg'; seg.dataset.id = s.id;
+  seg.style.width = `${(s.end - s.start) / DURATION * 100}%`;
+  seg.textContent = s.title;
+  timeline.insertBefore(seg, playhead);
+});
+CUES.forEach(([a, b]) => {
+  const vo = document.createElement('div');
+  vo.className = 'vo';
+  vo.style.left = `${a / DURATION * 100}%`; vo.style.width = `${(b - a) / DURATION * 100}%`;
+  timeline.appendChild(vo);
+});
+
+let fallbackT = 0, fallbackPlaying = false, lastFrame = 0, currentScene = null;
+const audioOk = () => audio.readyState >= 1 && !audio.error;
+const now = () => audioOk() ? audio.currentTime : fallbackT;
+const playing = () => audioOk() ? !audio.paused : fallbackPlaying;
+
+function seek(t) {
+  t = clamp(t, 0, DURATION - .01);
+  if (audioOk()) audio.currentTime = t; else fallbackT = t;
+  render(t);
+}
+function toggle() {
+  if (now() >= DURATION - .05) seek(0);
+  if (audioOk()) audio.paused ? audio.play() : audio.pause(); else fallbackPlaying = !fallbackPlaying;
+}
+playBtn.onclick = toggle;
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); toggle(); }
+  if (e.code === 'ArrowRight') seek(now() + 5);
+  if (e.code === 'ArrowLeft') seek(now() - 5);
+});
+timeline.addEventListener('click', e => {
+  const r = timeline.getBoundingClientRect();
+  seek((e.clientX - r.left) / r.width * DURATION);
+});
+
+function showNotes(s) {
+  notes.innerHTML = `
+    <div><div class="shotname">${s.title}</div><div class="range">${fmt(s.start)} – ${fmt(s.end)}</div></div>
+    <dl><dt>画面</dt><dd>${s.pic}</dd><dt>拍摄</dt><dd>${s.cam}</dd>${s.todo ? `<dt>待定</dt><dd class="todo">${s.todo}</dd>` : ''}</dl>`;
+}
+
+function render(t) {
+  const s = SCENES.find(s => t >= s.start && t < s.end) || SCENES[SCENES.length - 1];
+  if (s !== currentScene) {
+    SCENES.forEach(x => document.getElementById(x.id).style.display = x === s ? 'block' : 'none');
+    timeline.querySelectorAll('.seg').forEach(seg => seg.classList.toggle('active', seg.dataset.id === s.id));
+    showNotes(s);
+    currentScene = s;
+  }
+  UPDATERS[s.id](t - s.start);
+  const cue = CUES.find(([a, b]) => t >= a && t < b);
+  sub.textContent = cue ? cue[2] : '';
+  playhead.style.left = `${t / DURATION * 100}%`;
+  timeEl.textContent = `${fmt(t)} / ${fmt(DURATION)}`;
+  playBtn.textContent = playing() ? '❚❚ 暂停' : '▶ 播放';
+}
+
+function frame(ts) {
+  const dt = lastFrame ? (ts - lastFrame) / 1000 : 0; lastFrame = ts;
+  if (!audioOk() && fallbackPlaying) { fallbackT += dt; if (fallbackT >= DURATION) { fallbackT = DURATION - .01; fallbackPlaying = false; } }
+  render(now());
+  requestAnimationFrame(frame);
+}
+
+function fit() { stage.style.transform = `scale(${viewport.clientWidth / 1280})`; }
+window.addEventListener('resize', fit); fit();
+// Export mode (?export): no audio, frames are driven by window.__frame(t).
+if (location.search.includes('export')) {
+  audio.removeAttribute('src'); audio.load();
+  document.body.classList.add('export');
+  window.__frame = t => { fallbackT = t; render(t); };
+}
+const hashT = parseFloat((location.hash.match(/t=([\d.]+)/) || [])[1]);
+if (!isNaN(hashT)) fallbackT = hashT;
+render(now());
+audio.addEventListener('loadedmetadata', () => { if (!isNaN(hashT)) seek(hashT); });
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
