@@ -822,9 +822,24 @@ describe('first-time automatic exploration', () => {
           samples
             .filter((sample) => sample.role === role)
             .map((sample) => sample.method);
-        if (slides && mode !== 'fast-vertical-fallback-slide') {
-          const firstGridRecovered =
-            mode === 'fast-adaptive-slide' || mode === 'fast-corner-slide';
+        if (
+          mode === 'fast-corner-slide' ||
+          mode === 'fast-intermittent-height-slide'
+        ) {
+          const switchToVertical = slideRecoveries.find(
+            (recovery) => recovery.switchedToVertical,
+          );
+          expect(switchToVertical?.phase).toBe('grid');
+          const switchIndex = collection.grid.findIndex(
+            ({ target }) => target.id === switchToVertical?.targetId,
+          );
+          expect(switchIndex).toBeGreaterThan(0);
+          for (const point of collection.grid.slice(switchIndex)) {
+            expect(point.zSource).toBe('measured');
+            expect(point.heightIntervalMm).toBeDefined();
+          }
+        } else if (slides && mode !== 'fast-vertical-fallback-slide') {
+          const firstGridRecovered = mode === 'fast-adaptive-slide';
           expect(methodsOf('fit')).toEqual([
             firstGridRecovered ? 'stepped' : 'slide',
             firstGridRecovered ? 'direct' : 'slide',
