@@ -52,6 +52,69 @@ const describeCause = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause);
 const visibilityPercent = (fraction: number | undefined) =>
   fraction === undefined ? '—' : `${Math.floor(fraction * 1000) / 10}%`;
+type ParkingVisibility = NonNullable<
+  CalibrationBatchState['sharedParkingFailureVisibility']
+>;
+function visibilityAssessment(screen: ParkingVisibility['screens'][number]) {
+  if (screen.clear) return t('Screen visibility passed');
+  if (screen.reason === 'glare') return t('Possible glare');
+  if (screen.assessment === 'insufficient-evidence')
+    return t('Unreliable screen pattern');
+  if (screen.assessment === 'suspected-occlusion')
+    return t('Possible obstruction');
+  return t('Screen visibility did not pass');
+}
+
+function ParkingVisibilityFailure({
+  evidence,
+  items,
+}: {
+  evidence: ParkingVisibility;
+  items: CalibrationBatchState['items'];
+}) {
+  const name = (id: string) =>
+    items.find((item) => item.deviceId === id)?.name ?? id;
+  return (
+    <>
+      <ul>
+        {evidence.screens
+          .filter((screen) => !screen.clear)
+          .map((screen) => (
+            <li key={screen.id}>
+              {name(screen.id)} · {visibilityAssessment(screen)} ·{' '}
+              {visibilityPercent(screen.visibleFraction)}
+            </li>
+          ))}
+      </ul>
+      {!!evidence.attempts?.length && (
+        <details>
+          <summary>{t('Visibility check attempts')}</summary>
+          <ol>
+            {evidence.attempts.map(({ pattern, exposure, screens }, index) => (
+              <li key={index}>
+                {t(
+                  pattern === 'checkerboard'
+                    ? 'Checkerboard'
+                    : 'Offset contrast',
+                )}
+                {exposure &&
+                  ` · ${t('Exposure {0} → {1}', [exposure.previous, exposure.reduced])}`}
+                <ul>
+                  {screens.map((screen) => (
+                    <li key={screen.id}>
+                      {name(screen.id)} · {visibilityAssessment(screen)} ·{' '}
+                      {visibilityPercent(screen.visibleFraction)}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </>
+  );
+}
 function calibrationStatus(calibrated: boolean, cameraMappingChanged = false) {
   if (cameraMappingChanged)
     return {
@@ -476,6 +539,12 @@ export const CalibrationBatchPanel = forwardRef<
                 {calibrationErrorText(batch.error)}
               </Typography.Paragraph>
             )}
+          {batch.sharedParkingFailureVisibility && (
+            <ParkingVisibilityFailure
+              evidence={batch.sharedParkingFailureVisibility}
+              items={batch.items}
+            />
+          )}
           <Space wrap>
             {isActive && (
               <Button danger onClick={() => command('stop')}>
@@ -666,7 +735,8 @@ export const CalibrationBatchPanel = forwardRef<
             </Button>
           </Space>
         )}
-        {batch?.visibilityMissingScreens?.length ? (
+        {!batch?.sharedParkingFailureVisibility &&
+        batch?.visibilityMissingScreens?.length ? (
           <Typography.Paragraph type="secondary">
             {t('Unverified screens in last Safe Position check')} ·{' '}
             {batch.visibilityMissingScreens.join(' · ')}
@@ -725,15 +795,7 @@ export const CalibrationBatchPanel = forwardRef<
                 },
                 {
                   title: t('Visibility assessment'),
-                  render: (_, screen) => {
-                    if (screen.clear) return t('Screen visibility passed');
-                    if (screen.reason === 'glare') return t('Possible glare');
-                    if (screen.assessment === 'insufficient-evidence')
-                      return t('Unreliable screen pattern');
-                    if (screen.assessment === 'suspected-occlusion')
-                      return t('Possible obstruction');
-                    return t('Screen visibility did not pass');
-                  },
+                  render: (_, screen) => visibilityAssessment(screen),
                 },
                 {
                   title: t('Whole screen'),

@@ -404,9 +404,15 @@ export class CalibrationBatch {
       operatorConfirmedParking?: boolean;
       debug?: SharedParkingDebug;
       recheck?: boolean;
+      onVisibility?(
+        evidence: NonNullable<
+          CalibrationBatchState['sharedParkingFailureVisibility']
+        >,
+      ): void;
     },
   ) {
-    const { last, operatorConfirmedParking, debug, recheck } = options;
+    const { last, operatorConfirmedParking, debug, recheck, onVisibility } =
+      options;
     await this.assertPerspectives(state.cameraId!);
     this.check(signal);
     const selection = this.selection(state.cameraId!);
@@ -500,6 +506,7 @@ export class CalibrationBatch {
           },
         );
         if (debug) debug.visibility = evidence;
+        onVisibility?.(evidence);
         return evidence;
       },
       guard,
@@ -1053,6 +1060,7 @@ export class CalibrationBatch {
   ): Promise<CalibrationProfile | undefined> {
     const state = this.state!;
     let last: CalibrationProfile | undefined;
+    let sharedParkingVisibility: CalibrationBatchState['sharedParkingFailureVisibility'];
     try {
       if (!state.items.some((row) => row.runIds.length))
         await this.prepareCamera(signal);
@@ -1344,6 +1352,9 @@ export class CalibrationBatch {
           await this.findSharedParking(state, signal, {
             last,
             operatorConfirmedParking,
+            onVisibility: (evidence) => {
+              sharedParkingVisibility = evidence;
+            },
           });
         const store = this.runtime.profileStore;
         await this.recordSharedParking(
@@ -1374,6 +1385,9 @@ export class CalibrationBatch {
       await this.update(() => {
         state.status = stopped ? 'stopped' : 'failed';
         state.error = error instanceof Error ? error.message : String(error);
+        state.sharedParkingFailureVisibility = Array.isArray(missing)
+          ? sharedParkingVisibility
+          : undefined;
         state.visibilityMissingScreens = Array.isArray(missing)
           ? missing.flatMap((screen) => {
               if (typeof screen === 'string') return [screen];
@@ -1538,6 +1552,7 @@ export class CalibrationBatch {
           this.state!.status = 'running';
           this.state!.error = undefined;
           this.state!.visibilityMissingScreens = undefined;
+          this.state!.sharedParkingFailureVisibility = undefined;
         });
         this.stopRevision = this.runtime.stopRevision;
         this.launch(launchRevision, 'manual');
@@ -1581,6 +1596,7 @@ export class CalibrationBatch {
             this.state!.status = 'running';
             this.state!.error = undefined;
             this.state!.visibilityMissingScreens = undefined;
+            this.state!.sharedParkingFailureVisibility = undefined;
           });
           this.stopRevision = this.runtime.stopRevision;
           this.launch(launchRevision);

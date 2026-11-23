@@ -118,10 +118,14 @@ const teachingBoundaryZh: Record<string, string> = {
   'Insufficient image evidence': '图像证据不足',
   'Visibility assessment': '判定',
   'Possible glare': '疑似反光',
+  'Visibility check attempts': '查看相机复核记录',
+  Checkerboard: '棋盘格',
+  'Offset contrast': '错位高对比图案',
+  'Exposure {0} → {1}': '曝光 {0} → {1}',
   'Unreliable screen pattern': '图案响应不足',
   'Possible obstruction': '疑似遮挡',
-  'The camera could not verify every screen after automatic parking. Check the live view or record a Safe Position manually.':
-    '自动避让后，相机仍未能确认所有屏幕可见。请检查实时画面或手动记录安全位。',
+  'The camera could not verify the current screen after automatic parking. Check the live view or record a Safe Position manually.':
+    '自动避让后，相机仍未能确认当前屏幕可见。请检查实时画面或手动记录安全位。',
   'The screen visibility pattern could not be verified. Check the camera view and paired phone pages.':
     '无法识别屏幕显示的可见性图案，请检查相机画面和已配对的手机页面。',
   'The paired phones did not acknowledge the visibility pattern. Keep every page visible and fullscreen.':

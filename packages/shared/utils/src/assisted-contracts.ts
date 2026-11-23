@@ -8,6 +8,7 @@ import type {
   MotionSpeed,
   ProfileBinding,
   ScreenMotionSettings,
+  ScreenVisibilityEvidence,
   ScreenVisibilityProbePattern,
   Vector3,
   VisionBinding,
@@ -655,6 +656,7 @@ export interface CalibrationBatchState {
   acceptance?: 'manual' | 'automatic';
   error?: string;
   visibilityMissingScreens?: string[];
+  sharedParkingFailureVisibility?: ScreenVisibilityEvidence;
   planVersion?: string;
   contextVersion?: string;
   transfer?: CalibrationBatchPlan['transfer'];

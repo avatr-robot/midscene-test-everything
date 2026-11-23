@@ -2195,7 +2195,7 @@ export class CalibrationWorkflow {
       if (s.teachingId)
         s.error =
           s.calibration.auto?.cameraVisibility?.clear === false
-            ? 'The camera could not verify every screen after automatic parking. Check the live view or record a Safe Position manually.'
+            ? 'The camera could not verify the current screen after automatic parking. Check the live view or record a Safe Position manually.'
             : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }
     this.changed();
