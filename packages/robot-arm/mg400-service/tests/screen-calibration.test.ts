@@ -426,18 +426,18 @@ it('applies passing multi-screen results after marker display ends', async () =>
   const imagingPending = new Promise<void>((resolve) => {
     finishImaging = resolve;
   });
-  const firstImagingCalibration = rstest
-    .spyOn(phones[0]!.targetHost.service, 'startImagingCalibration')
+  const imagingCalibration = rstest
+    .spyOn(f.devices, 'calibrateCameraImaging')
     .mockReturnValue(imagingPending);
-  const secondImagingCalibration = rstest
-    .spyOn(phones[1]!.targetHost.service, 'startImagingCalibration')
-    .mockResolvedValue();
   const imagingPattern = rstest.spyOn(f.devices, 'setCameraImagingPattern');
   await expect(
     f.service.markerAction({ ...command, action: 'apply' }),
   ).resolves.toBeDefined();
-  expect(firstImagingCalibration).toHaveBeenCalledTimes(1);
-  expect(secondImagingCalibration).not.toHaveBeenCalled();
+  expect(imagingCalibration).toHaveBeenCalledTimes(1);
+  expect(imagingCalibration).toHaveBeenCalledWith('cam', [
+    phones[0]!.targetId,
+    phones[1]!.targetId,
+  ]);
   expect(phones[0]!.targetHost.service.setup().imaging?.state).toBe(
     'unsupported',
   );

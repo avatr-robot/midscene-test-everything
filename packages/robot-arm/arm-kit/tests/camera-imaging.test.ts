@@ -1019,7 +1019,7 @@ describe('camera imaging', () => {
         mode: 'manual',
       });
 
-      await imaging.clearPerspectiveBinding();
+      await imaging.clearPerspectiveBinding(screenId);
 
       expect(imaging.status().state).toBe('released');
       expect(control.values.focus.mode).toBe('auto');
@@ -1105,11 +1105,17 @@ describe('camera imaging', () => {
       control,
     );
     const stored = {
-      version: 6 as const,
+      version: 7 as const,
       cameraId: control.deviceId,
-      rois: [{ screenId, fingerprint: 'old-perspective' }],
-      focus: { value: 45, score: 1 },
-      exposure: { value: -8 },
+      screens: [
+        {
+          screenId,
+          fingerprint: 'old-perspective',
+          focus: { value: 45, score: 1 },
+          exposure: { value: -8 },
+          calibratedAt: new Date().toISOString(),
+        },
+      ],
       calibratedAt: new Date().toISOString(),
     };
     Object.assign(imaging as unknown as Record<string, unknown>, {
@@ -1124,7 +1130,7 @@ describe('camera imaging', () => {
       const persisted = JSON.parse(
         await readFile(cameraImagingFile(directory, control.deviceId), 'utf8'),
       ) as typeof stored;
-      expect(persisted.rois[0]?.fingerprint).toBe(
+      expect(persisted.screens[0]?.fingerprint).toBe(
         createHash('sha256')
           .update(JSON.stringify([screenId, correction]))
           .digest('hex'),
@@ -1738,6 +1744,176 @@ describe('camera imaging', () => {
       expect(control.values.focus.mode).toBe('auto');
       expect(control.values.brightness.value).toBe(128);
       expect(control.values.gain.value).toBe(0);
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('saves independent screen profiles during one shared calibration', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const imaging = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    imaging.registerScreen('left', () => correction);
+    imaging.registerScreen('right', () => correction);
+    Object.assign(imaging as unknown as Record<string, unknown>, {
+      preset: async () => ({
+        exposure: control.values.exposure,
+        focus: control.values.focus,
+      }),
+      optimizeExposureForScreens: async () =>
+        new Map([
+          ['left', { exposure: -8, score: 0.1, gain: 0 }],
+          ['right', { exposure: -4, score: 0.2, gain: 0 }],
+        ]),
+      tuneToneForScreens: async () =>
+        new Map([
+          [
+            'left',
+            {
+              brightness: 124,
+              contrast: 132,
+              score: 0.1,
+              monotonic: true,
+            },
+          ],
+          [
+            'right',
+            {
+              brightness: 136,
+              contrast: 120,
+              score: 0.2,
+              monotonic: true,
+            },
+          ],
+        ]),
+      searchWhiteBalanceForScreens: async () =>
+        new Map([
+          ['left', 4_800],
+          ['right', 5_200],
+        ]),
+      searchFocusForScreens: async () =>
+        new Map([
+          ['left', { value: 40, score: 2, min: 0, max: 250 }],
+          ['right', { value: 180, score: 3, min: 0, max: 250 }],
+        ]),
+    });
+    try {
+      await imaging.calibrateScreens(['left', 'right']);
+      const stored = JSON.parse(
+        await readFile(cameraImagingFile(directory, control.deviceId), 'utf8'),
+      ) as {
+        screens: Array<{
+          screenId: string;
+          focus: { value: number };
+          exposure: { value: number };
+        }>;
+      };
+      expect(stored.screens).toHaveLength(2);
+      expect(
+        stored.screens.find((screen) => screen.screenId === 'left'),
+      ).toMatchObject({
+        focus: { value: 40 },
+        exposure: { value: -8 },
+      });
+      expect(
+        stored.screens.find((screen) => screen.screenId === 'right'),
+      ).toMatchObject({
+        focus: { value: 180 },
+        exposure: { value: -4 },
+      });
+
+      await imaging.activateScreen('right');
+      expect(control.values.focus).toMatchObject({
+        value: 180,
+        mode: 'manual',
+      });
+      expect(control.values.exposure).toMatchObject({
+        value: -4,
+        mode: 'manual',
+      });
+      expect(imaging.status('right')).toMatchObject({
+        state: 'ready',
+        screenId: 'right',
+        active: true,
+      });
+
+      await imaging.clearScreenBinding('right');
+      expect(imaging.status('left').state).toBe('ready');
+      expect(imaging.status('right').state).toBe('unconfigured');
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('requires recalibration for a shared legacy multi-screen profile', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    await writeFile(
+      cameraImagingFile(directory, control.deviceId),
+      JSON.stringify({
+        version: 6,
+        cameraId: control.deviceId,
+        rois: [
+          {
+            screenId: 'left',
+            fingerprint: createHash('sha256')
+              .update(JSON.stringify(['left', correction]))
+              .digest('hex'),
+          },
+          {
+            screenId: 'right',
+            fingerprint: createHash('sha256')
+              .update(JSON.stringify(['right', correction]))
+              .digest('hex'),
+          },
+        ],
+        focus: { value: 100, score: 1 },
+        exposure: { value: -6 },
+        calibratedAt: new Date().toISOString(),
+      }),
+    );
+    const imaging = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    imaging.registerScreen('left', () => correction);
+    imaging.registerScreen('right', () => correction);
+    try {
+      await imaging.load();
+      expect(imaging.status('left').state).toBe('unconfigured');
+      expect(imaging.status('right').state).toBe('unconfigured');
+      expect(control.setCalls).toEqual([]);
     } finally {
       await imaging.close();
       await rm(directory, { recursive: true, force: true });

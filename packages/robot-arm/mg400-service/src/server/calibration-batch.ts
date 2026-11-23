@@ -755,6 +755,21 @@ export class CalibrationBatch {
     await delay(150, undefined, { signal });
     this.check(signal);
   }
+  private async ensureBatchImaging(
+    cameraId: string,
+    deviceIds: readonly string[],
+  ) {
+    const missing: string[] = [];
+    for (const deviceId of deviceIds) {
+      const host = await this.devices.ensureHost(deviceId);
+      const imaging = host.service.setup().imaging;
+      if (!imaging || !['ready', 'unsupported'].includes(imaging.state))
+        missing.push(deviceId);
+    }
+    if (missing.length)
+      await this.devices.calibrateCameraImaging(cameraId, missing);
+  }
+
   private async run(
     signal: AbortSignal,
     operatorConfirmedParking: boolean,
@@ -762,6 +777,10 @@ export class CalibrationBatch {
     const state = this.state!;
     let last: CalibrationProfile | undefined;
     try {
+      await this.ensureBatchImaging(
+        state.cameraId!,
+        state.items.map((item) => item.deviceId),
+      );
       for (; state.currentIndex < state.items.length; state.currentIndex++) {
         const row = state.items[state.currentIndex];
         if (terminal(row.status)) continue;
@@ -813,7 +832,11 @@ export class CalibrationBatch {
             if (!host.service.setup().mapping) await host.alignForBatch(signal);
             const imaging = host.service.setup().imaging;
             if (!imaging || !['ready', 'unsupported'].includes(imaging.state))
-              await this.devices.calibrateCameraImaging(state.cameraId!);
+              throw new RobotArmError(
+                'VISION_UNAVAILABLE',
+                'Camera imaging is not ready for this screen',
+                409,
+              );
             this.check(signal);
             let session = await host.service.create({ batch: true });
             attemptId = session.id;

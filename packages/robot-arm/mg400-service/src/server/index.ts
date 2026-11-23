@@ -1133,6 +1133,7 @@ export async function startPlaygroundHost({
                 })),
               hasCorrection: Boolean(correction),
               correction,
+              imaging: entry?.camera.imagingStatus(),
               perspectiveTarget: entry
                 ? entry.camera.getPerspectiveTarget()
                 : stored?.target,
@@ -1343,6 +1344,24 @@ export async function startPlaygroundHost({
           });
         await devices?.stop(input.id);
         return send(200, {});
+      }
+      if (
+        url.pathname === '/api/cameras/imaging/activate' &&
+        req.method === 'POST'
+      ) {
+        if (screenControl?.busy)
+          return send(409, {
+            error: 'Wait for the manual screen gesture to finish',
+          });
+        const input = await readBody(req);
+        if (typeof input.id !== 'string' || typeof input.screenId !== 'string')
+          return send(400, {
+            error: 'Camera and screen ids are required',
+          });
+        const imaging = devices
+          ? await devices.activateCameraImaging(input.id, input.screenId)
+          : await cameraManager.activateScreen(input.id, input.screenId);
+        return send(200, { imaging });
       }
       if (url.pathname === '/api/cameras/preview' && req.method === 'GET') {
         const id = url.searchParams.get('id') ?? '';

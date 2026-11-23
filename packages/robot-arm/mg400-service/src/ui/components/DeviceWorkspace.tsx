@@ -44,6 +44,7 @@ import {
   cameraPreviewUrl,
 } from '../camera-preview';
 import {
+  activateCameraImaging,
   cameraScreenNeedsCalibration,
   cameraStateLabel,
   selectCameraScreen,
@@ -93,6 +94,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const [twinView, setTwinView] = useState<TwinViewPreset>('default');
   const [previewError, setPreviewError] = useState<string>();
   const [previewRevision, setPreviewRevision] = useState(0);
+  const [imagingSwitchError, setImagingSwitchError] = useState<string>();
   const cameraRailId = useId();
   const [cameraRailExpanded, setCameraRailExpanded] = useState(true);
   const cameraRailAction = t(
@@ -268,6 +270,30 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
       )
     : streamState === 'running';
   const previewEnabled = standalone ? selected?.id !== pausedCamera : running;
+  useEffect(() => {
+    if (!running || !selectedId || !activeScreen?.id || activeWizard) return;
+    let cancelled = false;
+    setImagingSwitchError(undefined);
+    void activateCameraImaging(selectedId, activeScreen.id)
+      .then((imaging) => {
+        if (
+          !cancelled &&
+          (imaging?.state === 'unconfigured' || imaging?.state === 'error')
+        )
+          setImagingSwitchError(
+            imaging.message ?? 'Calibrate camera imaging for this screen',
+          );
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setImagingSwitchError(
+            error instanceof Error ? error.message : String(error),
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeScreen?.id, activeWizard, running, selectedId]);
   const starting = !standalone && streamState === 'starting';
   const cameraActionLabel = t(
     starting ? 'cameraStarting' : previewEnabled ? 'stopCamera' : 'startCamera',
@@ -566,6 +592,18 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                 }
               />
             ) : null)}
+          {imagingSwitchError && (
+            <Alert
+              showIcon
+              type="warning"
+              message={
+                language === 'zh'
+                  ? '相机参数未能切换到当前屏幕'
+                  : 'Camera parameters did not switch to this screen'
+              }
+              description={imagingSwitchError}
+            />
+          )}
         </div>
       )}
       {connected && (

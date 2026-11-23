@@ -72,6 +72,7 @@ Secure the stylus, screen, and overhead camera with the full touch area in view.
 - Restore a saved setup if the hardware is still in place. Recheck camera mapping and controller readiness.
 - Camera moved → recheck and confirm camera mapping. Arm moved → redo mechanical calibration. Screen moved → redo both.
 - For multiple screens on one camera, map them and keep their pages open. Use **Calibrate multiple screens** to set the order and follow the prompts for a shared safe position.
+- Camera imaging is calibrated for each screen independently. All mapped screens are scored during one shared focus, exposure, white-balance and tone sweep, then switching the active screen in the management UI applies that screen's saved values.
 
 ## Run a test
 

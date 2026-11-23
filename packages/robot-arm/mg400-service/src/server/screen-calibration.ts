@@ -1401,11 +1401,13 @@ export class ScreenCalibration {
     if (
       targets.every((target) => session.applied.get(target.id) === undefined)
     ) {
-      const imagingHost = this.devices.entries.get(targets[0]!.id)?.host;
       // Imaging can run longer than the marker request budget. The workbench
       // polls setup.imaging until it reaches ready or error.
-      void imagingHost?.service
-        .startImagingCalibration()
+      void this.devices
+        .calibrateCameraImaging(
+          session.cameraId,
+          targets.map((target) => target.id),
+        )
         .catch(() => undefined);
     }
     return response();

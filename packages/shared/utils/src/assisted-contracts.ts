@@ -360,6 +360,7 @@ export interface AssistedCalibrationSetup {
 export interface CalibrationImagingStatus {
   state:
     | 'idle'
+    | 'unconfigured'
     | 'released'
     | 'exposure'
     | 'white-balance'
@@ -368,6 +369,10 @@ export interface CalibrationImagingStatus {
     | 'ready'
     | 'error'
     | 'unsupported';
+  /** Screen whose independent camera profile owns this status. */
+  screenId?: string;
+  /** True when the profile is currently applied to the camera hardware. */
+  active?: boolean;
   message?: string;
   focus?: number;
   /** DirectShow exposure value in the camera's reported hardware range. */
