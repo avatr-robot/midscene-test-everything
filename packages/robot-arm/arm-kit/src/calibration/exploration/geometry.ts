@@ -11,16 +11,29 @@ import type {
   Vector3,
 } from '../../contracts.js';
 import { RobotArmError, assertScreenMapping } from '../../contracts.js';
-import { distance, dot, rotate, sub, unit } from '../../domain.js';
+import {
+  add,
+  cross,
+  distance,
+  dot,
+  rotate,
+  scale,
+  sub,
+  unit,
+} from '../../domain.js';
+import { SAMPLED_SURFACE_LIMIT_MM } from '../surface.js';
 import {
   assertSurfaceDeviationMm,
   fitContactPlane,
+  fitSamplePlane,
   screenGeometry,
   surfaceDepthMm,
 } from './plane.js';
 
 /** Ignore fits smaller than touch repeatability; they only add noise. */
 const MIN_SURFACE_COMPENSATION_MM = 0.05;
+/** Same inlier band as `fitContactPlane`, reused for the measured-height fit. */
+const PLANE_INLIER_MM = SAMPLED_SURFACE_LIMIT_MM * 0.25 * 1.1;
 
 export interface ScreenPoint2 {
   x: number;
@@ -274,6 +287,12 @@ export interface AutoCalibrationSample {
   screen: ScreenPoint2;
   /** Relative confidence; late/retried contacts carry less weight. */
   weight?: number;
+  /**
+   * Where `robot.z` came from. Fast exploration predicts the press height for
+   * most grid points; those samples still measure XY, but their height cannot
+   * define the screen plane or the local surface.
+   */
+  zSource?: 'measured' | 'predicted';
 }
 
 export interface AutoCalibrationGeometry {
@@ -289,6 +308,10 @@ export interface AutoCalibrationGeometry {
   /** Largest absolute local height correction stored on the candidate. */
   surfaceMaxMm: number;
   axisSkewRatio: number;
+  /** Samples whose measured height defined the plane. */
+  planeSampleCount: number;
+  /** Samples whose height was predicted and kept out of the plane fit. */
+  predictedSampleCount: number;
 }
 
 /**
@@ -322,6 +345,10 @@ function surfaceCompensation(
     ...localSamples.map((sample) => Math.abs(sample.depthMm)),
   );
   assertSurfaceDeviationMm(maxAbsMm);
+  // A sampled surface is an interpolation of at least five measured heights.
+  // Fast mode usually has one to three, so it keeps the plane and no surface
+  // instead of inventing local corrections from predicted heights.
+  if (localSamples.length < 5) return { maxAbsMm };
   if (maxAbsMm < MIN_SURFACE_COMPENSATION_MM) return { maxAbsMm };
   return {
     surface: {
@@ -354,6 +381,58 @@ export function maxSurfaceResidualMm(
   return Math.max(...residuals);
 }
 
+/**
+ * Score the full grid against a plane that only measured heights defined.
+ *
+ * RMSE stays on the measured subset (the honest residual). The inlier count,
+ * total and spans cover the whole grid, so a predicted height that disagrees
+ * with the measured plane shows up as an inconsistency instead of silently
+ * bending the plane towards the assumption.
+ */
+function measuredPlaneQuality(
+  samples: readonly AutoCalibrationSample[],
+  measured: readonly AutoCalibrationSample[],
+  plane: CalibrationProfile['plane'],
+): PlaneQuality {
+  const residuals = samples.map((sample) =>
+    Math.abs(dot(plane.normal, sample.robot) - plane.offset),
+  );
+  const inliers = samples.filter(
+    (_sample, index) => residuals[index] <= PLANE_INLIER_MM,
+  );
+  const rmseMm = Math.sqrt(
+    measured.reduce((sum, sample) => {
+      const residual = dot(plane.normal, sample.robot) - plane.offset;
+      return sum + residual * residual;
+    }, 0) / Math.max(1, measured.length),
+  );
+  const tangent = unit(
+    cross(
+      plane.normal,
+      Math.abs(plane.normal.x) < 0.9
+        ? { x: 1, y: 0, z: 0 }
+        : { x: 0, y: 1, z: 0 },
+    ),
+  );
+  const other = unit(cross(plane.normal, tangent));
+  const support = (inliers.length ? inliers : samples).map((sample) => ({
+    u: dot(sample.robot, tangent),
+    v: dot(sample.robot, other),
+  }));
+  const span = (values: number[]) => Math.max(...values) - Math.min(...values);
+  const [minorSpanMm, majorSpanMm] = [
+    span(support.map((point) => point.u)),
+    span(support.map((point) => point.v)),
+  ].sort((left, right) => left - right);
+  return {
+    rmseMm,
+    inliers: inliers.length,
+    total: samples.length,
+    minorSpanMm,
+    majorSpanMm,
+  };
+}
+
 export function autoCalibrationGeometry(input: {
   startPose: CartesianPose;
   samples: AutoCalibrationSample[];
@@ -378,12 +457,53 @@ export function autoCalibrationGeometry(input: {
   );
   const samples = deduped.length >= 5 ? deduped : input.samples;
   const sampleWeights = samples.map((sample) => sample.weight ?? 1);
-  const { plane, quality } = fitContactPlane(
-    samples.map((sample) => sample.robot),
-    rotate(input.startPose.orientation, input.tool.contactDirection),
-    {},
-    sampleWeights,
+  const preferred = rotate(
+    input.startPose.orientation,
+    input.tool.contactDirection,
   );
+  const measured = samples.filter((sample) => sample.zSource !== 'predicted');
+  // Fast exploration predicts most heights; only measured brackets may define
+  // the plane. With fewer than three of them the mode's own assumption is the
+  // plane: horizontal along the approach direction, anchored on what was
+  // measured. Predicted heights are still scored, but never fitted.
+  const measuredPlane =
+    measured.length >= 3 && measured.length < samples.length;
+  const assumedPlane =
+    measured.length > 0 &&
+    measured.length < 3 &&
+    measured.length < samples.length;
+  const planeSamples = measuredPlane
+    ? measured
+    : assumedPlane
+      ? measured
+      : samples;
+  let plane: CalibrationProfile['plane'];
+  let quality: PlaneQuality;
+  if (measuredPlane) {
+    plane = fitSamplePlane(
+      planeSamples.map((sample) => sample.robot),
+      preferred,
+    );
+    quality = measuredPlaneQuality(samples, measured, plane);
+  } else if (assumedPlane) {
+    const normal = unit(preferred);
+    const center = planeSamples.reduce(
+      (sum, sample) => add(sum, sample.robot),
+      { x: 0, y: 0, z: 0 },
+    );
+    plane = {
+      normal,
+      offset: dot(normal, scale(center, 1 / planeSamples.length)),
+    };
+    quality = measuredPlaneQuality(samples, measured, plane);
+  } else {
+    ({ plane, quality } = fitContactPlane(
+      samples.map((sample) => sample.robot),
+      preferred,
+      {},
+      sampleWeights,
+    ));
+  }
   const robotXY = samples.map((sample) => ({
     x: sample.robot.x,
     y: sample.robot.y,
@@ -473,9 +593,12 @@ export function autoCalibrationGeometry(input: {
       0,
     ) / samples.length,
   );
+  // A predicted height must never be read as a local surface measurement.
+  const surfaceSamples = measuredPlane || assumedPlane ? measured : samples;
+  const surfaceWeights = surfaceSamples.map((sample) => sample.weight ?? 1);
   const { surface, maxAbsMm: surfaceMaxMm } = surfaceCompensation(
-    samples,
-    sampleWeights,
+    surfaceSamples,
+    surfaceWeights,
     geometry,
     input.screen,
     measuredSize,
@@ -512,5 +635,7 @@ export function autoCalibrationGeometry(input: {
     gridRmsMm,
     surfaceMaxMm,
     axisSkewRatio,
+    planeSampleCount: planeSamples.length,
+    predictedSampleCount: samples.length - measured.length,
   };
 }

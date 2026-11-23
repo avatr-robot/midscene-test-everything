@@ -63,6 +63,8 @@ const MAX_CAPTURE_ITERATIONS = 3;
 const MAX_CALIBRATION_EXPOSURE_ITERATIONS = 6;
 const MAX_STEP_UNITS = 3;
 const CONTROL_SETTLE_MS = 120;
+const MARKER_FOCUS_SETTLE_MS = 600;
+const MARKER_EXPOSURE_ATTEMPTS = 3;
 const WHITE_BALANCE_SETTLE_MS = 350;
 const WHITE_BALANCE_SAMPLE_COUNT = 3;
 const WHITE_BALANCE_MAX_SCORE = 0.08;
@@ -225,6 +227,7 @@ export class CameraImagingController {
   private extremeCount = 0;
   private darkModeUntil = 0;
   private closed = false;
+  private imagingOperation = Promise.resolve();
 
   constructor(
     readonly camera: CameraDevice,
@@ -381,7 +384,121 @@ export class CameraImagingController {
     return undefined;
   }
 
-  async releaseForCorrection(): Promise<void> {
+  private runImagingOperation<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.imagingOperation.then(work);
+    this.imagingOperation = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  /** Tune the painted marker scene before a screen ROI exists. */
+  withMarkerImaging<T>(capture: () => Promise<T>): Promise<T> {
+    return this.runImagingOperation(async () => {
+      if (this.closed || this.captureInProgress || this.adjusting)
+        return capture();
+      this.captureInProgress = true;
+      let restore: (() => Promise<void>) | undefined;
+      try {
+        try {
+          const controls = await this.getControls();
+          if (controls) {
+            const { focus, exposure } = await controls.read();
+            const original: Partial<
+              Record<CameraControlProperty, StoredCameraControl>
+            > = {};
+            restore = async () => {
+              if (await this.restoreControls(controls, original)) return;
+              this.applied = false;
+              this.stopMonitor();
+              this.statusValue = {
+                state: 'error',
+                message:
+                  'Could not restore camera controls after marker capture',
+                updatedAt: Date.now(),
+              };
+            };
+            let focusStarted = 0;
+            if (focus?.supportsAuto && focus.mode === 'manual') {
+              original.focus = focus;
+              await controls.set('focus', focus.value, 'auto');
+              focusStarted = Date.now();
+            }
+            if (exposure?.supportsManual)
+              await this.adjustMarkerExposure(controls, exposure, () => {
+                original.exposure = exposure;
+              });
+            if (focusStarted)
+              await delay(
+                Math.max(
+                  0,
+                  MARKER_FOCUS_SETTLE_MS - (Date.now() - focusStarted),
+                ),
+              );
+          }
+        } catch {
+          // Unsupported or interrupted controls must still allow a marker scan.
+          await restore?.();
+          restore = undefined;
+        }
+        return await capture();
+      } finally {
+        await restore?.();
+        this.captureInProgress = false;
+      }
+    });
+  }
+
+  private async adjustMarkerExposure(
+    controls: CameraHardwareControl,
+    exposure: CameraControlValue,
+    beforeChange: () => void,
+  ) {
+    const window = resolveFrameSafeExposureWindow(
+      exposure,
+      this.stream.getInfo().fps,
+    );
+    if (!window) return;
+    let value = exposure.value;
+    let previousDirection = 0;
+    let best = { value, score: Number.POSITIVE_INFINITY };
+    for (let attempt = 0; attempt <= MARKER_EXPOSURE_ATTEMPTS; attempt++) {
+      const { full } = await measureExposure(await this.freshFrame(750), []);
+      // The white marker pages typically occupy the bright end of the frame.
+      // Use a percentile so a small specular reflection does not drive exposure.
+      const score = Math.abs(full.p95 - 205) + Math.max(0, full.p95 - 235);
+      if (score < best.score) best = { value, score };
+      const direction = full.p95 > 235 ? -1 : full.p95 < 155 ? 1 : 0;
+      if (
+        !direction ||
+        (previousDirection && direction !== previousDirection) ||
+        attempt === MARKER_EXPOSURE_ATTEMPTS
+      )
+        break;
+      const next = clamp(
+        value + direction * Math.max(1, Math.abs(exposure.step)),
+        window.min,
+        window.max,
+      );
+      if (next === value) break;
+      beforeChange();
+      await controls.set('exposure', next, 'manual');
+      value = next;
+      previousDirection = direction;
+      await delay(CONTROL_SETTLE_MS);
+    }
+    if (best.value !== value) {
+      await controls.set('exposure', best.value, 'manual');
+      await delay(CONTROL_SETTLE_MS);
+    }
+  }
+
+  releaseForCorrection(): Promise<void> {
+    return this.runImagingOperation(() => this.releaseControls());
+  }
+
+  private async releaseControls(): Promise<void> {
     this.stopMonitor();
     this.applied = false;
     this.extremeDirection = undefined;
@@ -424,9 +541,13 @@ export class CameraImagingController {
     };
   }
 
-  async clearPerspectiveBinding(): Promise<void> {
+  clearPerspectiveBinding(): Promise<void> {
+    return this.runImagingOperation(() => this.clearStoredProfile());
+  }
+
+  private async clearStoredProfile(): Promise<void> {
     try {
-      await this.releaseForCorrection();
+      await this.releaseControls();
     } finally {
       this.stored = undefined;
       await rm(cameraImagingFile(this.directory, this.camera.id), {
@@ -435,20 +556,29 @@ export class CameraImagingController {
     }
   }
 
-  async resumeStored(): Promise<void> {
+  resumeStored(): Promise<void> {
+    return this.runImagingOperation(() => this.restoreStoredProfile());
+  }
+
+  private async restoreStoredProfile(): Promise<void> {
     if (!this.stored) return;
+    const expected = new Map(
+      this.stored.rois.map((roi) => [roi.screenId, roi.fingerprint]),
+    );
+    // Screen sessions reopen one at a time. A screen we have yet to load
+    // provides no evidence that its saved perspective changed.
+    for (const screenId of expected.keys()) {
+      if (!this.registered.has(screenId)) return;
+    }
     const currentRois = this.screens().map((screen) => ({
       screenId: screen.screenId,
       fingerprint: correctionFingerprint(screen),
     }));
-    const expected = new Map(
-      this.stored.rois.map((roi) => [roi.screenId, roi.fingerprint]),
-    );
     if (
       currentRois.length !== expected.size ||
       currentRois.some((roi) => expected.get(roi.screenId) !== roi.fingerprint)
     ) {
-      await this.clearPerspectiveBinding();
+      await this.clearStoredProfile();
       return;
     }
     try {
@@ -499,7 +629,11 @@ export class CameraImagingController {
     }
   }
 
-  async calibrate(): Promise<CameraImagingStatus> {
+  calibrate(): Promise<CameraImagingStatus> {
+    return this.runImagingOperation(() => this.calibrateScreenRegions());
+  }
+
+  private async calibrateScreenRegions(): Promise<CameraImagingStatus> {
     const screens = this.screens();
     if (!screens.length)
       throw new RobotArmError(
@@ -706,6 +840,7 @@ export class CameraImagingController {
     controls: CameraHardwareControl,
     values: Partial<Record<CameraControlProperty, StoredCameraControl>>,
   ) {
+    let restored = true;
     for (const [property, value] of Object.entries(values)) {
       if (!value) continue;
       try {
@@ -716,8 +851,10 @@ export class CameraImagingController {
         );
       } catch {
         // Restore as many controls as the device still allows.
+        restored = false;
       }
     }
+    return restored;
   }
 
   private async optimizeExposureAndGain(screens: readonly ImagingScreen[]) {
@@ -988,6 +1125,84 @@ export class CameraImagingController {
     await this.ensureExposureForCapture();
   }
 
+  /** Shorten a locked exposure for a single image sequence and restore it. */
+  async withReducedVisibilityExposure<T>(
+    capture: (exposure: { previous: number; reduced: number }) => Promise<T>,
+  ): Promise<T | undefined> {
+    const controls = this.controls;
+    if (
+      !controls ||
+      !this.applied ||
+      this.closed ||
+      this.adjusting ||
+      this.captureInProgress
+    )
+      return undefined;
+    this.captureInProgress = true;
+    try {
+      const original = (await controls.read().catch(() => undefined))?.exposure;
+      if (!original?.supportsManual || original.mode !== 'manual')
+        return undefined;
+      const window = resolveFrameSafeExposureWindow(
+        original,
+        this.stream.getInfo().fps,
+      );
+      if (!window) return undefined;
+      const reduced = Math.max(
+        window.min,
+        original.value - Math.max(1, Math.abs(original.step || 1)),
+      );
+      if (reduced >= original.value) return undefined;
+
+      let applied: CameraControlValue | undefined;
+      try {
+        await controls.set('exposure', reduced, 'manual');
+        applied = (await controls.read()).exposure;
+      } catch {
+        // Even a failed set or readback may have changed the hardware setting.
+      }
+      let outcome: { value?: T } | { error: unknown } = {};
+      if (
+        applied?.mode === 'manual' &&
+        Number.isFinite(applied.value) &&
+        applied.value < original.value
+      ) {
+        try {
+          outcome = {
+            value: await capture({
+              previous: original.value,
+              reduced: applied.value,
+            }),
+          };
+        } catch (error) {
+          outcome = { error };
+        }
+      }
+      try {
+        await controls.set('exposure', original.value, 'manual');
+        const restored = (await controls.read()).exposure;
+        if (restored?.mode !== 'manual' || restored.value !== original.value)
+          throw new Error(
+            'Exposure readback does not match the original setting',
+          );
+      } catch (error) {
+        this.applied = false;
+        this.stopMonitor();
+        const message =
+          'Camera exposure could not be restored after the visibility recheck.';
+        this.statusValue = { state: 'error', message, updatedAt: Date.now() };
+        throw new RobotArmError('VISION_UNAVAILABLE', message, 409, {
+          exposure: original.value,
+          cause: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if ('error' in outcome) throw outcome.error;
+      return outcome.value;
+    } finally {
+      this.captureInProgress = false;
+    }
+  }
+
   private async searchFocus(
     focus: CameraControlValue,
     screens: readonly ImagingScreen[],
@@ -1156,7 +1371,8 @@ export class CameraImagingController {
     background: boolean,
   ): Promise<boolean> {
     const controls = this.controls;
-    if (!controls || this.adjusting) return false;
+    if (!controls || this.adjusting || (background && this.captureInProgress))
+      return false;
     this.adjusting = true;
     try {
       const values = await controls.read();
@@ -1203,14 +1419,14 @@ export class CameraImagingController {
     }
   }
 
-  private async freshFrame() {
+  private async freshFrame(timeoutMs = 3_000) {
     const info = this.stream.getInfo();
     if (info.state !== 'running' && info.state !== 'starting')
       throw new RobotArmError(
         'VISION_UNAVAILABLE',
         info.error ?? 'Camera is not running',
       );
-    return (await this.stream.getFrame({ fresh: true, timeoutMs: 3_000 })).jpeg;
+    return (await this.stream.getFrame({ fresh: true, timeoutMs })).jpeg;
   }
 
   private async persist(stored: StoredCameraImaging) {

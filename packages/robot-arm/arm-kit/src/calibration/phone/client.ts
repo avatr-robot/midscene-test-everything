@@ -11,7 +11,7 @@ import type {
 export function mountCalibrationPhonePage(
   policy: Pick<
     typeof CALIBRATION_POINT_POLICY,
-    'touchSpreadPx' | 'targetRadiusPx'
+    'touchSpreadPx' | 'targetRadiusPx' | 'streamStepFeedbackIntervalMs'
   > &
     typeof CALIBRATION_PHONE_POLICY & { verificationRadiusPx: number },
   pageId: string,
@@ -38,7 +38,10 @@ export function mountCalibrationPhonePage(
     position:
       'Record a calibration reference position above the screen on your computer.',
     slide: 'Sliding to the next sample. Do not touch the phone.',
-    recover: 'Touch lost at this point. Recovering within the bounded range.',
+    recover:
+      'Touch lost. The robot will lift and retry from inside the screen.',
+    heightSweep:
+      'Measuring contact height with short sweeps. Do not touch the phone.',
     release: 'Lifting to confirm touch release.',
     search: 'Finding screen contact in bounded steps.',
     refine: 'Refining the contact height.',
@@ -570,11 +573,18 @@ export function mountCalibrationPhonePage(
           ? `max(calc(100% / ${rows}), calc(2 * env(safe-area-inset-top, 0px))) repeat(${rows - 1},1fr)`
           : `repeat(${rows},1fr)`;
       if (probe) {
+        const offset = probe.pattern === 'offset-contrast';
+        const { colors, contrastColors } = policy.visibilityPattern;
         visibilityTiles.forEach((tile, index) => {
           const column = index % policy.visibilityPattern.columns;
           const row = Math.floor(index / policy.visibilityPattern.columns);
-          tile.style.background =
-            policy.visibilityPattern.colors[(column + row + probe.phase) % 2];
+          const parity = (column + row + probe.phase) % 2;
+          const base = contrastColors[parity];
+          const alternate = contrastColors[1 - parity];
+          // Adjacent tiles meet in the same color, moving the boundaries by half a tile.
+          tile.style.background = offset
+            ? `conic-gradient(from 90deg, ${base} 0deg 90deg, ${alternate} 90deg 180deg, ${base} 180deg 270deg, ${alternate} 270deg 360deg)`
+            : colors[parity];
         });
       }
     }
@@ -712,16 +722,26 @@ export function mountCalibrationPhonePage(
           ? 'recorded'
           : capture?.heightSearch?.precision
             ? 'refine'
-            : capture?.operation
-              ? capture.operation
-              : capture?.waitingReason
-                ? capture.waitingReason
-                : capture?.phase === 'holding'
-                  ? 'hold'
-                  : stages[next.view],
+            : capture && next.automaticPhase === 'height'
+              ? 'heightSweep'
+              : capture?.operation
+                ? capture.operation
+                : capture?.waitingReason
+                  ? capture.waitingReason
+                  : capture?.phase === 'holding'
+                    ? 'hold'
+                    : stages[next.view],
       );
+    const samplingStage =
+      next.automaticPhase === 'height'
+        ? 'Height sweep'
+        : next.automaticPhase === 'local'
+          ? 'Reference and direction'
+          : capture?.mode === 'slide'
+            ? 'Slide sample'
+            : 'Grid point';
     connection.textContent = capture
-      ? `${capture.mode === 'slide' ? 'Fast' : capture.mode === 'fast' ? 'Fast probing' : 'Regular'} · ${next.automaticPhase === 'local' ? 'Direction probe' : 'Grid point'} ${capture.index} / ${capture.total}`
+      ? `${samplingStage} ${capture.index} / ${capture.total}`
       : '';
     errorDetail.textContent = '';
     if (next.view === 'capture-failed' || next.view === 'interrupted') {
@@ -758,11 +778,29 @@ export function mountCalibrationPhonePage(
       requestedStep?.phase === 'prepare' ||
       requestedStep?.contactMode === 'current' ||
       (requestedStep && phoneStep?.id === requestedStep.id);
+    const probe = capture?.probe?.id;
+    // The prepare reply already confirmed this target was painted. A Fast
+    // result for the same sample only reads the current pointer state.
+    if (
+      next.view === 'collect' &&
+      (capture?.mode === 'fast' || capture?.mode === 'slide') &&
+      requestedStep?.phase === 'result' &&
+      requestedStep.contactMode === 'current' &&
+      phoneStep?.id === requestedStep.id &&
+      phoneStep.phase === 'prepare' &&
+      readyTarget === visibleTarget.id &&
+      captureAck === probe &&
+      previous?.capture?.probe?.id === probe
+    ) {
+      phoneStep = { ...requestedStep };
+      releasedBeforeAck = false;
+      send();
+      return;
+    }
     if (stepChanged || !requestedStep) {
       phoneStep = undefined;
       releasedBeforeAck = false;
     }
-    const probe = capture?.probe?.id;
     if (
       stepChanged ||
       readyTarget !== visibleTarget.id ||
@@ -1046,6 +1084,7 @@ export function mountCalibrationPhonePage(
       claimBrowserInstance,
       touchEvents,
       touchDiagnosticsVersion: 2,
+      streamStepFeedback: true,
       wakeState: wakeState(),
       sequence: ++sequence,
       model,
@@ -1179,6 +1218,7 @@ export function mountCalibrationPhonePage(
     socket = transport;
     let endedTransport = false;
     let heartbeat: ReturnType<typeof setInterval>;
+    let stream: ReturnType<typeof setInterval> | undefined;
     let lastReply = performance.now();
     const stalled = () => {
       if (endedTransport) return;
@@ -1206,6 +1246,14 @@ export function mountCalibrationPhonePage(
         )
           send();
       }, policy.heartbeatMs);
+      // While a host step is active, report it at a steady cadence. The host can
+      // then confirm the stationary result from two streamed frames instead of
+      // asking for a fresh result twice; absent a step this is a no-op.
+      stream = setInterval(() => {
+        if (transport.readyState !== WebSocket.OPEN) return;
+        if (!state?.capture?.step || document.hidden) return;
+        send();
+      }, policy.streamStepFeedbackIntervalMs);
     };
     transport.onmessage = (event) => {
       if (endedTransport) return;
@@ -1227,6 +1275,7 @@ export function mountCalibrationPhonePage(
       endedTransport = true;
       clearTimeout(opening);
       clearInterval(heartbeat);
+      if (stream) clearInterval(stream);
       touches = [];
       touchEvents.length = 0;
       contact = undefined;

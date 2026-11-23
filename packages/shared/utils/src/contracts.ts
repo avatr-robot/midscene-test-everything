@@ -594,6 +594,8 @@ export interface CalibrationVerification {
   confirmedAt: string;
 }
 export interface AutoCalibrationEvidence {
+  /** Which exploration mode produced this candidate. */
+  samplingMode?: 'standard' | 'fast';
   planeSource?: string;
   tiltDeg?: number;
   heightRangeMm?: number;
@@ -613,6 +615,16 @@ export interface AutoCalibrationEvidence {
   validationMaxMm: number;
   /** Held-out Z residual after applying local surface compensation. */
   validationHeightMaxMm?: number;
+  /** Contact samples whose measured height defined the plane. */
+  measuredPlaneSamples?: number;
+  /** Contact samples whose height came from the height model, not a bracket. */
+  predictedSamples?: number;
+  /** Share of fit samples with a predicted height, in [0, 1]. */
+  predictedFraction?: number;
+  /** Largest predicted height error against the measured plane, after compensation. */
+  predictedHeightResidualMaxMm?: number;
+  /** Spread of the heights that were measured, which is the direct tilt hint. */
+  measuredHeightRangeMm?: number;
   /** Absolute cosine of the angle between the independently measured screen axes. */
   axisSkewRatio?: number;
   coverage: number;
@@ -621,6 +633,7 @@ export interface AutoCalibrationEvidence {
     screen: { x: number; y: number };
     planeMm: { x: number; y: number };
     zMm: number;
+    zSource?: 'measured' | 'predicted';
   }[];
 }
 export interface PlaneQuality {
@@ -987,14 +1000,42 @@ export interface RobotActionAuditStatus {
   maxBytes: number;
 }
 /** Active verification of an already fitted phone coordinate frame. */
+export type ScreenVisibilityProbePattern = 'checkerboard' | 'offset-contrast';
+
 export interface ScreenVisibilityEvidence {
   clear: boolean;
   checkedAt: string;
+  pattern?: ScreenVisibilityProbePattern;
   screens: Array<{
     id: string;
     visibleFraction: number;
     interiorVisibleFraction?: number;
     minimumTileFraction: number;
+    /** Largest connected group of samples that did not follow the colour change. */
+    largestUnresponsiveRegion?: number;
+    clear?: boolean;
+    assessment?: 'visible' | 'suspected-occlusion' | 'insufficient-evidence';
+    reason?: 'glare' | 'weak-pattern' | 'connected-gap';
+    patternReliable?: boolean;
+    verifiedBy?: { attempts: number[]; recoveredGlareSamples?: number };
+    glareSamples?: number;
+    largestRegionWithoutGlare?: number;
+    largestRegionWithGlare?: number;
+    /** Row-major sample masks, packed least-significant bit first and base64 encoded. */
+    sampleMasks?: {
+      columns: number;
+      rows: number;
+      viewport: { x: number; y: number; width: number; height: number };
+      firstRowFraction: number;
+      unresponsive: string;
+      glare: string;
+      responsive: string;
+    };
+  }>;
+  attempts?: Array<{
+    pattern: ScreenVisibilityProbePattern;
+    exposure?: { previous: number; reduced: number };
+    screens: ScreenVisibilityEvidence['screens'];
   }>;
 }
 
@@ -1019,6 +1060,8 @@ export interface CalibrationSession extends ProfileBinding {
       obstacles: Array<Array<Pick<Vector3, 'x' | 'y'>>>;
       estimatedObstacles?: Array<Array<Pick<Vector3, 'x' | 'y'>>>;
       complete: boolean;
+      /** Additional tip clearance for moving through the confirmed corridor. */
+      corridorTravelTipZMm?: number;
       corridor?: NonNullable<
         import('./assisted-contracts.js').CalibrationBatchPlan['transfer']
       >['corridor'];

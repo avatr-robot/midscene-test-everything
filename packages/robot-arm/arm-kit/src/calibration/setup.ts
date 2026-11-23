@@ -293,7 +293,9 @@ export class CalibrationSetup {
   async map(
     output?: AssistedMappingInput,
     beforeCapture?: () => Promise<void>,
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     this.inputSnapshot();
     if (output) {
       if (
@@ -340,6 +342,7 @@ export class CalibrationSetup {
       )
     ) {
       if (!this.mapping) await this.vision.assertPerspectiveCurrent?.();
+      signal?.throwIfAborted();
       this.phone!.assertAvailable();
       if (
         !sameLayout(layout, this.phone!.update!.layout) ||
@@ -359,6 +362,7 @@ export class CalibrationSetup {
     await beforeCapture?.();
     const display = this.phone.assertAvailable();
     const checkPage = () => {
+      signal?.throwIfAborted();
       const page = this.phone.assertAvailable();
       if (
         page.pageId !== pageId ||
@@ -373,35 +377,59 @@ export class CalibrationSetup {
           409,
         );
     };
-    checkPage();
-    let shot = await this.vision.snapshot(this.visionOptions());
-    const initialBinding = shot.binding!;
-    let body: Awaited<ReturnType<CalibrationVision['detectMarkers']>>;
-    for (let attempt = 1; ; attempt++) {
+    const captureMarkers = async () => {
       checkPage();
-      try {
-        body = await this.vision.detectMarkers(
-          Buffer.from(shot.base64, 'base64'),
-          layout.markers,
-        );
-        break;
-      } catch (error) {
+      let shot = await this.vision.snapshot(this.visionOptions());
+      const initialBinding = shot.binding!;
+      for (let attempt = 1; ; attempt++) {
         checkPage();
-        if (
-          attempt >= MARKER_CAPTURE_ATTEMPTS ||
-          !(error instanceof RobotVisionError) ||
-          !['NO_SCREEN_DETECTED', 'CALIBRATION_MISMATCH'].includes(error.code)
-        )
-          throw error;
-        shot = await this.vision.snapshot(this.visionOptions());
-        if (!sameVisionMapping(initialBinding, shot.binding!))
-          throw new RobotArmError(
-            'VISION_BINDING_CHANGED',
-            'Camera correction changed during marker detection',
-            409,
-          );
+        try {
+          const body = await this.vision
+            .detectMarkers(Buffer.from(shot.base64, 'base64'), layout.markers)
+            .catch(async (error) => {
+              if (
+                !(error instanceof RobotVisionError) ||
+                error.code !== 'NO_SCREEN_DETECTED' ||
+                !this.vision.detectMarkersInSource
+              )
+                throw error;
+              checkPage();
+              try {
+                return await this.vision.detectMarkersInSource(
+                  shot.binding,
+                  layout,
+                );
+              } catch (sourceError) {
+                if (
+                  sourceError instanceof RobotVisionError &&
+                  sourceError.code === 'NO_SCREEN_DETECTED'
+                )
+                  throw error;
+                throw sourceError;
+              }
+            });
+          return { shot, body };
+        } catch (error) {
+          checkPage();
+          if (
+            attempt >= MARKER_CAPTURE_ATTEMPTS ||
+            !(error instanceof RobotVisionError) ||
+            !['NO_SCREEN_DETECTED', 'CALIBRATION_MISMATCH'].includes(error.code)
+          )
+            throw error;
+          shot = await this.vision.snapshot(this.visionOptions());
+          if (!sameVisionMapping(initialBinding, shot.binding!))
+            throw new RobotArmError(
+              'VISION_BINDING_CHANGED',
+              'Camera correction changed during marker detection',
+              409,
+            );
+        }
       }
-    }
+    };
+    const { shot, body } = await (this.vision.withMarkerImaging?.(
+      captureMarkers,
+    ) ?? captureMarkers());
     checkPage();
     const accuracy = checkedMappingAccuracy(body);
     const latest = await this.vision.binding(this.visionOptions());

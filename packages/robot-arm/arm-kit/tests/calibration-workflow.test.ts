@@ -282,6 +282,13 @@ describe('phone-assisted calibration coordinator', () => {
         expect(
           runs[1].targets.some((t) => t.name === 'Boundary segment 1 lift'),
         ).toBe(true);
+        const contactTargets = runs[1].targets.filter(
+          ({ name }) =>
+            name.endsWith(' contact') || name.startsWith('Boundary edge '),
+        );
+        expect(contactTargets).toHaveLength(12);
+        for (const { positionMm } of contactTargets)
+          expect(positionMm.z).toBeCloseTo(30 - f.screen.pressDepthMm);
         await expect(
           f.service.command(before.id, 'accept', true),
         ).rejects.toThrow('Complete boundary verification');
@@ -371,6 +378,22 @@ describe('phone-assisted calibration coordinator', () => {
       expect(f.beforeTask.operation?.status).not.toBe('running');
       expect(f.service.status()?.stage).toBe('ready');
       expect(f.adapter.movements).toHaveLength(0);
+    } finally {
+      await f.dispose();
+    }
+  });
+  it('requires a new camera mapping after the phone layout changes', async () => {
+    const f = await setup();
+    try {
+      f.resize();
+      await f.send();
+      expect(f.service.setup()).toMatchObject({
+        phoneConnected: true,
+        mapping: undefined,
+      });
+      await expect(f.service.create()).rejects.toMatchObject({
+        code: 'MAPPING_REQUIRED',
+      });
     } finally {
       await f.dispose();
     }
@@ -924,8 +947,53 @@ describe('phone-assisted calibration coordinator', () => {
       f.releaseImaging.mockClear();
       f.calibrateImaging.mockClear();
 
-      await service.mapSetup();
+      const restored = await service.mapSetup(undefined, {
+        reuseAppliedPerspective: true,
+      });
 
+      expect(restored.mapping).toBeDefined();
+      expect(f.detectMarkers).toHaveBeenCalledTimes(1);
+      expect(f.releaseImaging).not.toHaveBeenCalled();
+      expect(f.calibrateImaging).not.toHaveBeenCalled();
+    } finally {
+      await f.dispose();
+    }
+  });
+  it('maps a newly connected page against the existing perspective without releasing imaging', async () => {
+    const f = await setup();
+    try {
+      const service = f.forScreen('second-screen');
+      await service.prepare({
+        ...f.beforeTask.setup.selection!,
+        motion: f.screen,
+      });
+      const page = {
+        pageId: service.openPhonePage(),
+        sequence: 1,
+        platform: 'android',
+        displayMode: 'fullscreen',
+        visible: true,
+        layout,
+      } as const;
+      service.receivePhone(page);
+      f.releaseImaging.mockClear();
+      f.calibrateImaging.mockClear();
+
+      const mapping = service.mapSetup(undefined, {
+        reuseAppliedPerspective: true,
+      });
+      await rstest.waitFor(() =>
+        expect(service.phoneView().markerRequest).toBeDefined(),
+      );
+      service.receivePhone({
+        ...page,
+        sequence: 2,
+        view: 'markers',
+        markersPainted: true,
+        markerRequest: service.phoneView().markerRequest,
+      });
+
+      expect((await mapping).mapping).toBeDefined();
       expect(f.releaseImaging).not.toHaveBeenCalled();
       expect(f.calibrateImaging).not.toHaveBeenCalled();
     } finally {
@@ -1566,12 +1634,12 @@ it('records measured installation reference and camera boundary, requires corrid
 });
 
 it.each([
-  { mode: 'standard', offsetMm: 1.01, accepted: true },
-  { mode: 'standard', offsetMm: 3, accepted: false },
-  { mode: 'slide', offsetMm: 2.01, accepted: true },
+  { mode: 'standard', offsetMm: 1.01, warns: false },
+  { mode: 'standard', offsetMm: 3, warns: true },
+  { mode: 'slide', offsetMm: 2.01, warns: false },
 ])(
   'parks after verified boundaries and checks a $offsetMm mm holdout for $mode batch acceptance',
-  async ({ mode, offsetMm, accepted }) => {
+  async ({ mode, offsetMm, warns }) => {
     const f = await setup();
     const timer = setInterval(() => void f.send(), 50);
     try {
@@ -1637,12 +1705,17 @@ it.each([
       f.adapter.setPoseForTesting(pose(140, 50, 80));
       await f.service.command(f.state.id, 'record-boundary', true);
       await f.service.command(f.state.id, 'save-teaching', true);
-      f.adapter.setPoseForTesting(pose(100, 50.000008, 75));
+      f.adapter.setPoseForTesting(
+        mode === 'slide' ? pose(100, 40, 95) : pose(100, 50.000008, 75),
+      );
       const move = rstest.spyOn(f.adapter, 'moveLinear');
+      let approachMoveCount: number | undefined;
       const phases = new Set<string>();
       const unsubscribe = f.service.subscribe(() => {
         const current = f.service.status()!;
         if (current.referenceTravel) phases.add(current.referenceTravel);
+        else if (phases.has('approach'))
+          approachMoveCount ??= move.mock.calls.length;
         if (current.stage === 'safety' && current.calibration?.progress)
           phases.add(current.calibration.progress.group);
         if (current.stage === 'avoiding-camera') phases.add(current.stage);
@@ -1652,7 +1725,7 @@ it.each([
         mode === 'slide' ? 'start-slide' : 'start-automatic',
         true,
       );
-      if (!accepted) {
+      if (warns) {
         await rstest.waitFor(() =>
           expect(f.service.status()?.stage).toBe('boundary-review'),
         );
@@ -1682,11 +1755,14 @@ it.each([
         'contact',
         'avoiding-camera',
       ]);
-      expect(move.mock.calls.slice(0, 2).map(([p]) => p)).toEqual([
-        pose(100, 50, 80),
-        pose(100, -50, 80),
-      ]);
-      for (const [, options] of move.mock.calls.slice(0, 2)) {
+      expect(approachMoveCount).toBe(mode === 'slide' ? 1 : 2);
+      const approachMoves = move.mock.calls.slice(0, approachMoveCount);
+      expect(approachMoves.map(([p]) => p)).toEqual(
+        mode === 'slide'
+          ? [pose(100, -50, 80)]
+          : [pose(100, 50, 80), pose(100, -50, 80)],
+      );
+      for (const [, options] of approachMoves) {
         expect(options).toMatchObject({
           speed: f.screen.actionSpeed,
           acceleration: f.screen.actionAcceleration,
@@ -1707,23 +1783,14 @@ it.each([
         mode === 'slide' ? 'Boundary edge 4' : 'Return observation',
       );
       const automatic = await f.service.acceptAutomatically();
-      expect(automatic.accepted).toBe(accepted);
-      if (!automatic.accepted) {
-        expect(automatic.reasons).toContain(
-          'Holdout maximum 3.00% (target ≤2%)',
-        );
-        expect(f.service.status()?.stage).toBe('review');
-        await f.service.command(state.id, 'accept', true);
-      }
+      expect(automatic.accepted).toBe(true);
       const saved = f.service.status()!;
       expect(saved.stage).toBe('completed');
       expect(saved.result?.verification?.protocol).toBe('auto-boundary-v1');
       expect(saved.result?.verification?.auto?.validationMaxMm).toBeCloseTo(
         offsetMm,
       );
-      expect(saved.result?.verification?.auto?.humanAccepted).toBe(
-        !automatic.accepted,
-      );
+      expect(saved.result?.verification?.auto?.automaticAccepted).toBe(true);
     } finally {
       clearInterval(timer);
       await f.dispose();

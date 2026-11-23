@@ -22,6 +22,7 @@ import {
   type CalibrationProfile,
   type CartesianPose,
   RobotArmError,
+  type ScreenVisibilityProbePattern,
   isRobotArmError,
   semanticJson,
 } from '../contracts.js';
@@ -31,7 +32,6 @@ import { verifyScreenVisibility } from './camera/visibility.js';
 import type { CalibrationVision } from './camera/vision.js';
 import { AutomaticCapture } from './exploration/capture.js';
 import { fitExploration } from './exploration/fit.js';
-import { explorationQualityWarnings } from './exploration/quality.js';
 import { invertMapping, pointDistance, project } from './phone/geometry.js';
 import { CalibrationPhoneSession, sameLayout } from './phone/session.js';
 import { knownScreenTravelHeight, pageOrderedQuad } from './screen-position.js';
@@ -41,6 +41,7 @@ import { moveToTaughtPosition } from './taught-position.js';
 import { assertSafeObservation } from './verification/safe-position.js';
 
 const log = getDebug('robot-arm:web-calibration', { console: true });
+const debug = getDebug('robot-arm:web-calibration');
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 // Only feedback and data-quality failures permit motion after a measured probe.
 const recoverableSamplingErrors = new Set([
@@ -636,7 +637,7 @@ export class CalibrationWorkflow {
   }
   private visibilityProbe?: CalibrationPageReply['visibilityProbe'];
   private visibilityContext?: CalibrationPageUpdate;
-  showVisibilityProbe(phase: 0 | 1) {
+  showVisibilityProbe(phase: 0 | 1, pattern?: ScreenVisibilityProbePattern) {
     if (this.visibilityProbe)
       throw new RobotArmError(
         'BUSY',
@@ -646,7 +647,7 @@ export class CalibrationWorkflow {
     if (this.phone.presence() !== 'connected') this.phone.assertConnected();
     this.visibilityContext = structuredClone(this.phone.update!);
     const id = randomUUID();
-    this.visibilityProbe = { id, phase };
+    this.visibilityProbe = { id, phase, pattern };
     this.options.onPhoneObservation?.(undefined);
     this.changed();
     return id;
@@ -853,6 +854,7 @@ export class CalibrationWorkflow {
         phoneDiagnostics: this.phoneStatus().diagnostics,
         phoneObservations: this.measurements?.phoneObservations,
         coarsePhoneObservations: this.measurements?.coarsePhoneObservations,
+        slideRecoveries: this.measurements?.slideRecoveries,
         capture: snapshot?.capture,
         points: snapshot?.points,
         verificationAttempts: s.verificationAttempts,
@@ -1007,8 +1009,14 @@ export class CalibrationWorkflow {
     this.changed();
   }
   setup(): AssistedCalibrationSetup {
+    const setup = this.configuration.status();
+    const { layout, mapping } = setup;
     return {
-      ...this.configuration.status(),
+      ...setup,
+      mapping:
+        layout && mapping && sameLayout(mapping.layout, layout)
+          ? mapping
+          : undefined,
       markerCapture: this.markerCapture,
       mappingCheck: this.mappingCheck,
       imaging: this.options.vision.imagingStatus?.() ?? this.imagingStatus,
@@ -1025,9 +1033,12 @@ export class CalibrationWorkflow {
     options: {
       reuseVisibleMarkers?: boolean;
       deferImagingCalibration?: boolean;
+      reuseAppliedPerspective?: boolean;
+      signal?: AbortSignal;
     } = {},
   ) {
     return this.configureSetup(async () => {
+      options.signal?.throwIfAborted();
       let request: string | undefined;
       let mapped = false;
       const previousMapping =
@@ -1039,50 +1050,57 @@ export class CalibrationWorkflow {
       this.mappingCheck = 'checking';
       this.changed();
       try {
-        const result = await this.configuration.map(output, async () => {
-          // An unchanged mapping can be confirmed while the touch preview is open.
-          // A fresh optical check needs the phone to paint the codes again.
-          const view = this.phoneView().view;
-          const page = this.phone.update;
-          if (
-            options.reuseVisibleMarkers &&
-            view === 'markers' &&
-            page?.markersPainted
-          )
-            return;
-          let expected = this.markerRequest;
-          if (!expected) {
+        const result = await this.configuration.map(
+          output,
+          async () => {
+            options.signal?.throwIfAborted();
+            // An unchanged mapping can be confirmed while the touch preview is open.
+            // A fresh optical check needs the phone to paint the codes again.
+            const view = this.phoneView().view;
+            const page = this.phone.update;
             if (
-              view !== 'touch-preview' &&
-              !(
-                view === 'markers' &&
-                (page?.markersPainted === false ||
-                  page?.markerRequest !== undefined)
-              )
+              options.reuseVisibleMarkers &&
+              view === 'markers' &&
+              page?.markersPainted
             )
               return;
-            request = this.requestMarkerDisplay();
-            expected = request;
-          }
-          const deadline = Date.now() + 12000;
-          while (!this.markerObservation(expected)) {
-            if (this.markerRequest !== expected || Date.now() >= deadline)
-              throw new RobotArmError(
-                'PAGE_CHANGED',
-                'The phone did not report visible screen markers. Keep the paired page in the foreground.',
-                409,
-              );
-            this.phone.assertAvailable();
-            await delay(80);
-          }
-        });
+            let expected = this.markerRequest;
+            if (!expected) {
+              if (
+                !options.reuseAppliedPerspective &&
+                view !== 'touch-preview' &&
+                !(
+                  view === 'markers' &&
+                  (page?.markersPainted === false ||
+                    page?.markerRequest !== undefined)
+                )
+              )
+                return;
+              request = this.requestMarkerDisplay();
+              expected = request;
+            }
+            const deadline = Date.now() + 12000;
+            while (!this.markerObservation(expected)) {
+              if (this.markerRequest !== expected || Date.now() >= deadline)
+                throw new RobotArmError(
+                  'PAGE_CHANGED',
+                  'The phone did not report visible screen markers. Keep the paired page in the foreground.',
+                  409,
+                );
+              this.phone.assertAvailable();
+              await delay(80, undefined, { signal: options.signal });
+            }
+          },
+          options.signal,
+        );
         mapped = Boolean(result.mapping);
         const mappingChanged =
           mapped &&
           (!previousMapping ||
             previousMapping.vision.fingerprint !==
               result.mapping!.vision.fingerprint);
-        if (mappingChanged) {
+        // A page-only mapping leaves the perspective and its imaging binding intact.
+        if (mappingChanged && !options.reuseAppliedPerspective) {
           await this.releaseImaging();
           if (!options.deferImagingCalibration)
             void this.startImagingCalibration();
@@ -1949,6 +1967,14 @@ export class CalibrationWorkflow {
           409,
         );
       const reference = s.referencePosition!;
+      const knownTravelTipZMm = Math.max(
+        knownScreenTravelHeight(this.runtime.profileStore.list(), input),
+        this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+      );
+      const allowDirectTravel =
+        (s.explorationMode === 'fast' || s.explorationMode === 'slide') &&
+        teaching !== undefined &&
+        semanticJson(reference) === semanticJson(teaching.referencePose);
       const travelToReference = async (reason: 'approach' | 'return') => {
         s.referenceTravel = reason;
         this.changed();
@@ -1959,11 +1985,12 @@ export class CalibrationWorkflow {
             tool,
             reference,
             input.motion!,
-            Math.max(
-              knownScreenTravelHeight(this.runtime.profileStore.list(), input),
-              this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
-            ),
-            { attemptId: s.id, direction: reason },
+            knownTravelTipZMm,
+            {
+              attemptId: s.id,
+              direction: reason,
+              allowDirect: allowDirectTravel,
+            },
           );
         } catch (error) {
           if (!isRobotArmError(error)) throw error;
@@ -1987,6 +2014,14 @@ export class CalibrationWorkflow {
             409,
           );
       };
+      const samplingTiming = new Map<string, { count: number; ms: number }>();
+      const trackTiming = (event: string, elapsedMs: number) => {
+        const previous = samplingTiming.get(event) ?? { count: 0, ms: 0 };
+        samplingTiming.set(event, {
+          count: previous.count + 1,
+          ms: previous.ms + elapsedMs,
+        });
+      };
       try {
         await measurements.run(
           {
@@ -2003,12 +2038,22 @@ export class CalibrationWorkflow {
           {
             tool,
             webToImage: s.mapping!.webToImage,
+            directTravel: allowDirectTravel
+              ? {
+                  teaching,
+                  minimumTipZMm: Math.max(
+                    contactPoint(reference, tool.offsetMm).z,
+                    knownTravelTipZMm,
+                  ),
+                }
+              : undefined,
             minimumTravelTipZMm: Math.max(
               teaching
                 ? contactPoint(teaching.referencePose, tool.offsetMm).z
                 : Number.NEGATIVE_INFINITY,
               this.batchTravelTipZMm ?? Number.NEGATIVE_INFINITY,
             ),
+            onTiming: trackTiming,
             screen: {
               ...input.motion!,
               id: s.id,
@@ -2027,7 +2072,9 @@ export class CalibrationWorkflow {
         await this.assertMechanicalFrame(true);
         checkCollecting();
         this.fitMeasurements();
+        this.logSamplingTiming(s.id, samplingTiming);
       } catch (error) {
+        this.logSamplingTiming(s.id, samplingTiming);
         if (
           !lastMoveConfirmed ||
           !isRobotArmError(error) ||
@@ -2055,7 +2102,10 @@ export class CalibrationWorkflow {
       // reference before waiting for a review of the new geometry.
       if (lastMoveConfirmed && s.explorationQuality?.warnings?.length)
         await travelToReference('return');
-      if (measurements.coarsePhoneObservations.length)
+      if (
+        measurements.coarsePhoneObservations.length ||
+        measurements.slideRecoveries.length
+      )
         void this.runtime.auditStore?.record({
           kind: 'calibration',
           id: s.id,
@@ -2064,6 +2114,7 @@ export class CalibrationWorkflow {
             stage: 'automatic-sampling',
             deviceId: this.options.deviceId,
             coarsePhoneObservations: measurements.coarsePhoneObservations,
+            slideRecoveries: measurements.slideRecoveries,
           }),
         });
     };
@@ -2144,10 +2195,35 @@ export class CalibrationWorkflow {
       if (s.teachingId)
         s.error =
           s.calibration.auto?.cameraVisibility?.clear === false
-            ? 'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.'
+            ? 'The camera could not verify the current screen after automatic parking. Check the live view or record a Safe Position manually.'
             : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }
     this.changed();
+  }
+
+  /**
+   * Sampling stages are a fixed cost; log them per attempt so a speed change can
+   * be read off one normal run instead of a dedicated experiment.
+   */
+  private logSamplingTiming(
+    attemptId: string,
+    timing: ReadonlyMap<string, { count: number; ms: number }>,
+  ) {
+    if (!timing.size) return;
+    // One JSON object per attempt so the log report can parse it without
+    // depending on the logger's object formatting.
+    debug(
+      `Automatic sampling timing ${JSON.stringify({
+        attemptId,
+        deviceId: this.options.deviceId,
+        timing: Object.fromEntries(
+          [...timing].map(([event, entry]) => [
+            event,
+            { count: entry.count, ms: Math.round(entry.ms) },
+          ]),
+        ),
+      })}`,
+    );
   }
 
   private fitMeasurements() {
@@ -2173,6 +2249,8 @@ export class CalibrationWorkflow {
       heightIntervalMm: p.probeStep?.heightIntervalMm,
       screen: project(s.mapping!.webToImage, p.point),
       weight: p.weight,
+      // The local bridge only records stepped contacts; every height is measured.
+      zSource: 'measured' as const,
       pressedZ: p.probeStep
         ? contactPoint(p.probeStep.after, tool.offsetMm).z
         : p.positionMm.z - 0.5,
@@ -2503,7 +2581,7 @@ export class CalibrationWorkflow {
             points: pageOrderedQuad(correction.points, correction.rotation),
             sourceWidth: correction.sourceWidth,
             sourceHeight: correction.sourceHeight,
-            show: (phase) => this.showVisibilityProbe(phase),
+            show: (phase, pattern) => this.showVisibilityProbe(phase, pattern),
             observation: (id) => this.visibilityObservation(id),
             clear: (id) => this.clearVisibilityProbe(id),
           },
@@ -2565,29 +2643,22 @@ export class CalibrationWorkflow {
             state?.explorationMode === 'fast') &&
           evidence.planeSource === 'assumed-horizontal'
         )) ||
+      // An assumed plane must have at least one measured held-out height;
+      // without it the tilt audit never ran and the assumption is unverified.
+      (evidence.planeSource === 'assumed-horizontal' &&
+        evidence.validationHeightMaxMm === undefined) ||
       !Number.isFinite(evidence.surfaceMaxMm ?? 0) ||
       (evidence.surfaceMaxMm ?? 0) > SAMPLED_SURFACE_LIMIT_MM
     )
       reasons.push(
         'Automatic acceptance requires complete contact and plane evidence for the selected sampling mode',
       );
-    else {
-      const screen = this.runtime.profileStore.getScreen(
-        c.candidate!.screenProfileId,
-      );
-      const warnings = explorationQualityWarnings(screen, quality, evidence);
-      if (state?.mapping)
-        warnings.push(
-          ...mappingQualityWarnings(
-            state.mapping.accuracy,
-            state.mapping.layout,
-          ),
-        );
-      for (const warning of warnings)
-        reasons.push(
-          `${warning.label} ${warning.percent.toFixed(2)}% (target ${warning.minimum ? '≥' : '≤'}${warning.targetPercent}%)`,
-        );
-    }
+    if (
+      state?.explorationQuality?.warnings?.some(
+        ({ percent }) => !Number.isFinite(percent) || percent < 0,
+      )
+    )
+      reasons.push('Automatic acceptance requires valid quality measurements');
     if (
       !c?.boundary ||
       ![

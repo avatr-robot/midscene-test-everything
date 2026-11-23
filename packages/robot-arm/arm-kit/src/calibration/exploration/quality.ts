@@ -9,6 +9,9 @@ import type {
 } from '../../contracts.js';
 import { SAMPLED_SURFACE_LIMIT_MM } from '../surface.js';
 
+/** Fast mode assumes a horizontal screen; this is the tilt budget it may keep. */
+const FAST_MEASURED_HEIGHT_RANGE_MM = 6;
+
 /** XY errors use the measured short edge. Z errors use the supported surface compensation range. */
 export function explorationQualityWarnings(
   screen: Pick<ScreenProfile, 'physicalWidthMm' | 'physicalHeightMm'>,
@@ -63,6 +66,24 @@ export function explorationQualityWarnings(
       percent:
         (evidence.validationHeightMaxMm / SAMPLED_SURFACE_LIMIT_MM) * 100,
       targetPercent: 50,
+    });
+  // Predicted heights are kept out of the plane; their residual against the
+  // measured plane is the signal that the height model no longer fits.
+  if (evidence.predictedHeightResidualMaxMm !== undefined)
+    readings.push({
+      label: 'Predicted height error',
+      percent:
+        (evidence.predictedHeightResidualMaxMm / SAMPLED_SURFACE_LIMIT_MM) *
+        100,
+      targetPercent: 100,
+    });
+  // The measured heights are the only direct evidence of tilt in fast mode.
+  if (evidence.measuredHeightRangeMm !== undefined)
+    readings.push({
+      label: 'Measured height range',
+      percent:
+        (evidence.measuredHeightRangeMm / FAST_MEASURED_HEIGHT_RANGE_MM) * 100,
+      targetPercent: 100,
     });
   if (evidence.axisSkewRatio !== undefined)
     readings.push({

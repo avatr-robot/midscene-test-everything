@@ -8,6 +8,7 @@ import {
   calibrationAccepted,
   semanticJson,
 } from '@midscene/arm-kit';
+import type { CalibrationHost } from '@midscene/arm-kit/internal/calibration-server/host';
 import { insideCameraParkingFootprint } from '@midscene/arm-kit/internal/calibration/camera-avoidance';
 import {
   confirmVisibilityPages,
@@ -34,10 +35,14 @@ import type {
 import type { PlaygroundDevices } from './devices.js';
 
 const terminal = (status: string) => ['completed', 'skipped'].includes(status);
+type SharedParkingDebug = NonNullable<
+  CalibrationBatchState['sharedParkingDebug']
+>;
 /** Original per-screen batch states and confirmations, using the shared Controller queue. */
 export class CalibrationBatch {
   private state?: CalibrationBatchState;
   private abort?: AbortController;
+  private sharedParkingDebug?: SharedParkingDebug;
   private task?: Promise<void>;
   private busy = false;
   private starting = false;
@@ -74,6 +79,8 @@ export class CalibrationBatch {
       }
     }
     const snapshot = structuredClone(this.state);
+    if (this.sharedParkingDebug)
+      snapshot.sharedParkingDebug = structuredClone(this.sharedParkingDebug);
     if (snapshot.status === 'running' && this.automaticSharedParking)
       snapshot.automaticSharedParking = true;
     return snapshot;
@@ -207,50 +214,52 @@ export class CalibrationBatch {
       if (camera?.getCorrection()) await camera.assertPerspectiveCurrent();
     }
   }
-  private entries(cameraId: string) {
-    const data = this.runtime.profileStore.list();
-    const input = this.selection(cameraId);
+  private mappedTargets(cameraId: string) {
     return this.devices
       .screens()
       .filter(
         (t) =>
           t.cameraId === cameraId &&
           this.devices.entries.get(t.id)?.camera.getCorrection(),
-      )
-      .map((target) => {
-        const binding = data.devices?.find((d) => d.deviceId === target.id);
-        const c =
-          binding &&
-          data.calibrations.find((c) => c.id === binding.calibrationProfileId);
-        const screen =
-          binding && data.screens.find((s) => s.id === binding.screenProfileId);
-        const savedCalibration =
-          c &&
-          screen &&
-          binding &&
-          calibrationAccepted(c, c.pendingParkingBatchId) &&
-          c.robotProfileId === input.robotProfileId &&
-          c.toolProfileId === input.toolProfileId &&
-          c.robotGeometryRevision ===
-            this.runtime.profileStore.getRobot(input.robotProfileId)
-              .geometryRevision &&
-          c.toolGeometryRevision ===
-            this.runtime.profileStore.getTool(input.toolProfileId)
-              .geometryRevision &&
-          c.screenGeometryRevision === screen.geometryRevision
-            ? c
-            : undefined;
-        const calibration =
-          savedCalibration &&
-          this.devices.entries
-            .get(target.id)!
-            .camera.isBindingCurrent(binding!.vision)
-            ? savedCalibration
-            : undefined;
-        const cameraMappingChanged =
-          !calibration && calibrationAccepted(savedCalibration);
-        return { target, binding, calibration, screen, cameraMappingChanged };
-      });
+      );
+  }
+  private entries(cameraId: string) {
+    const data = this.runtime.profileStore.list();
+    const input = this.selection(cameraId);
+    return this.mappedTargets(cameraId).map((target) => {
+      const binding = data.devices?.find((d) => d.deviceId === target.id);
+      const c =
+        binding &&
+        data.calibrations.find((c) => c.id === binding.calibrationProfileId);
+      const screen =
+        binding && data.screens.find((s) => s.id === binding.screenProfileId);
+      const savedCalibration =
+        c &&
+        screen &&
+        binding &&
+        calibrationAccepted(c, c.pendingParkingBatchId) &&
+        c.robotProfileId === input.robotProfileId &&
+        c.toolProfileId === input.toolProfileId &&
+        c.robotGeometryRevision ===
+          this.runtime.profileStore.getRobot(input.robotProfileId)
+            .geometryRevision &&
+        c.toolGeometryRevision ===
+          this.runtime.profileStore.getTool(input.toolProfileId)
+            .geometryRevision &&
+        c.screenGeometryRevision === screen.geometryRevision
+          ? c
+          : undefined;
+      const calibration =
+        savedCalibration &&
+        this.devices.entries
+          .get(target.id)!
+          .camera.isBindingCurrent(binding!.vision)
+          ? savedCalibration
+          : undefined;
+      const cameraMappingChanged =
+        !calibration && calibrationAccepted(savedCalibration);
+      return { target, binding, calibration, screen, cameraMappingChanged };
+    });
   }
   private estimates(cameraId: string) {
     const entries = this.entries(cameraId);
@@ -312,14 +321,29 @@ export class CalibrationBatch {
       ? pose
       : undefined;
   }
-  private async visibilityInputs(cameraId: string, signal: AbortSignal) {
+  private async visibilityInputs(
+    cameraId: string,
+    check: () => void,
+    resumePages = false,
+  ) {
     await this.assertPerspectives(cameraId);
-    this.check(signal);
-    const entries = this.entries(cameraId);
+    check();
+    const targets = this.mappedTargets(cameraId);
     const phones = await Promise.all(
-      entries.map(async ({ target }) => {
+      targets.map(async (target) => {
         const entry = this.devices.entries.get(target.id)!;
         const host = await this.devices.ensureHost(target.id);
+        if (resumePages && host.service.phoneStatus().state !== 'connected') {
+          await this.devices.markerCalibration.resumeBoundPage(host);
+          const deadline = performance.now() + 3000;
+          while (
+            host.service.phoneStatus().state !== 'connected' &&
+            performance.now() < deadline
+          ) {
+            check();
+            await delay(50);
+          }
+        }
         const correction = entry.camera.getCorrection();
         if (!correction)
           throw new RobotArmError(
@@ -334,13 +358,13 @@ export class CalibrationBatch {
           sourceWidth: correction.sourceWidth,
           sourceHeight: correction.sourceHeight,
           correctionKey: semanticJson(correction),
-          show: (phase: 0 | 1) => host.service.showVisibilityProbe(phase),
+          show: host.service.showVisibilityProbe.bind(host.service),
           observation: (id: string) => host.service.visibilityObservation(id),
           clear: (id: string) => host.service.clearVisibilityProbe(id),
         };
       }),
     );
-    const camera = this.devices.entries.get(entries[0]?.target.id)?.camera;
+    const camera = this.devices.entries.get(targets[0]?.id)?.camera;
     if (!camera)
       throw new RobotArmError(
         'VISIBILITY_UNAVAILABLE',
@@ -350,12 +374,13 @@ export class CalibrationBatch {
     return {
       phones,
       frame: () => camera.rawFrame(),
+      withReducedExposure: camera.withReducedVisibilityExposure?.bind(camera),
       check: () => {
-        this.check(signal);
+        check();
         if (
           semanticJson(
-            this.entries(cameraId).map(({ target }) => target.id),
-          ) !== semanticJson(entries.map(({ target }) => target.id)) ||
+            this.mappedTargets(cameraId).map((target) => target.id),
+          ) !== semanticJson(targets.map((target) => target.id)) ||
           phones.some(
             (phone) =>
               semanticJson(
@@ -370,6 +395,144 @@ export class CalibrationBatch {
           );
       },
     };
+  }
+  private async findSharedParking(
+    state: CalibrationBatchState,
+    signal: AbortSignal,
+    options: {
+      last?: CalibrationProfile;
+      operatorConfirmedParking?: boolean;
+      debug?: SharedParkingDebug;
+      recheck?: boolean;
+      onVisibility?(
+        evidence: NonNullable<
+          CalibrationBatchState['sharedParkingFailureVisibility']
+        >,
+      ): void;
+    },
+  ) {
+    const { last, operatorConfirmedParking, debug, recheck, onVisibility } =
+      options;
+    await this.assertPerspectives(state.cameraId!);
+    this.check(signal);
+    const selection = this.selection(state.cameraId!);
+    const store = this.runtime.profileStore;
+    const entries = this.entries(state.cameraId!);
+    const profiles = entries.flatMap(({ calibration }) =>
+      calibration && calibrationAccepted(calibration, state.id)
+        ? [calibration]
+        : [],
+    );
+    const sourceId =
+      last?.id ??
+      (debug
+        ? [...state.items].reverse().find((item) => item.status === 'completed')
+            ?.calibrationProfileId
+        : undefined);
+    const source =
+      profiles.find((profile) => profile.id === sourceId) ??
+      profiles[0] ??
+      last;
+    if (!source)
+      throw new RobotArmError(
+        'CALIBRATION_REQUIRED',
+        'A calibrated screen is required for shared parking.',
+        409,
+      );
+    const estimates = this.estimates(state.cameraId!);
+    const otherScreens = entries.filter(
+      ({ calibration }) => calibration?.id !== source.id,
+    );
+    const measuredObstacles = otherScreens.flatMap(
+      ({ calibration, screen }) => {
+        const quad =
+          calibration && screen && calibrationQuad(calibration, screen);
+        return quad ? [quad] : [];
+      },
+    );
+    const estimatedObstacles = otherScreens.flatMap(
+      ({ target, calibration }) => {
+        const quad = !calibration && estimates.get(target.id)?.quad;
+        return quad ? [estimatedScreenExclusion(quad)] : [];
+      },
+    );
+    const obstacles = [...measuredObstacles, ...estimatedObstacles];
+    const contextVersion = this.contextVersion(state.cameraId!);
+    if (contextVersion !== state.contextVersion)
+      throw new RobotArmError(
+        'STALE_CONTEXT',
+        'The screen group changed during shared parking.',
+        409,
+      );
+    const guard = () => {
+      this.check(signal);
+      if (this.contextVersion(state.cameraId!) !== contextVersion)
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'The screen group changed during shared parking.',
+          409,
+        );
+    };
+    guard();
+    const confirmedCorridor = state.transfer?.corridorConfirmed
+      ? state.transfer
+      : undefined;
+    const parked = await this.runtime.parkScreenGroup(
+      source,
+      source.id,
+      {
+        obstacles,
+        estimatedObstacles,
+        complete: obstacles.length === otherScreens.length,
+        corridor: confirmedCorridor?.corridor,
+        corridorTravelTipZMm: confirmedCorridor?.travelTipZMm,
+      },
+      knownScreenTravelHeight(store.list(), selection),
+      async (signal, assertStationary) => {
+        const { phones, frame, check, withReducedExposure } =
+          await this.visibilityInputs(state.cameraId!, () =>
+            this.check(signal),
+          );
+        const evidence = await verifyScreenVisibility(
+          phones,
+          frame,
+          signal,
+          check,
+          {
+            sharedParking: true,
+            retainMasks: Boolean(debug),
+            withReducedExposure,
+            assertStationary,
+          },
+        );
+        if (debug) debug.visibility = evidence;
+        onVisibility?.(evidence);
+        return evidence;
+      },
+      guard,
+      async () => {
+        const { phones, check } = await this.visibilityInputs(
+          state.cameraId!,
+          () => this.check(signal),
+          Boolean(debug),
+        );
+        await confirmVisibilityPages(phones, signal, check);
+      },
+      {
+        operatorConfirmed: operatorConfirmedParking,
+        debug: Boolean(debug),
+        contextVersion,
+        recheck: recheck
+          ? {
+              savedVerifiedPose: state.sharedSafePositionVerified
+                ? state.sharedSafePosition
+                : undefined,
+            }
+          : undefined,
+        clearanceProfileIds: profiles.map(({ id }) => id),
+      },
+    );
+    return { parked, profiles, source, guard };
   }
   private async recordSharedParking(
     pose: CartesianPose,
@@ -655,7 +818,6 @@ export class CalibrationBatch {
       await this.runtime.assertCalibrationMotionReady(selected.toolProfileId);
       const contextVersion = this.contextVersion(input.cameraId);
       const sharedSafePosition = this.savedSharedPosition(input.cameraId);
-      const tool = this.runtime.profileStore.getTool(selected.toolProfileId);
       this.assertLaunchCurrent(launchRevision);
       this.stopRevision = this.runtime.stopRevision;
       this.transfer = plan.transfer;
@@ -670,12 +832,7 @@ export class CalibrationBatch {
         samplingMode,
         compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
         usesSharedSafePosition: true,
-        sharedSafePosition:
-          sharedSafePosition &&
-          contactPoint(sharedSafePosition, tool.offsetMm).z >=
-            (plan.transfer?.travelTipZMm ?? Number.NEGATIVE_INFINITY)
-            ? sharedSafePosition
-            : undefined,
+        sharedSafePosition,
         acceptance: input.acceptance ?? 'automatic',
         planVersion: plan.version,
         contextVersion,
@@ -700,13 +857,21 @@ export class CalibrationBatch {
     if (revision !== this.launchRevision)
       throw new RobotArmError('STALE_CONTEXT', 'The batch was stopped.', 409);
   }
-  private launch(revision: number, operatorConfirmedParking = false) {
+  private launch(
+    revision: number,
+    mode: 'automatic' | 'manual' | 'debug' | 'recheck' = 'automatic',
+  ) {
     this.assertLaunchCurrent(revision);
     const state = this.state!;
     this.abort = new AbortController();
     this.choice = undefined;
     this.safetyStop = undefined;
     this.stopFailed = false;
+    const debug: SharedParkingDebug | undefined =
+      mode === 'debug' || mode === 'recheck'
+        ? { status: 'running' }
+        : undefined;
+    this.sharedParkingDebug = debug;
     this.task = this.devices.arm
       .calibrationBatchForDevices(
         state.id,
@@ -721,7 +886,23 @@ export class CalibrationBatch {
                 'Review the calibration plan again before starting.',
                 409,
               );
-            const last = await this.run(signal, operatorConfirmedParking);
+            if (debug) {
+              const { parked, guard } = await this.findSharedParking(
+                state,
+                signal,
+                {
+                  debug,
+                  recheck: mode === 'recheck',
+                },
+              );
+              guard();
+              debug.pose = parked.pose;
+              if ('screens' in parked.visibility)
+                debug.visibility = parked.visibility;
+              debug.status = 'completed';
+              return { value: undefined };
+            }
+            const last = await this.run(signal, mode === 'manual');
             return { value: undefined, lastCalibration: last };
           } finally {
             try {
@@ -734,6 +915,18 @@ export class CalibrationBatch {
         this.abort.signal,
       )
       .catch(async (error) => {
+        if (debug) {
+          if (debug.status === 'running') {
+            const stopped =
+              this.abort?.signal.aborted ||
+              this.runtime.stopRevision !== this.stopRevision;
+            debug.status = stopped ? 'stopped' : 'failed';
+            if (!stopped)
+              debug.error =
+                error instanceof Error ? error.message : String(error);
+          }
+          return;
+        }
         await this.update(() => {
           state.status = this.stopFailed ? 'failed' : 'stopped';
           state.error = error instanceof Error ? error.message : String(error);
@@ -755,13 +948,122 @@ export class CalibrationBatch {
     await delay(150, undefined, { signal });
     this.check(signal);
   }
+  private async waitForPhone(host: CalibrationHost, signal: AbortSignal) {
+    const state = this.state!;
+    const row = state.items[state.currentIndex];
+    if (!host.service.setup().prepared)
+      throw new RobotArmError(
+        'SETUP_REQUIRED',
+        'Save tool configuration first',
+        409,
+      );
+    if (!host.service.setup().phoneConnected)
+      await this.devices.markerCalibration.resumeBoundPage(host);
+    const deadline = performance.now() + 15_000;
+    while (!host.service.setup().phoneConnected && !this.choice) {
+      if (performance.now() >= deadline)
+        throw new RobotArmError(
+          'PHONE_UNAVAILABLE',
+          'Open the phone page and retry this step',
+          409,
+        );
+      if (row.status !== 'awaiting-mapping')
+        await this.update(() => {
+          state.status = 'waiting';
+          row.status = 'awaiting-mapping';
+          row.note = 'Keep the phone page visible and fullscreen';
+        });
+      await this.wait(signal);
+    }
+    this.check(signal);
+  }
+  private async prepareCamera(signal: AbortSignal) {
+    const state = this.state!;
+    const cameraId = state.cameraId!;
+    const prepared: CalibrationHost[] = [];
+    for (let index = 0; index < state.items.length; index++) {
+      this.check(signal);
+      const row = state.items[index];
+      if (terminal(row.status)) continue;
+      await this.update(() => {
+        state.currentIndex = index;
+        state.status = 'running';
+        row.status = 'preparing';
+      });
+      const host = await this.devices.ensureHost(row.deviceId);
+      await this.waitForPhone(host, signal);
+      const choice = this.choice;
+      this.choice = undefined;
+      if (choice === 'retry') {
+        index--;
+        continue;
+      }
+      if (!choice) {
+        if (state.status === 'waiting')
+          await this.update(() => {
+            state.status = 'running';
+            row.status = 'preparing';
+            row.note = undefined;
+          });
+        if (!host.service.setup().mapping) {
+          await host.alignForBatch(signal, state.samplingMode === 'slide', {
+            reuseAppliedPerspective: true,
+          });
+          this.check(signal);
+          const contextVersion = this.contextVersion(cameraId);
+          if (state.transfer && contextVersion !== state.contextVersion)
+            throw new RobotArmError(
+              'STALE_CONTEXT',
+              'Review the calibration plan again before starting.',
+              409,
+            );
+          state.contextVersion = contextVersion;
+        }
+        prepared.push(host);
+      }
+      await this.update(() => {
+        state.status = 'running';
+        row.status = choice === 'skip' ? 'skipped' : 'pending';
+        row.note = undefined;
+      });
+    }
+    if (!prepared.length) return;
+    await this.update(() => {
+      state.currentIndex = state.items.findIndex(
+        (row) => !terminal(row.status),
+      );
+    });
+    this.check(signal);
+    for (const host of prepared) {
+      const setup = host.service.setup();
+      if (!setup.phoneConnected || !setup.mapping)
+        throw new RobotArmError(
+          'MAPPING_REQUIRED',
+          'Keep the phone page visible and fullscreen',
+          409,
+        );
+    }
+    const imaging = prepared[0].service.setup().imaging?.state;
+    if (imaging === 'ready' || imaging === 'unsupported') return;
+    await this.update(() => {
+      const row = state.items[state.currentIndex];
+      row.status = 'preparing';
+      row.note = 'Optimizing camera image quality';
+    });
+    this.check(signal);
+    await this.devices.calibrateCameraImaging(cameraId);
+    this.check(signal);
+  }
   private async run(
     signal: AbortSignal,
     operatorConfirmedParking: boolean,
   ): Promise<CalibrationProfile | undefined> {
     const state = this.state!;
     let last: CalibrationProfile | undefined;
+    let sharedParkingVisibility: CalibrationBatchState['sharedParkingFailureVisibility'];
     try {
+      if (!state.items.some((row) => row.runIds.length))
+        await this.prepareCamera(signal);
       for (; state.currentIndex < state.items.length; state.currentIndex++) {
         const row = state.items[state.currentIndex];
         if (terminal(row.status)) continue;
@@ -783,37 +1085,21 @@ export class CalibrationBatch {
           try {
             await this.assertPerspectives(state.cameraId!);
             this.check(signal);
-            const setup = host.service.setup();
-            if (!setup.prepared)
+            await this.waitForPhone(host, signal);
+            if (this.choice) throw new Error('Batch screen changed');
+            if (!host.service.setup().mapping)
               throw new RobotArmError(
-                'SETUP_REQUIRED',
-                'Save tool configuration first',
+                'MAPPING_REQUIRED',
+                'Check camera mapping before starting calibration',
                 409,
               );
-            if (!host.service.setup().phoneConnected)
-              await this.devices.markerCalibration.resumeBoundPage(host);
-            const phoneDeadline = performance.now() + 15_000;
-            while (!host.service.setup().phoneConnected) {
-              if (performance.now() >= phoneDeadline)
-                throw new RobotArmError(
-                  'PHONE_UNAVAILABLE',
-                  'Open the phone page and retry this step',
-                  409,
-                );
-              if (row.status !== 'awaiting-mapping')
-                await this.update(() => {
-                  row.status = 'awaiting-mapping';
-                  state.status = 'waiting';
-                  row.note = 'Keep the phone page visible and fullscreen';
-                });
-              await this.wait(signal);
-              if (this.choice) break;
-            }
-            if (this.choice) throw new Error('Batch screen changed');
-            if (!host.service.setup().mapping) await host.alignForBatch(signal);
-            const imaging = host.service.setup().imaging;
-            if (!imaging || !['ready', 'unsupported'].includes(imaging.state))
-              await this.devices.calibrateCameraImaging(state.cameraId!);
+            const imaging = host.service.setup().imaging?.state;
+            if (imaging !== 'ready' && imaging !== 'unsupported')
+              throw new RobotArmError(
+                'MAPPING_REQUIRED',
+                'Finish camera mapping to calibrate focus and exposure automatically.',
+                409,
+              );
             this.check(signal);
             let session = await host.service.create({ batch: true });
             attemptId = session.id;
@@ -885,6 +1171,7 @@ export class CalibrationBatch {
               row.status = 'preparing';
               row.runIds.push(session.id);
               row.note = undefined;
+              row.qualityWarnings = undefined;
             });
             await host.service.command(
               session.id,
@@ -920,6 +1207,25 @@ export class CalibrationBatch {
                   current.error ?? 'Screen calibration stopped',
                   409,
                 );
+              const warnings = current.explorationQuality?.warnings;
+              if (
+                current.stage === 'boundary-review' &&
+                state.acceptance === 'automatic' &&
+                !warnings?.some(
+                  ({ percent }) => !Number.isFinite(percent) || percent < 0,
+                )
+              ) {
+                await this.update(() => {
+                  row.qualityWarnings = warnings;
+                  state.status = 'running';
+                  row.status = 'exploring';
+                  row.progress = undefined;
+                });
+                this.check(signal);
+                if (this.choice) break;
+                await host.service.command(current.id, 'verify-boundary', true);
+                continue;
+              }
               if (
                 [
                   'review',
@@ -1038,96 +1344,19 @@ export class CalibrationBatch {
         state.usesSharedSafePosition &&
         state.items.some((item) => item.status === 'completed')
       ) {
-        await this.assertPerspectives(state.cameraId!);
-        this.check(signal);
-        const selection = this.selection(state.cameraId!);
-        const store = this.runtime.profileStore;
-        const entries = this.entries(state.cameraId!);
-        const profiles = entries.flatMap(({ calibration }) =>
-          calibration && calibrationAccepted(calibration, state.id)
-            ? [calibration]
-            : [],
-        );
-        const source =
-          profiles.find((profile) => profile.id === last?.id) ??
-          profiles[0] ??
-          last;
-        if (!source)
-          throw new RobotArmError(
-            'CALIBRATION_REQUIRED',
-            'A calibrated screen is required for shared parking.',
-            409,
-          );
-        const estimates = this.estimates(state.cameraId!);
-        const otherScreens = entries.filter(
-          ({ calibration }) => calibration?.id !== source.id,
-        );
-        const measuredObstacles = otherScreens.flatMap(
-          ({ calibration, screen }) => {
-            const quad =
-              calibration && screen && calibrationQuad(calibration, screen);
-            return quad ? [quad] : [];
-          },
-        );
-        const estimatedObstacles = otherScreens.flatMap(
-          ({ target, calibration }) => {
-            const quad = !calibration && estimates.get(target.id)?.quad;
-            return quad ? [estimatedScreenExclusion(quad)] : [];
-          },
-        );
-        const obstacles = [...measuredObstacles, ...estimatedObstacles];
-        const contextVersion = this.contextVersion(state.cameraId!);
-        if (contextVersion !== state.contextVersion)
-          throw new RobotArmError(
-            'STALE_CONTEXT',
-            'The screen group changed during shared parking.',
-            409,
-          );
-        const guard = () => {
-          this.check(signal);
-          if (this.contextVersion(state.cameraId!) !== contextVersion)
-            throw new RobotArmError(
-              'STALE_CONTEXT',
-              'The screen group changed during shared parking.',
-              409,
-            );
-        };
         await this.update(() => {
           state.status = 'running';
           this.automaticSharedParking = !operatorConfirmedParking;
         });
-        guard();
-        const parked = await this.runtime.parkScreenGroup(
-          source,
-          source.id,
-          {
-            pose: state.sharedSafePosition,
-            obstacles,
-            estimatedObstacles,
-            complete: obstacles.length === otherScreens.length,
-            corridor: state.transfer?.corridor,
-          },
-          Math.max(
-            knownScreenTravelHeight(store.list(), selection),
-            state.transfer?.travelTipZMm ?? Number.NEGATIVE_INFINITY,
-          ),
-          async (signal) => {
-            const { phones, frame, check } = await this.visibilityInputs(
-              state.cameraId!,
-              signal,
-            );
-            return verifyScreenVisibility(phones, frame, signal, check);
-          },
-          guard,
-          async () => {
-            const { phones, check } = await this.visibilityInputs(
-              state.cameraId!,
-              signal,
-            );
-            await confirmVisibilityPages(phones, signal, check);
-          },
-          operatorConfirmedParking,
-        );
+        const { parked, profiles, source, guard } =
+          await this.findSharedParking(state, signal, {
+            last,
+            operatorConfirmedParking,
+            onVisibility: (evidence) => {
+              sharedParkingVisibility = evidence;
+            },
+          });
+        const store = this.runtime.profileStore;
         await this.recordSharedParking(
           parked.pose,
           parked.visibility,
@@ -1156,18 +1385,17 @@ export class CalibrationBatch {
       await this.update(() => {
         state.status = stopped ? 'stopped' : 'failed';
         state.error = error instanceof Error ? error.message : String(error);
+        state.sharedParkingFailureVisibility = Array.isArray(missing)
+          ? sharedParkingVisibility
+          : undefined;
         state.visibilityMissingScreens = Array.isArray(missing)
           ? missing.flatMap((screen) => {
               if (typeof screen === 'string') return [screen];
-              if (
-                typeof screen?.id !== 'string' ||
-                typeof screen.percent !== 'number'
-              )
-                return [];
+              if (typeof screen?.id !== 'string') return [];
               const item = state.items.find(
                 (item) => item.deviceId === screen.id,
               );
-              return [`${item?.name ?? screen.id} ${screen.percent}%`];
+              return [item?.name ?? screen.id];
             })
           : undefined;
         const row = state.items[state.currentIndex];
@@ -1202,6 +1430,9 @@ export class CalibrationBatch {
       return Promise.resolve(this.read());
     }
     const row = this.state!.items[this.state!.currentIndex];
+    const debug = this.sharedParkingDebug;
+    if (debug && debug.status !== 'running')
+      return task.then(() => this.read());
     this.safetyStop =
       this.ownsQueue && this.runtime.current()
         ? (async () => {
@@ -1220,24 +1451,32 @@ export class CalibrationBatch {
     void this.safetyStop.catch(() => undefined);
     this.abort?.abort();
     this.stopping = (async () => {
-      await this.update(() => {
-        this.state!.status = 'stopping';
-      });
+      if (debug) debug.status = 'stopping';
+      else
+        await this.update(() => {
+          this.state!.status = 'stopping';
+        });
       await this.safetyStop;
-      if (row)
+      if (row && !debug)
         await this.devices.entries.get(row.deviceId)?.host?.service.stop();
       await task;
-      await this.update(() => {
-        this.state!.status = 'stopped';
-      });
+      if (debug) debug.status = 'stopped';
+      else
+        await this.update(() => {
+          this.state!.status = 'stopped';
+        });
       return this.read();
     })()
       .catch(async (error) => {
-        await this.update(() => {
-          this.state!.status = 'failed';
-          this.state!.error =
-            error instanceof Error ? error.message : String(error);
-        });
+        const message = error instanceof Error ? error.message : String(error);
+        if (debug) {
+          debug.status = 'failed';
+          debug.error = message;
+        } else
+          await this.update(() => {
+            this.state!.status = 'failed';
+            this.state!.error = message;
+          });
         throw error;
       })
       .finally(() => {
@@ -1255,7 +1494,12 @@ export class CalibrationBatch {
       );
     // Stop must preempt ordinary commands and stale UI revisions, as in the original flow.
     if (action === 'stop') return this.stopActive(true);
-    if (this.busy || this.stopping || state.revision !== revision)
+    if (
+      this.busy ||
+      this.stopping ||
+      (this.task && this.sharedParkingDebug) ||
+      state.revision !== revision
+    )
       throw new RobotArmError(
         'STALE_CONTEXT',
         'Refresh the calibration batch before continuing',
@@ -1269,7 +1513,28 @@ export class CalibrationBatch {
         state.items.some((item) => item.status === 'completed') &&
         state.items.every((item) => terminal(item.status));
       const row = this.state!.items[this.state!.currentIndex];
-      if (action === 'confirm-shared-parking') {
+      if (
+        action === 'debug-shared-parking' ||
+        action === 'recheck-shared-parking'
+      ) {
+        if (
+          !parkingOnly ||
+          !['completed', 'failed', 'stopped'].includes(state.status)
+        )
+          throw new RobotArmError(
+            'INVALID_STAGE',
+            'Finish the batch screen calibrations before debugging the shared Safe Position.',
+            409,
+          );
+        await this.task;
+        await this.assertResumeContext();
+        this.assertLaunchCurrent(launchRevision);
+        this.stopRevision = this.runtime.stopRevision;
+        this.launch(
+          launchRevision,
+          action === 'recheck-shared-parking' ? 'recheck' : 'debug',
+        );
+      } else if (action === 'confirm-shared-parking') {
         if (
           !parkingOnly ||
           state.sharedSafePositionVerified ||
@@ -1287,10 +1552,16 @@ export class CalibrationBatch {
           this.state!.status = 'running';
           this.state!.error = undefined;
           this.state!.visibilityMissingScreens = undefined;
+          this.state!.sharedParkingFailureVisibility = undefined;
         });
         this.stopRevision = this.runtime.stopRevision;
-        this.launch(launchRevision, true);
+        this.launch(launchRevision, 'manual');
       } else if (action === 'retry' || action === 'skip') {
+        const parkingAfterDebug =
+          action === 'retry' &&
+          parkingOnly &&
+          state.status === 'completed' &&
+          Boolean(state.sharedParkingDebug);
         if (
           !parkingOnly &&
           state.samplingMode === 'slide' &&
@@ -1304,7 +1575,8 @@ export class CalibrationBatch {
         if (
           (!row && !parkingOnly) ||
           (parkingOnly && action !== 'retry') ||
-          !['waiting', 'failed', 'stopped'].includes(this.state!.status)
+          (!parkingAfterDebug &&
+            !['waiting', 'failed', 'stopped'].includes(state.status))
         )
           throw new RobotArmError(
             'INVALID_STAGE',
@@ -1324,6 +1596,7 @@ export class CalibrationBatch {
             this.state!.status = 'running';
             this.state!.error = undefined;
             this.state!.visibilityMissingScreens = undefined;
+            this.state!.sharedParkingFailureVisibility = undefined;
           });
           this.stopRevision = this.runtime.stopRevision;
           this.launch(launchRevision);
@@ -1372,7 +1645,7 @@ export class CalibrationBatch {
           ) {
             await host.service.command(session.id, 'verify-boundary', true);
           } else if (row.status === 'awaiting-mapping')
-            await host.alignForBatch(this.abort!.signal);
+            await this.devices.markerCalibration.resumeBoundPage(host);
           else if (row.status === 'awaiting-placement') {
             if ((await this.runtime.state()).state.dragMode)
               await this.runtime.exitDragMode();
@@ -1409,6 +1682,7 @@ export class CalibrationBatch {
         409,
       );
     this.state = undefined;
+    this.sharedParkingDebug = undefined;
     await this.runtime.profileStore.clearCalibrationBatch();
   }
   async close() {

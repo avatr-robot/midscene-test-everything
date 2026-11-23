@@ -1,6 +1,7 @@
 /** Narrow host boundary for the pinned upstream sampling algorithm. */
 import type {
   CartesianPose,
+  InstallationTeaching,
   MotionAcceleration,
   MotionOptions,
   MotionSpeed,
@@ -60,8 +61,9 @@ export function assertSameScreenPage(
     );
 }
 export interface AutoCalibrationProgress {
-  phase: 'preflight' | 'probe' | 'search' | 'grid';
-  operation?: 'travel' | 'slide';
+  phase: 'preflight' | 'probe' | 'search' | 'height' | 'grid';
+  gridTargets?: readonly ScreenCalibTarget[];
+  operation?: 'travel' | 'slide' | 'recover';
   index: number;
   total: number;
   message?: string;
@@ -86,6 +88,8 @@ export interface CollectedSample {
   role: 'probe' | 'fit' | 'validation';
   method: 'stepped' | 'direct' | 'slide';
   weight?: number;
+  /** Whether `robot.z` came from a measured bracket or a predicted press height. */
+  zSource?: 'measured' | 'predicted';
 }
 export interface CalibrationSession {
   auto?: {
@@ -104,7 +108,15 @@ export interface ApplicationContext {
   };
   tool: ToolProfile;
   minimumTravelTipZMm?: number;
+  /** Confirmed clearance for a straight approach to a stationary probe. */
+  directTravel?: { teaching: InstallationTeaching; minimumTipZMm: number };
   batchTransfer?: { travelTipZMm: number };
+}
+export interface SlideRecovery {
+  targetId: string;
+  phase: 'height' | 'grid';
+  cause: string;
+  switchedToVertical: boolean;
 }
 export interface AutoExplorationOptions {
   startPose: CartesianPose;
@@ -112,6 +124,9 @@ export interface AutoExplorationOptions {
   mode?: 'standard' | 'fast-horizontal';
   collection?: 'tap' | 'slide';
   horizontalConfirmed?: boolean;
+  /** Optional timing sink; events carry the elapsed wall time of one stage. */
+  onTiming?(event: string, elapsedMs: number): void;
+  onSlideRecovery?(recovery: SlideRecovery): void;
 }
 export interface AutoExplorationHost {
   currentPose(): Promise<CartesianPose>;

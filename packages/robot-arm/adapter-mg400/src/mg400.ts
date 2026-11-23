@@ -130,9 +130,22 @@ export interface Mg400Options {
    * yields early to the 30004 stream (see `isSampleReusable`).
    */
   statePollIntervalMs?: number;
+  /**
+   * Send `RobotMode()`, `GetErrorID()` and `GetPose()` as one dashboard write.
+   * Off by default (`MIDSCENE_MG400_PIPELINE=1` enables it); a failed batch
+   * disables it for the rest of the adapter's life.
+   */
+  pipelineStateQueries?: boolean;
   /** Reported whenever the effective actual-state source changes. */
   onFeedbackStatus?: (status: RobotArmFeedbackStatus) => void;
 }
+/**
+ * Opt-in: independent state queries share one write. The controller frames
+ * commands by syntax rather than by line, so this must be verified on the
+ * installed firmware before it becomes the default. A batch that does not
+ * produce one reply per command disables the optimization for this adapter.
+ */
+const PIPELINE_STATE_QUERIES_ENV = 'MIDSCENE_MG400_PIPELINE';
 const DEFAULTS = {
   httpPort: MG400_HTTP_PORT,
   clearFaultsTransport: 'studio',
@@ -146,6 +159,7 @@ const DEFAULTS = {
   enableTimeoutMs: 15000,
   verifyReachability: true,
   statePollIntervalMs: 200,
+  pipelineStateQueries: false,
 } as const;
 /** How long every lifecycle command except `enable()` gets to confirm. */
 const LIFECYCLE_TIMEOUT_MS = 5000;
@@ -170,6 +184,7 @@ const JOG_STOP_CONFIRM_MS = 1500;
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 5000;
 const logMg400 = getDebug('robot-arm:mg400', { console: true });
+const debugMg400 = getDebug('robot-arm:mg400');
 /**
  * `axisID` values from the TCP/IP protocol manual: X/Y/Z/R for Cartesian axes
  * and J1..J4 for joints, each with an explicit direction suffix.
@@ -524,7 +539,7 @@ export function buildMg400MotionCommand(
   const l = name === 'MovL';
   return `${name}(${p.x},${p.y},${p.z},${r},User=0,Tool=0,${l ? 'SpeedL' : 'SpeedJ'}=${Math.max(1, Math.round(speed.value * 100))},${l ? 'AccL' : 'AccJ'}=${Math.max(1, Math.round(acceleration.value * 100))},CP=0)`;
 }
-/** One in-flight response per channel. A timeout quarantines the socket; never reuse a late reply. */
+/** One in-flight response per command. A timeout quarantines the socket; never reuse a late reply. */
 class TextChannel {
   connectedAt?: number;
   private epoch = 0;
@@ -533,13 +548,17 @@ class TextChannel {
   private cancelOpening?: (error: unknown) => void;
   private buffer = '';
   private serial: Promise<unknown> = Promise.resolve();
-  private pending?: {
+  /**
+   * Replies are matched to commands in the order the controller returns them.
+   * A batch writes several independent commands at once and queues one entry
+   * per expected reply; single commands are a batch of one.
+   */
+  private pending: Array<{
     command: string;
-    resolve: (v: unknown) => void;
+    resolve: (line: string) => void;
     reject: (e: unknown) => void;
     timer: ReturnType<typeof setTimeout>;
-    parse: (line: string, command: string) => unknown;
-  };
+  }> = [];
   constructor(
     private host: string,
     private port: number,
@@ -599,8 +618,7 @@ class TextChannel {
         while (index >= 0) {
           const line = this.buffer.slice(0, index + 1);
           this.buffer = this.buffer.slice(index + 1);
-          const p = this.pending;
-          this.pending = undefined;
+          const p = this.pending.shift();
           if (!p) {
             this.close(
               new RobotArmError(
@@ -612,11 +630,7 @@ class TextChannel {
             return;
           }
           clearTimeout(p.timer);
-          try {
-            p.resolve(p.parse(line, p.command));
-          } catch (e) {
-            p.reject(e);
-          }
+          p.resolve(line);
           index = this.buffer.indexOf(';');
         }
       });
@@ -655,6 +669,40 @@ class TextChannel {
     command: string,
     timeoutMs = this.timeoutMs,
   ): Promise<T> {
+    return this.sendLines([command], timeoutMs).then(([line]) =>
+      parse(line, command),
+    );
+  }
+  /**
+   * Send independent commands back-to-back and parse their replies in order.
+   * The controller answers a TCP stream in order, so one write removes the
+   * per-command round trip without changing what is read.
+   */
+  async sendBatch<T>(
+    entries: Array<{
+      command: string;
+      parse: (line: string, command: string) => T;
+    }>,
+    timeoutMs = this.timeoutMs,
+  ): Promise<T[]> {
+    const lines = await this.sendLines(
+      entries.map((entry) => entry.command),
+      timeoutMs,
+    );
+    return lines.map((line, index) =>
+      entries[index].parse(line, entries[index].command),
+    );
+  }
+  /**
+   * Write the commands as one queued unit and collect their raw replies in
+   * order. Parsing happens after every reply is in, so a bad reply can never
+   * leave later entries of the same batch waiting for a timeout.
+   */
+  private sendLines(
+    commands: string[],
+    timeoutMs = this.timeoutMs,
+  ): Promise<string[]> {
+    if (!commands.length) return Promise.resolve([]);
     const epoch = this.epoch;
     const work = this.serial.then(() => {
       if (epoch !== this.epoch)
@@ -669,7 +717,8 @@ class TextChannel {
           'MG400 channel requires explicit reconnect',
           503,
         );
-      return new Promise<T>((resolve, reject) => {
+      return new Promise<string[]>((resolve, reject) => {
+        const lines: string[] = [];
         const timer = setTimeout(
           () =>
             this.close(
@@ -677,22 +726,31 @@ class TextChannel {
                 'COMMAND_TIMEOUT',
                 'MG400 command completion is unknown',
                 504,
-                { command },
+                { command: commands.join(' + ') },
               ),
             ),
           timeoutMs,
         );
-        // The channel holds one pending request without knowing its type, so the
-        // value handed back is the one this call's own parser produced for this
-        // call's own command.
-        this.pending = {
-          command,
-          resolve: (value) => resolve(value as T),
-          reject,
-          timer,
-          parse,
-        };
-        this.socket!.write(command);
+        for (const command of commands)
+          this.pending.push({
+            command,
+            timer,
+            resolve: (line) => {
+              lines.push(line);
+              if (lines.length === commands.length) {
+                clearTimeout(timer);
+                resolve(lines);
+              }
+            },
+            reject: (error) => {
+              clearTimeout(timer);
+              reject(error);
+            },
+          });
+        // The controller frames commands by their own syntax, not by lines:
+        // the single-command path never sent a newline either. Concatenating
+        // keeps both paths byte-compatible with that parser.
+        this.socket!.write(commands.join(''));
       });
     });
     this.serial = work.catch(() => undefined);
@@ -738,7 +796,7 @@ class TextChannel {
     ),
     intentional = false,
   ): void {
-    const wasOpen = Boolean(this.socket || this.opening || this.pending);
+    const wasOpen = Boolean(this.socket || this.opening || this.pending.length);
     this.epoch++;
     this.cancelOpening?.(error);
     this.cancelOpening = undefined;
@@ -747,9 +805,9 @@ class TextChannel {
     this.socket = undefined;
     this.connectedAt = undefined;
     this.buffer = '';
-    const p = this.pending;
-    this.pending = undefined;
-    if (p) {
+    const pending = this.pending;
+    this.pending = [];
+    for (const p of pending) {
       clearTimeout(p.timer);
       p.reject(error);
     }
@@ -761,6 +819,13 @@ export class Mg400Adapter implements RobotArmAdapter {
   private readonly controller: Mg400ControllerClient;
   private readonly motionSettings: Mg400MotionSettingsClient;
   private lastFaultSampleAt = 0;
+  /**
+   * Pipelined state queries are opt-in per adapter. A batch that fails (a
+   * missing reply, an extra reply, or an unparsable one) turns this off for
+   * the lifetime of the instance, so a reconnect falls back to one command per
+   * write instead of failing every poll.
+   */
+  private pipelineStateQueries = false;
   private sequenceOwner?: object;
   private releaseSequence?: () => void;
   readonly id = 'dobot-mg400';
@@ -980,7 +1045,7 @@ export class Mg400Adapter implements RobotArmAdapter {
   /** Set only after a connection was actually established once. */
   private hasConnected = false;
   private lastControllerClock?: bigint;
-  private payloadEvidence() {
+  private payloadEvidence(readbackAfterMs?: number) {
     const frame = this.feedback.current();
     if (frame) {
       if (
@@ -1003,16 +1068,20 @@ export class Mg400Adapter implements RobotArmAdapter {
       frame.loadKg >= 0 &&
       frame.loadKg <= MG400_MAX_PAYLOAD_KG
     ) {
-      // Initial adoption needs a stationary arm. Once confirmed, normal motion
-      // can retain that evidence while fresh feedback still reports the load.
+      // Adoption and re-confirmation need a stationary arm. Routine reads can
+      // retain existing evidence during motion while feedback reports the load.
       if (
-        evidence.status === 'confirmed' ||
+        (readbackAfterMs === undefined && evidence.status === 'confirmed') ||
         (frame.mode === 5 &&
           !frame.running &&
           !frame.pauseCmdFlag &&
           !frame.dragStatus)
       )
-        this.payloadApplication.observeReadback(frame.loadKg, frame.receivedAt);
+        this.payloadApplication.observeReadback(
+          frame.loadKg,
+          frame.receivedAt,
+          readbackAfterMs,
+        );
     } else if (evidence.applied?.source === 'controller-readback') {
       this.payloadApplication.invalidate('readback-unavailable');
     }
@@ -1046,6 +1115,9 @@ export class Mg400Adapter implements RobotArmAdapter {
     if (!options.host)
       throw new RobotArmError('INVALID_CONFIG', 'MG400 host is required');
     this.config = { ...DEFAULTS, ...options };
+    this.pipelineStateQueries =
+      options.pipelineStateQueries ??
+      process.env[PIPELINE_STATE_QUERIES_ENV] === '1';
     this.connectionIdentity = `${options.host}:${this.config.dashboardPort}:${this.config.motionPort}`;
     for (const port of [
       this.config.dashboardPort,
@@ -1144,7 +1216,8 @@ export class Mg400Adapter implements RobotArmAdapter {
       enableWithPayload: (payload) => this.enable(payload),
       appliedPayload: () => this.payloadEvidence().applied,
       applyPayload: (payload) => this.applyPayload(payload),
-      readPayloadApplication: () => this.payloadEvidence(),
+      readPayloadApplication: (readbackAfterMs) =>
+        this.payloadEvidence(readbackAfterMs),
       disable: () => this.disable(),
       clearFaults: () => this.clearFaults(),
       enterDragMode: () => this.enterDragMode(),
@@ -1798,7 +1871,7 @@ export class Mg400Adapter implements RobotArmAdapter {
         const joints = parseMg400GetAngle(body);
         if (body.split(',').length === 6 && !this.getAnglePaddingLogged) {
           this.getAnglePaddingLogged = true;
-          logMg400(
+          debugMg400(
             'GetAngle six-field zero padding accepted; using four joints.',
             {
               connectionIdentity: this.connectionIdentity,
@@ -2004,6 +2077,73 @@ export class Mg400Adapter implements RobotArmAdapter {
       candidate && candidate.receivedAt >= this.lastCommandAt
         ? candidate
         : undefined;
+    if (
+      this.pipelineStateQueries &&
+      !feedback &&
+      this.poseDialect !== 'kinematic'
+    ) {
+      const poseCommand =
+        this.poseDialect === 'named' ? 'GetPose(User=0,Tool=0)' : 'GetPose()';
+      try {
+        const [modeBody, faultReply, poseReply] =
+          await this.dashboard.sendBatch<unknown>([
+            {
+              command: 'RobotMode()',
+              parse: (line, command) => parseMg400Response(line, command),
+            },
+            { command: 'GetErrorID()', parse: parseMg400ErrorIdResponse },
+            {
+              command: poseCommand,
+              parse: (line, command) =>
+                parseMg400Pose(parseMg400Response(line, command)),
+            },
+          ]);
+        const mode = Number(modeBody);
+        if (!isMg400Mode(mode))
+          throw new RobotArmError('PROTOCOL_ERROR', 'Unknown MG400 mode', 502, {
+            body: modeBody,
+          });
+        const fault = faultReply as ReturnType<
+          typeof parseMg400ErrorIdResponse
+        >;
+        this.lastFaultSampleAt = Date.now();
+        const enabled = isMg400ModeEnabled(mode);
+        const dragMode = mode === MG400_DRAG_MODE;
+        if (dragMode) this.motionReconnectAfterDrag = true;
+        if (!enabled)
+          this.payloadApplication.observeDisabled(payloadGeneration);
+        return {
+          connected: true,
+          enabled,
+          moving: isMg400ModeMoving(mode),
+          dragMode,
+          mode: String(mode),
+          paused: isMg400ModePaused(mode),
+          pose: poseReply as CartesianPose,
+          faults: mg400Faults(fault.groups, mode),
+          updatedAt: new Date().toISOString(),
+        };
+      } catch (error) {
+        // The sequential reader owns the named/kinematic pose dialect switch.
+        if (
+          !(error instanceof RobotArmError) ||
+          (error.details?.vendorCode !== -30001 &&
+            error.details?.vendorCode !== -30002)
+        ) {
+          // One reply per command is the whole premise of the batch. A timeout,
+          // protocol error or parse error means this firmware does not frame it
+          // that way, so stop batching for this adapter and surface the failure.
+          if (this.pipelineStateQueries) {
+            this.pipelineStateQueries = false;
+            logMg400('Pipelined state queries disabled after a batch failure', {
+              code: error instanceof RobotArmError ? error.code : 'UNKNOWN',
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+          throw error;
+        }
+      }
+    }
     let mode: number;
     if (feedback) mode = feedback.mode;
     else {
@@ -2928,6 +3068,7 @@ export class Mg400Adapter implements RobotArmAdapter {
           // Wait only for that transition; never retry the physical command.
           const stateDeadline =
             Date.now() + Math.min(this.config.motionTimeoutMs, 1000);
+          let postSync: RobotState | undefined;
           while (true) {
             const state = await this.getStateFresh();
             assertContinuity();
@@ -2944,6 +3085,7 @@ export class Mg400Adapter implements RobotArmAdapter {
                 409,
                 { command, state },
               );
+            postSync = state;
             if (!state.moving) break;
             await new Promise((resolve) => setTimeout(resolve, 50));
           }
@@ -2956,6 +3098,25 @@ export class Mg400Adapter implements RobotArmAdapter {
           // evidence than the two-sample terminal confirmation, so screen
           // timing can anchor a press window to it.
           let arrivedAt: number | undefined;
+          // The post-Sync state read already sampled the pose after the motion
+          // channel reported completion. Counting it as the first of two
+          // stationary samples saves a duplicate read; one fresh sample still
+          // has to follow it at the same 50 ms spacing.
+          if (
+            arrivalSamples >= 2 &&
+            !jointTarget &&
+            postSync?.pose &&
+            distance(postSync.pose.positionMm, pose.positionMm) <= 0.5 &&
+            quaternionDistance(postSync.pose.orientation, pose.orientation) <=
+              0.01
+          ) {
+            count = 1;
+            arrivedAt = Date.now();
+            previous = postSync.pose;
+            previousId = 'post-sync-state';
+          }
+          if (count > 0 && count < arrivalSamples)
+            await new Promise((resolve) => setTimeout(resolve, 50));
           while (Date.now() < deadline) {
             assertContinuity();
             const sample = jointTarget

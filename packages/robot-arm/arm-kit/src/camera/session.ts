@@ -13,7 +13,10 @@ import {
   type VisionBinding,
   type VisionSnapshot,
 } from '../contracts.js';
-import { detectCalibrationMarkers } from './calibration-markers.js';
+import {
+  detectCalibrationMarkers,
+  detectCalibrationMarkersInSource,
+} from './calibration-markers.js';
 import { CameraStreamManager } from './camera-stream-manager.js';
 import {
   DEFAULT_STARTUP_TIMEOUT_MS,
@@ -322,9 +325,18 @@ export class CameraSession implements CalibrationVision {
     return (await this.stream.getFrame({ fresh: true, timeoutMs: 5000 })).jpeg;
   }
 
+  withMarkerImaging<T>(capture: () => Promise<T>): Promise<T> {
+    return this.imaging?.withMarkerImaging(capture) ?? capture();
+  }
+
   /** Entry point for capture workflows that need a fresh exposure precheck. */
   async prepareCaptureExposure(): Promise<void> {
     await this.imaging?.beforeCapture();
+  }
+  async withReducedVisibilityExposure<T>(
+    capture: (exposure: { previous: number; reduced: number }) => Promise<T>,
+  ): Promise<T | undefined> {
+    return this.imaging?.withReducedVisibilityExposure(capture);
   }
   async binding(options: CalibrationVisionOptions): Promise<VisionBinding> {
     if (options.cameraId !== this.camera.id)
@@ -439,9 +451,20 @@ export class CameraSession implements CalibrationVision {
   async correctedFrame(
     correction: CameraCorrection,
     options: { width: number; height: number },
+    source?: Buffer,
   ) {
     validateCameraCorrection(correction);
-    const jpeg = await this.rawFrame();
+    const jpeg = source ?? (await this.rawFrame());
+    this.checkSourceSize(jpeg, correction);
+    return this.transformer.transform(jpeg, {
+      points: correction.points,
+      rotation: correction.rotation,
+      targetWidth: options.width,
+      targetHeight: options.height,
+    });
+  }
+
+  private checkSourceSize(jpeg: Buffer, correction: CameraCorrection) {
     const size = jpegSize(jpeg);
     if (
       size.width !== correction.sourceWidth ||
@@ -451,12 +474,6 @@ export class CameraSession implements CalibrationVision {
         'VISION_BINDING_CHANGED',
         'Camera image dimensions changed; repeat correction',
       );
-    return this.transformer.transform(jpeg, {
-      points: correction.points,
-      rotation: correction.rotation,
-      targetWidth: options.width,
-      targetHeight: options.height,
-    });
   }
   /** Older corrections may only store the quad and its rotation. */
   getRectifiedPreviewTarget(): PerspectiveTarget | undefined {
@@ -538,6 +555,27 @@ export class CameraSession implements CalibrationVision {
     };
   }
   detectMarkers: CalibrationVision['detectMarkers'] = detectCalibrationMarkers;
+
+  async detectMarkersInSource(
+    binding: VisionBinding,
+    layout: CalibrationPageLayout,
+  ) {
+    const correction = this.getCorrection();
+    const jpeg = await this.rawFrame();
+    if (!correction || !this.isBindingCurrent(binding))
+      throw new RobotArmError(
+        'VISION_BINDING_CHANGED',
+        'Camera correction changed during marker detection',
+        409,
+      );
+    this.checkSourceSize(jpeg, correction);
+    return detectCalibrationMarkersInSource(jpeg, layout, {
+      points: correction.points,
+      rotation: correction.rotation,
+      targetWidth: binding.width,
+      targetHeight: binding.height,
+    });
+  }
 
   async calibrateImaging(): Promise<CameraImagingStatus> {
     if (!this.imaging)
@@ -731,6 +769,7 @@ export class CameraSessionManager {
       );
       await session.load();
       imaging.registerScreen(camera.id, () => session.getCorrection());
+      await imaging.reopenAfterRestart();
       this.imaging.set(id, imaging);
       return session;
     } catch (error) {

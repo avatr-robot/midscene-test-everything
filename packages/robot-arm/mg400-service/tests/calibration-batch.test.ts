@@ -116,6 +116,7 @@ async function setup() {
     entries,
     screens: () => f.store.list().screenTargets!,
     ensureHost: async (id: string) => entries.get(id).host,
+    calibrateCameraImaging: rstest.fn(),
   } as unknown as PlaygroundDevices;
   const batch = new CalibrationBatch(devices);
   rstest.spyOn(f.runtime, 'parkScreenGroup').mockImplementation(async () => {
@@ -246,6 +247,45 @@ it('rejects an unconfirmed tool payload before creating a batch or starting samp
   }
 });
 
+it('prepares the last screen mapping and camera imaging before sampling any screen', async () => {
+  const f = await setup();
+  const first = f.entries.get('one').host;
+  const second = f.entries.get('two').host;
+  let mapped = false;
+  let imaging = 'ready';
+  first.service.setup = () => ({
+    prepared: true,
+    phoneConnected: true,
+    mapping: {},
+    imaging: { state: imaging },
+  });
+  second.service.setup = () => ({
+    ...first.service.setup(),
+    mapping: mapped ? {} : undefined,
+  });
+  second.alignForBatch.mockImplementation(async () => {
+    mapped = true;
+    imaging = 'released';
+  });
+  rstest
+    .mocked(f.devices.calibrateCameraImaging)
+    .mockImplementation(async () => {
+      expect(mapped).toBe(true);
+      expect(f.starts).toEqual([]);
+      imaging = 'ready';
+      return { state: 'ready' };
+    });
+  await f.start();
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
+  );
+  f.complete('one');
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[1].status).toBe('awaiting-acceptance'),
+  );
+  expect(f.devices.calibrateCameraImaging).toHaveBeenCalledTimes(1);
+});
+
 it('holds the shared queue while waiting for acceptance and retains completed screen results', async () => {
   const f = await setup();
   await f.start();
@@ -253,6 +293,7 @@ it('holds the shared queue while waiting for acceptance and retains completed sc
     expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
   );
   expect(f.starts).toEqual(['one']);
+  expect(f.devices.calibrateCameraImaging).not.toHaveBeenCalled();
   let otherRan = false;
   const other = f.queue.enqueue('other-device', async () => {
     otherRan = true;
@@ -306,7 +347,7 @@ it('rejects stale commands, retries only the failed screen and stops its current
   expect(f.stops).toContain('two');
 });
 
-it('continues boundary review on the same samples and screen before batch acceptance', async () => {
+it('continues boundary review on the same samples when manual acceptance is selected', async () => {
   const f = await setup();
   const service = f.entries.get('one').host.service;
   service.command.mockImplementationOnce(async () => {
@@ -315,7 +356,7 @@ it('continues boundary review on the same samples and screen before batch accept
       stage: 'boundary-review',
     });
   });
-  await f.start('automatic');
+  await f.start('manual');
   await rstest.waitFor(() =>
     expect(f.batch.read()?.items[0].status).toBe('awaiting-boundary-review'),
   );
@@ -368,13 +409,33 @@ it('falls back to operator acceptance when automatic evidence fails and preserve
     expect(f.batch.read()?.items[0].status).toBe('completed'),
   );
 });
-it('runs a fast batch with automatic acceptance and parks after both screens', async () => {
+it('continues a fast batch through quality warnings and parks after both screens', async () => {
   const f = await setup();
+  const warnings = [{ label: 'Grid RMS', percent: 2.56, targetPercent: 1.5 }];
+  const first = f.entries.get('one').host.service;
+  first.command.mockImplementationOnce(async () => {
+    f.sessions.set('one', {
+      ...f.sessions.get('one')!,
+      stage: 'boundary-review',
+      explorationQuality: {
+        gridRmsMm: 1.73,
+        holdoutMaxMm: 1.72,
+        coverage: 0.667,
+        warnings,
+      },
+    });
+  });
   for (const id of ['one', 'two']) {
     f.entries
       .get(id)
       .host.service.acceptAutomatically.mockImplementation(async () => {
         expect(f.runtime.parkScreenGroup).not.toHaveBeenCalled();
+        if (id === 'one')
+          expect(first.command).toHaveBeenCalledWith(
+            f.sessions.get(id)!.id,
+            'verify-boundary',
+            true,
+          );
         f.complete(id);
         return { accepted: true, reasons: [] };
       });
@@ -388,6 +449,7 @@ it('runs a fast batch with automatic acceptance and parks after both screens', a
     samplingMode: 'slide',
   });
   await rstest.waitFor(() => expect(f.batch.read()?.status).toBe('completed'));
+  expect(f.batch.read()?.items[0].qualityWarnings).toEqual(warnings);
   expect(f.batch.read()?.automaticSharedParking).toBeUndefined();
   expect(f.batch.read()?.sharedSafePosition).toEqual(
     f.calibration.observationPose,

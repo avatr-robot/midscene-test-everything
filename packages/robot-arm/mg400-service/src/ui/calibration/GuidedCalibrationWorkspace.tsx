@@ -20,6 +20,7 @@ import {
   App,
   Button,
   ConfigProvider,
+  Dropdown,
   Modal,
   Select,
   Space,
@@ -220,7 +221,10 @@ function GuidedContent({
   const [markerSession, setMarkerSession] =
     useState<MarkerCalibrationCreateResult>();
   const [review, setReview] = useState<
-    MarkerCalibrationDetectionResponse & { token: string }
+    MarkerCalibrationDetectionResponse & {
+      token: string;
+      mappingErrors?: Record<string, string>;
+    }
   >();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewing, setReviewing] = useState<{
@@ -229,9 +233,13 @@ function GuidedContent({
   }>();
   const [applying, setApplying] = useState(false);
   const [batch, setBatch] = useState<CalibrationBatchState | null>();
-  const batchActive = Boolean(
+  const batchRunning = Boolean(
     batch && ['running', 'waiting', 'stopping'].includes(batch.status),
   );
+  const batchActive =
+    batchRunning ||
+    batch?.sharedParkingDebug?.status === 'running' ||
+    batch?.sharedParkingDebug?.status === 'stopping';
   const [single, setSingle] = useState<SingleStatus & { screenId: string }>();
   const lease = single?.screenId === selectedId ? single : undefined;
   const singleActive =
@@ -504,16 +512,18 @@ function GuidedContent({
         (completed &&
           openingScreen &&
           initialStep !== 1 &&
+          next.correction &&
           next.installationTaught &&
           !reviewInstallationOnOpen)
       )
         setStep(3);
       else if (
         currentStep.current === 3 &&
-        (!next.installationTaught ||
+        (!next.correction ||
+          !next.installationTaught ||
           (!completed && next.mappingReady === false))
       ) {
-        if (next.mappingReady === false) {
+        if (!next.correction || next.mappingReady === false) {
           if (next.correction && next.perspectiveValidity?.state !== 'invalid')
             resumeCalibration.current = screenId;
           setStep(1);
@@ -744,7 +754,7 @@ function GuidedContent({
     () => ({ id: cameraId, deviceId: cameraId }),
     [cameraId],
   );
-  const activeId = batchActive && current ? current.deviceId : selectedId;
+  const activeId = batchRunning && current ? current.deviceId : selectedId;
   useEffect(() => onScreenChange?.(activeId), [activeId, onScreenChange]);
   const activeScreen = screens.find((screen) => screen.id === activeId);
   const activeConfig = config?.deviceId === activeId ? config : undefined;
@@ -766,11 +776,9 @@ function GuidedContent({
     applying,
   )
     ? knownScreens.flatMap((entry) => {
-        const fresh =
-          config?.deviceId === entry.id ? config.correction : undefined;
         const quad =
-          entry.id === activeId
-            ? (fresh ?? entry.correction)
+          activeConfig && entry.id === activeId
+            ? activeConfig.correction
             : entry.correction;
         if (
           !quad ||
@@ -815,6 +823,12 @@ function GuidedContent({
     step === 3 && batchActive,
     'batch',
   );
+  const previewSession = batchRunning ? progress.session : controller.session;
+  const hideReferenceMarker =
+    step === 3 &&
+    previewSession?.stage === 'collecting' &&
+    (previewSession.automaticPhase === 'height' ||
+      previewSession.automaticPhase === 'grid');
   const cancelSingle = async () => {
     autoOpened.current = selectedId;
     const opening = startingSingle.current;
@@ -860,7 +874,7 @@ function GuidedContent({
     addingScreen.current?.abort();
     setClosing(true);
     try {
-      if (batchActive && batch)
+      if (batch && batch.cameraId === batchClient.cameraId)
         await batchClient.calibrationBatchCommand(batch.id, {
           revision: batch.revision,
           action: 'stop',
@@ -958,9 +972,21 @@ function GuidedContent({
         );
         if (currentBase.current !== base) return;
         const failures = Object.values(applied.mappingErrors);
-        setMappingError(failures.join('\n') || undefined);
-        if (failures.length) setError(failures.join('\n'));
-        if (failures.length) throw new Error(failures.join('\n'));
+        setMappingError(
+          failures.map(calibrationErrorText).join('\n') || undefined,
+        );
+        if (failures.length) {
+          if (hasMultipleCalibrationTargets(session)) {
+            setReview({
+              ...result,
+              token,
+              mappingErrors: applied.mappingErrors,
+            });
+            setReviewOpen(true);
+            return;
+          }
+          throw new Error(failures.join('\n'));
+        }
         mappingApplied = true;
         await waitForImagingCalibration();
         if (currentBase.current !== base) return;
@@ -1186,8 +1212,9 @@ function GuidedContent({
     phoneFullscreen,
     selectedId,
   ]);
+  const hasCorrection = Boolean(config?.correction);
   const startSingle = useCallback(async () => {
-    if (startingSingle.current) return;
+    if (startingSingle.current || !hasCorrection) return;
     if (!config?.installationTaught) {
       setStep(2);
       return;
@@ -1207,7 +1234,7 @@ function GuidedContent({
       startingSingle.current = undefined;
     }
     await refresh();
-  }, [base, config?.installationTaught, refresh, selectedId]);
+  }, [base, config?.installationTaught, hasCorrection, refresh, selectedId]);
   const soleScreen =
     savedScreens.length === 1 && savedScreens[0].id === selectedId;
   useEffect(() => {
@@ -1217,6 +1244,7 @@ function GuidedContent({
     }
     if (
       !soleScreen ||
+      !hasCorrection ||
       !controller.setup.mapping ||
       checkedScreen !== selectedId ||
       batchActive ||
@@ -1234,6 +1262,7 @@ function GuidedContent({
   }, [
     step,
     soleScreen,
+    hasCorrection,
     controller.setup.mapping,
     checkedScreen,
     selectedId,
@@ -1297,12 +1326,17 @@ function GuidedContent({
     screenCount: screenOptions.length,
     soleScreen,
   });
-  const batchAction = savedScreens.length > 1 && (
+  const multipleScreens = savedScreens.length > 1;
+  const batchAction = multipleScreens && (
     <Button
+      type="primary"
       disabled={
+        closing ||
         !config?.ready ||
+        !hasCorrection ||
         !config.installationTaught ||
         outlineBlocked ||
+        controller.busy ||
         singleBusy
       }
       onClick={() => batchPanel.current?.open()}
@@ -1310,6 +1344,17 @@ function GuidedContent({
       {t('Calibrate multiple screens')}
     </Button>
   );
+  const singleActionDisabled =
+    !config?.ready ||
+    !hasCorrection ||
+    !config.installationTaught ||
+    singleQueued;
+  const singleActionLabel = t('Calibrate {0}', [selected?.name ?? selectedId]);
+  const openSingleCalibration = () => {
+    if (outlineBlocked || !controller.setup.mapping)
+      void checkCameraBeforeCalibration();
+    else void startSingle().catch((cause) => setError(String(cause)));
+  };
 
   return (
     <main className="calibration-page is-embedded guided-calibration">
@@ -1355,7 +1400,9 @@ function GuidedContent({
         </div>
       </header>
       <div className="calibration-shell-body">
-        <div className="guided-calibration-layout">
+        <div
+          className={`guided-calibration-layout${step === 3 ? ' is-screen-calibration' : ''}`}
+        >
           <div
             className="guided-calibration-flow"
             ref={flow}
@@ -1440,7 +1487,9 @@ function GuidedContent({
                   cameraId={cameraId}
                   screens={states}
                   disabled={
+                    closing ||
                     !config?.ready ||
+                    !hasCorrection ||
                     !config.installationTaught ||
                     outlineBlocked ||
                     controller.busy ||
@@ -1728,8 +1777,11 @@ function GuidedContent({
                         message={t('Waiting for the Controller queue')}
                       />
                     )}
-                    {batchActive && current && (
-                      <ActiveBatchScreen controller={progress} />
+                    {batchRunning && current && (
+                      <ActiveBatchScreen
+                        controller={progress}
+                        advisory={batch?.acceptance === 'automatic'}
+                      />
                     )}
                     {!batchActive &&
                       lease?.phase === 'completed' &&
@@ -1746,6 +1798,7 @@ function GuidedContent({
                         cameraCheckRequired={outlineBlocked}
                         prepareFromTeaching
                         screenName={selected?.name}
+                        collapseSamplingMode={multipleScreens}
                         readyToCapture={config.ready && !outlineBlocked}
                         readyToStart={config.ready && !outlineBlocked}
                         onActivated={refresh}
@@ -1767,26 +1820,38 @@ function GuidedContent({
                         >
                           {t('Previous Step')}
                         </Button>
-                        <Button
-                          type="primary"
-                          loading={singleQueued}
-                          disabled={
-                            !config.ready ||
-                            !config.installationTaught ||
-                            singleQueued
-                          }
-                          onClick={() => {
-                            if (outlineBlocked || !controller.setup.mapping)
-                              void checkCameraBeforeCalibration();
-                            else
-                              void startSingle().catch((cause) =>
-                                setError(String(cause)),
-                              );
-                          }}
-                        >
-                          {t('Calibrate {0}', [selected?.name ?? selectedId])}
-                        </Button>
-                        {batchAction}
+                        {multipleScreens ? (
+                          <>
+                            {batchAction}
+                            <Dropdown
+                              trigger={['click']}
+                              disabled={singleQueued}
+                              menu={{
+                                items: [
+                                  {
+                                    key: 'single',
+                                    label: singleActionLabel,
+                                    disabled: singleActionDisabled,
+                                    onClick: openSingleCalibration,
+                                  },
+                                ],
+                              }}
+                            >
+                              <Button loading={singleQueued}>
+                                {t('More options')}
+                              </Button>
+                            </Dropdown>
+                          </>
+                        ) : (
+                          <Button
+                            type="primary"
+                            loading={singleQueued}
+                            disabled={singleActionDisabled}
+                            onClick={openSingleCalibration}
+                          >
+                            {singleActionLabel}
+                          </Button>
+                        )}
                         {savedScreens.length > 0 &&
                           savedScreens.every((screen) =>
                             states.some(
@@ -1841,7 +1906,16 @@ function GuidedContent({
                             data-testid="calibration-live-camera"
                             alt={camera.name}
                           />
-                          <ScreenOutlines outlines={asideOutlines} />
+                          <ScreenOutlines
+                            outlines={
+                              hideReferenceMarker
+                                ? asideOutlines.map((outline) => ({
+                                    ...outline,
+                                    previewPositions: undefined,
+                                  }))
+                                : asideOutlines
+                            }
+                          />
                         </div>
                         {step === 1 && (
                           <Typography.Text type="secondary">
@@ -1864,7 +1938,11 @@ function GuidedContent({
                   },
                   {
                     key: 'illustration',
-                    label: t('Setup illustration'),
+                    label: t(
+                      step === 3
+                        ? 'Reference position illustration'
+                        : 'Setup illustration',
+                    ),
                     forceRender: true,
                     children:
                       step === 2 ? (
@@ -1982,6 +2060,7 @@ function GuidedContent({
         open={reviewOpen && hasMultipleCalibrationTargets(review?.session)}
         applying={applying}
         error={error}
+        mappingErrors={review?.mappingErrors}
         retryingTargetId={retryId}
         onClose={() => setReviewOpen(false)}
         onReview={(target, frame) => setReviewing({ target, frame })}
@@ -2019,9 +2098,13 @@ function GuidedContent({
             .then(async (result) => {
               if (currentBase.current !== base) return;
               const failures = Object.values(result.mappingErrors);
-              setMappingError(failures.join('\n') || undefined);
-              if (failures.length) setError(failures.join('\n'));
-              if (failures.length) throw new Error(failures.join('\n'));
+              setMappingError(
+                failures.map(calibrationErrorText).join('\n') || undefined,
+              );
+              if (failures.length) {
+                setReview({ ...review, mappingErrors: result.mappingErrors });
+                return;
+              }
               await waitForImagingCalibration();
               if (currentBase.current !== base) return;
               pendingAddedScreen.current = undefined;
@@ -2108,15 +2191,20 @@ function WizardFooter({
 }
 function ActiveBatchScreen({
   controller,
+  advisory,
 }: {
   controller: ReturnType<typeof useAssistedCalibration>;
+  advisory: boolean;
 }) {
   const session = controller.session;
   return (
     <div className="guided-batch-progress">
       <div>
         {session && <ExplorationProgress session={session} />}
-        <ExplorationQualitySummary quality={session?.explorationQuality} />
+        <ExplorationQualitySummary
+          quality={session?.explorationQuality}
+          advisory={advisory}
+        />
         {session &&
           ['return-ready', 'positioning-safe'].includes(session.stage) && (
             <Typography.Paragraph>

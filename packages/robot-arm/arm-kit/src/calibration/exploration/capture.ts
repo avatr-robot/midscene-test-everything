@@ -24,10 +24,12 @@ import {
   StationaryPhoneObservation,
 } from './phone-observation.js';
 import { runAutoExploration } from './sampler.js';
-import { explorationTargets, mappedExplorationTargets } from './targets.js';
+import { mappedExplorationTargets } from './targets.js';
 import type {
+  ApplicationContext,
   AutoExplorationHost,
   ScreenCalibSessionSummary,
+  SlideRecovery,
   CalibrationSession as UpstreamSession,
 } from './types.js';
 
@@ -39,6 +41,7 @@ const fail = (message: string): never => {
 export class AutomaticCapture {
   readonly points: CapturedCalibrationPoint[] = [];
   readonly localPoints: CapturedCalibrationPoint[] = [];
+  readonly slideRecoveries: SlideRecovery[] = [];
   get allPoints() {
     return [...this.localPoints, ...this.points];
   }
@@ -56,14 +59,17 @@ export class AutomaticCapture {
       : this.recentObservations;
   }
   private captured = false;
+  /** Set when the page advertised streaming but stopped delivering frames. */
+  private streamingUnsupported = false;
   private latest?: CalibrationPageUpdate;
   private lastSeen = 0;
   private pageId?: string;
   private invalid?: string;
   private contactSeen = false;
   private challenge?: string;
-  private phase: 'local' | 'grid' = 'local';
-  private runTargets?: ReturnType<typeof explorationTargets>;
+  private phase: 'local' | 'height' | 'grid' = 'local';
+  private heightTotal = 0;
+  private gridPoints: WebPoint[] = [];
   private index = 0;
   private operation?: CalibrationPointProgress['operation'];
   private heightSearch?: CalibrationPointProgress['heightSearch'];
@@ -85,19 +91,12 @@ export class AutomaticCapture {
             total:
               this.phase === 'local'
                 ? 3
-                : (
-                    this.runTargets ??
-                    explorationTargets(this.layout, this.mode !== 'standard')
-                  ).length,
+                : this.phase === 'height'
+                  ? this.heightTotal
+                  : this.gridPoints.length,
             target: this.target,
             operation: this.operation,
-            targets:
-              this.phase === 'grid'
-                ? (
-                    this.runTargets ??
-                    explorationTargets(this.layout, this.mode !== 'standard')
-                  ).map((target) => target.point)
-                : undefined,
+            targets: this.phase === 'grid' ? this.gridPoints : undefined,
             measuredPoints:
               this.phase === 'grid' && this.mode === 'standard'
                 ? this.points.map((sample) => sample.point)
@@ -121,6 +120,7 @@ export class AutomaticCapture {
   }
   resetStability() {
     this.invalid = 'The phone page changed during automatic collection';
+    this.observation?.notify();
   }
   receive(update: CalibrationPageUpdate) {
     if (this.pageId && this.pageId !== update.pageId) this.resetStability();
@@ -178,13 +178,17 @@ export class AutomaticCapture {
       tool: ToolProfile;
       webToImage: number[];
       minimumTravelTipZMm?: number;
+      directTravel?: ApplicationContext['directTravel'];
+      onTiming?(event: string, elapsedMs: number): void;
     },
   ) {
     this.reference = structuredClone(home);
     this.points.length = 0;
     this.localPoints.length = 0;
+    this.slideRecoveries.length = 0;
     this.invalid = undefined;
     this.upstreamResult = undefined;
+    this.streamingUnsupported = false;
     this.recentObservations.length = 0;
     this.recentCoarseObservations.length = 0;
     let requestedTipZMm = contactPoint(home, this.offset).z;
@@ -195,7 +199,10 @@ export class AutomaticCapture {
       point: { x: this.layout.width / 2, y: this.layout.height / 2 },
     };
     this.phase = 'local';
+    this.heightTotal = 0;
+    this.gridPoints = [];
     this.index = 0;
+    this.operation = undefined;
     this.changed();
     const first = performance.now();
     while (!this.latest) {
@@ -243,11 +250,6 @@ export class AutomaticCapture {
       (p) => project(config.webToImage, p),
       { width: config.screen.pixelWidth!, height: config.screen.pixelHeight! },
     );
-    this.runTargets = explorationTargets(
-      this.layout,
-      this.mode !== 'standard',
-      mapped.inset,
-    );
     const targets = mapped.targets.map((target, index) => ({
       id: String(index),
       css: target.point,
@@ -284,7 +286,9 @@ export class AutomaticCapture {
             before: pose,
             after: pose,
             positionConvention:
-              sample.method === 'stepped' ? 'contact-interval' : 'predicted',
+              sample.method === 'stepped' || sample.heightIntervalMm
+                ? 'contact-interval'
+                : 'predicted',
             heightIntervalMm: sample.heightIntervalMm,
           },
         };
@@ -330,10 +334,19 @@ export class AutomaticCapture {
         if (progress.phase === 'grid') {
           this.phase = 'grid';
           this.index = Math.max(0, progress.index - 1);
-          const ordered = this.runTargets!;
-          this.target = { id: randomUUID(), point: ordered[this.index].point };
+          if (progress.gridTargets)
+            this.gridPoints = progress.gridTargets.map(({ css }) => css);
+          if (progress.operation !== 'recover')
+            this.target = {
+              id: randomUUID(),
+              point: this.gridPoints[this.index],
+            };
         } else if (progress.phase === 'probe') {
           this.index = this.localPoints.length;
+        } else if (progress.phase === 'height') {
+          this.phase = 'height';
+          this.index = progress.index - 1;
+          this.heightTotal = progress.total;
         }
         this.contactSeen = Boolean(progress.touching);
         if (progress.operation) this.operation = progress.operation;
@@ -356,7 +369,7 @@ export class AutomaticCapture {
           settleMs,
           allowBriefContactGaps,
         ) => {
-          if (purpose !== 'preflight')
+          if (purpose !== 'preflight' && this.operation !== 'recover')
             this.operation =
               purpose === 'search-limit' || purpose === 'coarse-search'
                 ? 'search'
@@ -372,6 +385,8 @@ export class AutomaticCapture {
             this.lastSeen,
             measuredTipZMm,
             motionTiming,
+            this.latest?.streamStepFeedback === true &&
+              !this.streamingUnsupported,
           );
           motionTiming = undefined;
           this.observation = observation;
@@ -389,6 +404,16 @@ export class AutomaticCapture {
               pointerCount: point ? 1 : 0,
               screen: point ? project(config.webToImage, point) : null,
             };
+          } catch (error) {
+            // The page claimed streamed results but did not produce them. Retry
+            // this run through request/response instead of failing every step.
+            if (
+              this.latest?.streamStepFeedback === true &&
+              error instanceof RobotArmError &&
+              error.code === 'PHONE_STEP_TIMEOUT'
+            )
+              this.streamingUnsupported = true;
+            throw error;
           } finally {
             const evidence = observation.diagnostics();
             this.recentObservations.push(evidence);
@@ -412,12 +437,15 @@ export class AutomaticCapture {
         screen: config.screen,
         tool: config.tool,
         minimumTravelTipZMm: config.minimumTravelTipZMm,
+        directTravel: config.directTravel,
       },
       {
         startPose: home,
         mode: this.mode === 'standard' ? 'standard' : 'fast-horizontal',
         collection: this.mode === 'slide' ? 'slide' : 'tap',
         horizontalConfirmed: this.mode !== 'standard',
+        onTiming: config.onTiming,
+        onSlideRecovery: (recovery) => this.slideRecoveries.push(recovery),
       },
     );
     this.captured = true;

@@ -1,8 +1,38 @@
 import { expect, it } from '@rstest/core';
+import { auditTargets } from '../src/calibration/exploration/sampler.js';
 import {
   explorationTargets,
   mappedExplorationTargets,
 } from '../src/calibration/exploration/targets.js';
+
+const corner = (id: string, x: number, y: number) => ({
+  id,
+  role: 'fit' as const,
+  css: { x, y },
+  screen: { x, y },
+});
+
+it('picks audit corners that keep the measured plane non-collinear', () => {
+  const pair = auditTargets([
+    corner('a', 0, 0),
+    corner('b', 100, 0),
+    corner('c', 100, 100),
+    corner('d', 0, 100),
+  ]);
+  expect(pair).toHaveLength(2);
+  // A centred first touch makes a diagonal pair collinear; the audit must
+  // choose corners that leave a real triangle.
+  expect(new Set(pair.map((target) => target.id))).not.toEqual(
+    new Set(['a', 'c']),
+  );
+  const [left, right] = pair.map((target) => [
+    (target.css.x - 50) / 100,
+    (target.css.y - 50) / 100,
+  ]);
+  expect(Math.abs(left[0] * right[1] - left[1] * right[0])).toBeGreaterThan(
+    0.2,
+  );
+});
 
 it('keeps dev standard holdouts out of the six fitting targets', () => {
   const targets = explorationTargets({ width: 400, height: 800 });

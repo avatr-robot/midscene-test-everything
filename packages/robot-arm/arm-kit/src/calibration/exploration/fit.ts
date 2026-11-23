@@ -11,6 +11,7 @@ import {
   measuredScreenPixel,
   screenResidualMm,
 } from './geometry.js';
+import { surfaceDepthMm } from './plane.js';
 import { explorationQualityWarnings } from './quality.js';
 import type { runAutoExploration } from './sampler.js';
 export function fitExploration(
@@ -46,6 +47,7 @@ export function fitExploration(
     robot: { x: point.contact.x, y: point.contact.y, z: point.contact.z },
     screen: point.screen,
     weight: point.weight,
+    zSource: point.zSource,
   }));
   const result = autoCalibrationGeometry({
     startPose: start,
@@ -80,6 +82,28 @@ export function fitExploration(
         measuredHeights.map((point) => point.contact),
       )
     : undefined;
+  // Predicted heights never reach the plane fit; measure how far they sit from
+  // the measured plane (after local compensation) so a wrong model is visible.
+  const predictedPoints = [...probes, ...grid].filter(
+    (point) => point.zSource === 'predicted',
+  );
+  const predictedHeightResidualMaxMm = predictedPoints.length
+    ? Math.max(
+        ...predictedPoints.map((point) =>
+          Math.abs(surfaceDepthMm(result.candidate, point.contact)),
+        ),
+      )
+    : undefined;
+  // Spread of the heights that were actually measured: the only direct hint on
+  // tilt that fast-horizontal still has, since most of its heights are model.
+  const measuredPoints = [...probes, ...grid].filter(
+    (point) => point.zSource === 'measured',
+  );
+  const measuredHeightRangeMm =
+    measuredPoints.length > 1
+      ? Math.max(...measuredPoints.map((point) => point.contact.z)) -
+        Math.min(...measuredPoints.map((point) => point.contact.z))
+      : undefined;
 
   // Validation targets were excluded from both plane and XY fitting above.
   const gridRmsPx = result.gridRmsPx;
@@ -104,7 +128,9 @@ export function fitExploration(
       409,
     );
   const evidence = {
-    planeSource: fast ? 'assumed-horizontal' : 'measured',
+    samplingMode: fast ? ('fast' as const) : ('standard' as const),
+    planeSource:
+      fast && result.planeSampleCount < 3 ? 'assumed-horizontal' : 'measured',
     planeRmseMm: result.quality.rmseMm,
     gridRmsPx,
     gridRmsMm: result.gridRmsMm,
@@ -115,10 +141,19 @@ export function fitExploration(
     axisSkewRatio: result.axisSkewRatio,
     coverage: result.coverage,
     surfaceMaxMm: result.surfaceMaxMm,
+    measuredPlaneSamples: result.planeSampleCount,
+    predictedSamples: result.predictedSampleCount,
+    predictedFraction:
+      samples.length > 0 ? result.predictedSampleCount / samples.length : 0,
+    ...(predictedHeightResidualMaxMm !== undefined
+      ? { predictedHeightResidualMaxMm }
+      : {}),
+    ...(measuredHeightRangeMm !== undefined ? { measuredHeightRangeMm } : {}),
     samples: [...probes, ...grid].map((point) => ({
       screen: point.screen,
       planeMm: { x: point.contact.x, y: point.contact.y },
       zMm: point.contact.z,
+      zSource: point.zSource,
     })),
   };
   return {

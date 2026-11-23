@@ -1823,8 +1823,8 @@ export function MarkerCalibrationDialog({
             type="info"
             message={t(
               handoffPending
-                ? 'Adjusting camera parameters'
-                : 'Detecting markers',
+                ? 'Optimizing camera image quality'
+                : 'Optimizing camera image and detecting markers',
             )}
           />
         ) : null}

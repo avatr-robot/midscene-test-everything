@@ -85,6 +85,7 @@ async function controller(
 ) {
   const sockets = new Set<Socket>();
   const commands: string[] = [];
+  const batchWrites: string[] = [];
   const httpRequests: { method: string; body?: unknown }[] = [];
   let actual = [100, 0, 100, 0];
   let target = [...actual];
@@ -113,7 +114,11 @@ async function controller(
       socket.on('close', () => sockets.delete(socket));
       let buffer = '';
       socket.on('data', (chunk) => {
-        buffer += chunk.toString();
+        const chunkText = chunk.toString();
+        // Three commands in one write means the adapter batched its state query.
+        const batched = (chunkText.match(/\)/g)?.length ?? 0) > 1;
+        if (!motion && batched) batchWrites.push(chunkText);
+        buffer += chunkText;
         let end = buffer.indexOf(')');
         while (end >= 0) {
           const command = buffer.slice(0, end + 1);
@@ -408,6 +413,7 @@ async function controller(
   return {
     adapter,
     commands,
+    batchWrites,
     connections,
     httpRequests,
     dropConnections() {
@@ -1563,6 +1569,25 @@ describe('MG400 bounded state reads', () => {
     } finally {
       await uncached.cleanup();
       await cached.cleanup();
+    }
+  });
+  it('pipes state queries only when the option is enabled', async () => {
+    const plain = await controller();
+    const piped = await controller({
+      adapter: { pipelineStateQueries: true },
+    });
+    try {
+      await plain.adapter.connect();
+      await piped.adapter.connect();
+      // A complete batch is one write; the default path sends three commands.
+      expect(plain.batchWrites).toHaveLength(0);
+      expect(piped.batchWrites.length).toBeGreaterThan(0);
+      await expect(piped.adapter.getStateFresh()).resolves.toMatchObject({
+        connected: true,
+      });
+    } finally {
+      await plain.cleanup();
+      await piped.cleanup();
     }
   });
   it('stops polling an idle bench and restarts on the next read', async () => {

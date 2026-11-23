@@ -8,6 +8,8 @@ import type {
   MotionSpeed,
   ProfileBinding,
   ScreenMotionSettings,
+  ScreenVisibilityEvidence,
+  ScreenVisibilityProbePattern,
   Vector3,
   VisionBinding,
 } from './contracts.js';
@@ -21,7 +23,8 @@ export const CALIBRATION_PHONE_POLICY = {
   visibilityPattern: {
     columns: 8,
     rows: 12,
-    colors: ['#40e55b', '#e540d9'],
+    colors: ['#9ec5ff', '#f6f8fb'],
+    contrastColors: ['#245ba3', '#963f24'],
   },
   heartbeatMs: 750,
   stepAcknowledgementMs: 5000,
@@ -116,6 +119,8 @@ export const CALIBRATION_POINT_POLICY = {
   maximumHeartbeatGapMs: 350,
   maximumQueryMs: 100,
   maximumConfirmationMs: 500,
+  /** Streamed step cadence while a host step is active; 25 Hz leaves margin over the 100 ms confirmation spacing. */
+  streamStepFeedbackIntervalMs: 40,
 } as const;
 export function calibrationCaptureTargets(
   layout: Pick<CalibrationPageLayout, 'width' | 'height'>,
@@ -240,6 +245,13 @@ export interface CalibrationPageUpdate {
   /** Painted height in CSS pixels when iOS sizes the first row around system overlays. */
   visibilityFirstRowHeight?: number;
   touchDiagnosticsVersion?: 2;
+  /**
+   * The page reports an active step continuously at `CALIBRATION_POINT_POLICY.streamStepFeedbackIntervalMs`
+   * instead of only on touch events, paint and the heartbeat. The host can then
+   * confirm a stationary result from two streamed frames instead of issuing two
+   * extra result requests. Absent means the request/response protocol.
+   */
+  streamStepFeedback?: boolean;
   /** Bounded diagnostic history; never used as contact evidence. */
   touchEvents?: PhoneTouchEvent[];
   model?: string;
@@ -279,7 +291,11 @@ export interface CalibrationPageUpdate {
 export interface CalibrationPageReply {
   /** Briefly identify the phone selected in Playground. */
   selectionHint?: true;
-  visibilityProbe?: { id: string; phase: 0 | 1 };
+  visibilityProbe?: {
+    id: string;
+    phase: 0 | 1;
+    pattern?: ScreenVisibilityProbePattern;
+  };
   /** Same-camera transition from camera-only preview to a paired Device. */
   pairingToken?: string;
   insetMarkers?: boolean;
@@ -306,7 +322,7 @@ export interface CalibrationPageReply {
     | 'completed'
     | 'interrupted';
   capture?: CalibrationPointProgress;
-  automaticPhase?: 'local' | 'grid';
+  automaticPhase?: 'local' | 'height' | 'grid';
   error?: string;
   anchors: WebPoint[];
   target?: { id: string; point: WebPoint };
@@ -442,7 +458,7 @@ export interface AssistedCalibrationState {
   capture?: CalibrationPointProgress;
   layout?: CalibrationPageLayout;
   mapping?: WebCalibrationMapping;
-  automaticPhase?: 'local' | 'grid';
+  automaticPhase?: 'local' | 'height' | 'grid';
   samples: number;
   /** Travel to the reference before probing or after a sampling/fit check. */
   referenceTravel?: 'approach' | 'return';
@@ -521,8 +537,10 @@ export interface AutomaticCaptureHost {
       referenceTravel?: {
         attemptId: string;
         direction: 'approach' | 'return';
-        leg: 'lift' | 'traverse' | 'lower';
+        leg: 'lift' | 'traverse' | 'lower' | 'direct';
       };
+      /** Identifies the first actual translation in a shared parking search. */
+      sharedParkingTravel?: { rank: number; leg: string };
     },
   ): Promise<CartesianPose | undefined>;
 }
@@ -624,6 +642,13 @@ export interface CalibrationBatchState {
   usesSharedSafePosition?: true;
   /** Live while the batch searches for the shared Safe Position automatically. */
   automaticSharedParking?: true;
+  /** Transient result of the Advanced Debugging motion, scoped to this batch. */
+  sharedParkingDebug?: {
+    status: 'running' | 'stopping' | 'stopped' | 'completed' | 'failed';
+    pose?: CartesianPose;
+    visibility?: import('./contracts.js').ScreenVisibilityEvidence;
+    error?: string;
+  };
   sharedSafePosition?: CartesianPose;
   sharedSafePositionVerified?: boolean;
   sharedVisibility?: import('./contracts.js').ScreenVisibilityEvidence;
@@ -631,6 +656,7 @@ export interface CalibrationBatchState {
   acceptance?: 'manual' | 'automatic';
   error?: string;
   visibilityMissingScreens?: string[];
+  sharedParkingFailureVisibility?: ScreenVisibilityEvidence;
   planVersion?: string;
   contextVersion?: string;
   transfer?: CalibrationBatchPlan['transfer'];
@@ -648,6 +674,7 @@ export interface CalibrationBatchState {
       total: number;
     };
     note?: string;
+    qualityWarnings?: CalibrationQualityReading[];
     status:
       | 'pending'
       | 'preparing'
@@ -719,6 +746,8 @@ export interface CalibrationBatchCommand {
     | 'accept'
     | 'record-safe-position'
     | 'confirm-shared-parking'
+    | 'debug-shared-parking'
+    | 'recheck-shared-parking'
     | 'enter-drag'
     | 'exit-drag';
 }

@@ -138,6 +138,48 @@ async function calibrationPattern(warm = false) {
 }
 
 describe('camera imaging', () => {
+  it('adjusts imaging before marker capture without a perspective and restores it on failure', async () => {
+    const controls = new FakeCameraControl();
+    controls.values.focus.mode = 'manual';
+    const original = await controls.read();
+    const frame = (level: number) =>
+      sharp({
+        create: {
+          width: 64,
+          height: 48,
+          channels: 3,
+          background: { r: level, g: level, b: level },
+        },
+      })
+        .jpeg()
+        .toBuffer();
+    const [clipped, balanced] = await Promise.all([frame(255), frame(205)]);
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      {
+        getInfo: () => ({ state: 'running', fps: 30 }),
+        getFrame: async () => ({
+          jpeg: controls.values.exposure.value === -5 ? clipped : balanced,
+        }),
+      } as never,
+      tmpdir(),
+      controls,
+    );
+    try {
+      await expect(
+        imaging.withMarkerImaging(async () => {
+          const { exposure, focus } = await controls.read();
+          expect(exposure).toMatchObject({ value: -6, mode: 'manual' });
+          expect(focus.mode).toBe('auto');
+          throw new Error('Marker capture failed');
+        }),
+      ).rejects.toThrow('Marker capture failed');
+      expect(await controls.read()).toEqual(original);
+    } finally {
+      await imaging.close();
+    }
+  });
+
   it('rejects neutral patches with a clipped colour channel', async () => {
     const strips = Array.from({ length: 7 }, (_, index) => {
       const offset = index * 2;
@@ -960,7 +1002,7 @@ describe('camera imaging', () => {
     }
   }, 30_000);
 
-  it('restores and clears focus and exposure with the same perspective', async () => {
+  it('waits for both saved screens before restoring focus and exposure', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
     const correction: CameraCorrection = {
@@ -974,17 +1016,19 @@ describe('camera imaging', () => {
       sourceHeight: 800,
       rotation: 0,
     };
-    const screenId = 'screen';
-    const fingerprint = createHash('sha256')
-      .update(JSON.stringify([screenId, correction]))
-      .digest('hex');
+    const screenIds = ['screen', 'second-screen'];
     const file = cameraImagingFile(directory, control.deviceId);
     await writeFile(
       file,
       JSON.stringify({
         version: 4,
         cameraId: control.deviceId,
-        rois: [{ screenId, fingerprint }],
+        rois: screenIds.map((screenId) => ({
+          screenId,
+          fingerprint: createHash('sha256')
+            .update(JSON.stringify([screenId, correction]))
+            .digest('hex'),
+        })),
         focus: { value: 45, score: 1 },
         exposure: { value: -8 },
         calibratedAt: new Date().toISOString(),
@@ -1002,7 +1046,13 @@ describe('camera imaging', () => {
     );
     try {
       await imaging.load();
-      imaging.registerScreen(screenId, () => correction);
+      imaging.registerScreen(screenIds[0], () => correction);
+      await imaging.resumeStored();
+      expect(imaging.status().state).toBe('idle');
+      expect(control.setCalls).toHaveLength(0);
+      await expect(readFile(file, 'utf8')).resolves.toContain('second-screen');
+
+      imaging.registerScreen(screenIds[1], () => correction);
       await imaging.resumeStored();
 
       expect(imaging.status()).toMatchObject({
@@ -1527,6 +1577,42 @@ describe('camera imaging', () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it('restores the locked exposure even when a reduced-exposure capture fails', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    control.values.exposure = {
+      ...control.values.exposure,
+      value: -5,
+      mode: 'manual',
+    };
+    const stream = { getInfo: () => ({ fps: 30 }) };
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      stream as never,
+      directory,
+      control,
+    );
+    const controller = imaging as unknown as { applied: boolean };
+    controller.applied = true;
+    try {
+      await expect(
+        imaging.withReducedVisibilityExposure(async (exposure) => {
+          expect(exposure.previous).toBe(-5);
+          expect(exposure.reduced).toBeLessThan(-5);
+          expect(control.values.exposure.value).toBe(exposure.reduced);
+          throw new Error('capture failed');
+        }),
+      ).rejects.toThrow('capture failed');
+      expect(control.values.exposure).toMatchObject({
+        value: -5,
+        mode: 'manual',
+      });
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it('converges calibration exposure from overexposed ROI samples', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));

@@ -13,6 +13,23 @@ const teachingBoundaryZh: Record<string, string> = {
   'Screen calibration results saved': '屏幕标定结果已保存',
   'Finish calibration and return': '完成标定并返回',
   'Shared Safe Position pending': '共用安全位待确认',
+  'Advanced debugging': '高级调试',
+  'Debug shared Safe Position search': '调试自动寻找共用安全位置',
+  'Confirm the motion area is clear. The robot will move.':
+    '机械臂将移动，请确认运动区域畅通。',
+  'Start search': '开始搜索',
+  'Stop search': '停止搜索',
+  'Found shared Safe Position: X {0} mm / Y {1} mm / Z {2} mm':
+    '找到共用安全位置 · X {0} mm / Y {1} mm / Z {2} mm',
+  'Finish the batch screen calibrations before debugging the shared Safe Position.':
+    '请先完成批量屏幕标定，再调试共用安全位。',
+  'Unverified screens in last Safe Position check':
+    '上次安全位检测未确认的屏幕',
+  'Screen visibility passed': '屏幕可见性检测通过',
+  'Screen visibility did not pass': '屏幕可见性检测未通过',
+  'Whole screen': '整屏',
+  'Screen interior': '屏内',
+  'Largest unresponsive region (samples)': '最大连续无响应区（采样点）',
   'Confirm current shared Safe Position': '人工确认当前共用安全位',
   'Confirm the arm is stationary, clear of the camera and all screens, and does not block any screen in the live view.':
     '请确认机械臂已静止，与相机和所有屏幕保持安全距离，且实时画面中没有遮挡任何屏幕。',
@@ -27,6 +44,8 @@ const teachingBoundaryZh: Record<string, string> = {
   'Preparing screen': '正在准备屏幕',
   'Transferring to screen': '正在转场到目标屏幕',
   'Exploring screen': '正在探索屏幕',
+  'The initial touch did not repeat from the calibration reference':
+    '从标定参考位复按时未能重复触发首触',
   'Waiting for stylus placement': '等待摆放触控笔',
   'Waiting for calibration acceptance': '等待标定验收',
   'All screens are fixed horizontally, the tool has elastic compliance, and the camera-near side is the bottom of the original image.':
@@ -45,8 +64,8 @@ const teachingBoundaryZh: Record<string, string> = {
     '尚未确认已保存的工具负载。请在机械臂状态栏同步工具负载后再开始。',
   'Automatic acceptance requires complete contact and plane evidence for the selected sampling mode':
     '自动验收要求接触证据完整，并满足所选采样模式的平面质量要求。',
-  'The shared Safe Position must clear the entire screen group at the confirmed travel height.':
-    '共用安全位必须避开整组屏幕及屏间区域，并满足已确认的通行高度。',
+  'The shared Safe Position must be outside the screen group and meet the minimum parking height.':
+    '共用安全位必须位于整组屏幕范围之外，并达到最低停靠高度。',
   'The route to the shared Safe Position is outside the confirmed corridor.':
     '前往共用安全位的路线超出已确认的通行区域。',
   'Installation teaching and motion settings are required for batch parking.':
@@ -66,14 +85,47 @@ const teachingBoundaryZh: Record<string, string> = {
     '请保持所有已配对的手机标定页在前台全屏显示。',
   'A camera visibility check is required before recording the shared Safe Position.':
     '记录共用安全位前需确认相机能看清各屏。',
-  'The camera view of one or more screens is still blocked.':
-    '相机画面中仍有屏幕被遮挡。',
+  'The camera could not verify every screen. Check the live view for glare or obstructions.':
+    '相机未能确认所有屏幕可见。请检查实时画面中是否有反光或遮挡。',
   'No reachable camera-clear Safe Position was found within the bounded search.':
     '在限定范围内未找到相机视野清晰且可达的安全位。',
+  'Shared parking needs the taught tool orientation. The tool is off by {0}° (allowed {1}°). Align it at a confirmed safe position and retry.':
+    '工具朝向偏离示教值 {0}°，允许偏差为 {1}°。请在已确认的安全位置对齐工具朝向后重试。',
+  'Recheck historical Safe Position': '复验历史共用安全位',
+  'Start recheck': '开始复验',
+  'No verified historical Safe Position matches the current calibration.':
+    '没有找到与当前标定匹配的历史已验证安全位。',
+  'The tool orientation changed during the shared parking search. Retry from a stable position.':
+    '寻找共用安全位时检测到工具朝向发生变化，请让机械臂停稳后重试。',
+  'The historical Safe Position is outside the current parking envelope.':
+    '历史安全位超出当前工位允许的避让范围。',
+  'No safe route to the historical Safe Position passed preflight from the current pose.':
+    '从当前位置到历史安全位的路径未通过安全预检。',
+  'The measured arrival was outside the tolerance for the historical Safe Position.':
+    '机械臂的实测到位误差超过历史安全位允许的范围。',
+  'The tool position changed during shared parking orientation alignment.':
+    '共用安全位自动对齐时检测到工具位置变化，已中止本次搜索。',
   'The arm reached a candidate Safe Position, but the camera could not verify every screen.':
-    '机械臂已到达候选安全位，但相机未能确认所有屏幕清晰可见。括号内为各屏内部图案检出率。',
-  'Automatic camera avoidance could not clear every screen. Review the camera view or record a Safe Position manually.':
-    '自动避让后仍有屏幕被遮挡，请检查相机画面或手动记录安全位。',
+    '机械臂已到达候选安全位，但相机未能确认所有屏幕清晰可见。',
+  'Possible screen glare prevented confirmation after rechecking at the same pose.':
+    '原地复测后，疑似屏幕反光仍影响可见性确认。',
+  'The robot moved during screen visibility verification. Retry from a stable pose.':
+    '屏幕可见性检测期间机械臂位置或朝向发生变化，请停稳后重试。',
+  'The camera could not read the screen pattern reliably after rechecking at the same pose.':
+    '原地复测后，相机仍无法可靠识别屏幕图案。',
+  'Camera exposure could not be restored after the visibility recheck.':
+    '可见性复测后，相机未能恢复原曝光设置。',
+  'Insufficient image evidence': '图像证据不足',
+  'Visibility assessment': '判定',
+  'Possible glare': '疑似反光',
+  'Visibility check attempts': '查看相机复核记录',
+  Checkerboard: '棋盘格',
+  'Offset contrast': '错位高对比图案',
+  'Exposure {0} → {1}': '曝光 {0} → {1}',
+  'Unreliable screen pattern': '图案响应不足',
+  'Possible obstruction': '疑似遮挡',
+  'The camera could not verify the current screen after automatic parking. Check the live view or record a Safe Position manually.':
+    '自动避让后，相机仍未能确认当前屏幕可见。请检查实时画面或手动记录安全位。',
   'The screen visibility pattern could not be verified. Check the camera view and paired phone pages.':
     '无法识别屏幕显示的可见性图案，请检查相机画面和已配对的手机页面。',
   'The paired phones did not acknowledge the visibility pattern. Keep every page visible and fullscreen.':
@@ -700,6 +752,8 @@ const calibrationZh: Record<string, string> = {
   'Open the phone binding page and keep it fullscreen. The service detects the page and reads its resolution automatically.':
     '打开手机绑定页面并保持全屏，服务会自动发现页面并读取分辨率。',
   'Keep the phone page visible and fullscreen': '请保持手机页面在前台并全屏',
+  'Calibrating camera focus and exposure': '正在标定相机对焦和曝光',
+  'Optimizing camera image quality': '正在优化相机成像质量',
   'Installation reference saved independently of calibration.':
     '安装参考已独立保存，不受重标定结果影响。',
   'Update Installation Teaching': '更新安装示教',
@@ -980,6 +1034,7 @@ const calibrationZh: Record<string, string> = {
     '屏幕已应用。请在“相机映射”步骤重新选择主屏幕。',
   'The detected screens were not applied automatically.':
     '检测到的屏幕未能自动应用。',
+  'Page mapping failed': '页面映射失败',
   'Each screen has its own perspective result. Review successful screens individually and retry only the screens that failed.':
     '每个屏幕都有独立的透视结果。请分别检查成功屏幕，并只重试失败屏幕。',
   'Each screen has its own perspective result. Review or retry screens individually, then apply all successful results together.':
@@ -1018,6 +1073,7 @@ const calibrationZh: Record<string, string> = {
     '标定显示页面尚未上报全屏尺寸。',
   'Markers are ready': '标记已就绪',
   'Detecting markers': '正在检测标记',
+  'Optimizing camera image and detecting markers': '正在优化相机成像并识别标记',
   'Keep the camera and screen stationary.': '请保持相机和屏幕静止。',
   'Calibration session': '标定会话',
   'Marker detection failed': '标记检测失败',

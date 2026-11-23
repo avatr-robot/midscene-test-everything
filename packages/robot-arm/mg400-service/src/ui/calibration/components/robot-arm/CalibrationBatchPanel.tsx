@@ -13,6 +13,7 @@ import {
   Popconfirm,
   Radio,
   Space,
+  Table,
   Tag,
   Typography,
 } from 'antd';
@@ -26,6 +27,7 @@ import {
 import type { BatchClient as RobotArmApi } from '../../batch-client';
 import { calibrationErrorText, t } from '../../i18n';
 import { batchAnnouncements, speakCalibration } from '../../voice/calibration';
+import { CalibrationQualityWarnings } from './CalibrationQualityWarnings';
 
 const active = (batch: CalibrationBatchState | null | undefined) =>
   Boolean(batch && ['running', 'waiting', 'stopping'].includes(batch.status));
@@ -48,11 +50,76 @@ const itemLabels: Record<string, string> = {
 };
 const describeCause = (cause: unknown) =>
   cause instanceof Error ? cause.message : String(cause);
+const visibilityPercent = (fraction: number | undefined) =>
+  fraction === undefined ? '—' : `${Math.floor(fraction * 1000) / 10}%`;
+type ParkingVisibility = NonNullable<
+  CalibrationBatchState['sharedParkingFailureVisibility']
+>;
+function visibilityAssessment(screen: ParkingVisibility['screens'][number]) {
+  if (screen.clear) return t('Screen visibility passed');
+  if (screen.reason === 'glare') return t('Possible glare');
+  if (screen.assessment === 'insufficient-evidence')
+    return t('Unreliable screen pattern');
+  if (screen.assessment === 'suspected-occlusion')
+    return t('Possible obstruction');
+  return t('Screen visibility did not pass');
+}
+
+function ParkingVisibilityFailure({
+  evidence,
+  items,
+}: {
+  evidence: ParkingVisibility;
+  items: CalibrationBatchState['items'];
+}) {
+  const name = (id: string) =>
+    items.find((item) => item.deviceId === id)?.name ?? id;
+  return (
+    <>
+      <ul>
+        {evidence.screens
+          .filter((screen) => !screen.clear)
+          .map((screen) => (
+            <li key={screen.id}>
+              {name(screen.id)} · {visibilityAssessment(screen)} ·{' '}
+              {visibilityPercent(screen.visibleFraction)}
+            </li>
+          ))}
+      </ul>
+      {!!evidence.attempts?.length && (
+        <details>
+          <summary>{t('Visibility check attempts')}</summary>
+          <ol>
+            {evidence.attempts.map(({ pattern, exposure, screens }, index) => (
+              <li key={index}>
+                {t(
+                  pattern === 'checkerboard'
+                    ? 'Checkerboard'
+                    : 'Offset contrast',
+                )}
+                {exposure &&
+                  ` · ${t('Exposure {0} → {1}', [exposure.previous, exposure.reduced])}`}
+                <ul>
+                  {screens.map((screen) => (
+                    <li key={screen.id}>
+                      {name(screen.id)} · {visibilityAssessment(screen)} ·{' '}
+                      {visibilityPercent(screen.visibleFraction)}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </>
+  );
+}
 function calibrationStatus(calibrated: boolean, cameraMappingChanged = false) {
   if (cameraMappingChanged)
     return {
       color: 'orange',
-      label: t('Calibration saved · Camera mapping changed'),
+      label: t('Camera mapping changed · Recalibration required'),
     };
   return calibrated
     ? { color: 'green', label: t('Calibrated') }
@@ -112,11 +179,14 @@ export const CalibrationBatchPanel = forwardRef<
   const [startedHere, setStartedHere] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string>();
+  const debug =
+    batch?.cameraId === cameraId ? batch?.sharedParkingDebug : undefined;
+  const debugging = debug?.status === 'running' || debug?.status === 'stopping';
   const [plan, setPlan] = useState<CalibrationBatchPlan>();
   const [previewPlan, setPreviewPlan] = useState<CalibrationBatchPlan>();
   const [deletedCalibrations, setDeletedCalibrations] = useState<string[]>([]);
   const [samplingMode, setSamplingMode] =
-    useState<CalibrationBatchSamplingMode>('standard');
+    useState<CalibrationBatchSamplingMode>('slide');
   const [horizontalConfirmed, setHorizontalConfirmed] = useState(false);
   const [manualAcceptance, setManualAcceptance] = useState(false);
   const [corridorConfirmed, setCorridorConfirmed] = useState(false);
@@ -124,7 +194,7 @@ export const CalibrationBatchPanel = forwardRef<
   latest.current = { onChanged, onActiveChange };
   const signature = useRef('');
   const mounted = useRef(true);
-  const busyBatch = Boolean(batch && active(batch));
+  const busyBatch = active(batch) || debugging;
   useEffect(() => {
     mounted.current = true;
     let disposed = false;
@@ -138,9 +208,13 @@ export const CalibrationBatchPanel = forwardRef<
         if (disposed) return;
         announce(result);
         setBatch(result);
-        latest.current.onActiveChange?.(active(result));
+        latest.current.onActiveChange?.(
+          active(result) ||
+            result?.sharedParkingDebug?.status === 'running' ||
+            result?.sharedParkingDebug?.status === 'stopping',
+        );
         const current = result?.items[result.currentIndex];
-        const next = `${result?.id}:${current?.screenProfileId}:${current?.calibrationProfileId}:${result?.status}`;
+        const next = `${result?.id}:${current?.screenProfileId}:${current?.calibrationProfileId}:${result?.status}:${result?.sharedParkingDebug?.status}`;
         if (signature.current !== next) {
           signature.current = next;
           await latest.current.onChanged?.();
@@ -210,7 +284,7 @@ export const CalibrationBatchPanel = forwardRef<
       setPlan(next);
       speakCalibration('batchClearance', 2);
       setHorizontalConfirmed(false);
-      setSamplingMode('standard');
+      setSamplingMode('slide');
       setManualAcceptance(false);
       setCorridorConfirmed(false);
     });
@@ -218,11 +292,11 @@ export const CalibrationBatchPanel = forwardRef<
     ref,
     () => ({
       open: () => {
-        if (disabled || working || !cameraId) return;
+        if (disabled || working || debugging || !cameraId) return;
         openPlan();
       },
     }),
-    [disabled, working, cameraId],
+    [disabled, working, debugging, cameraId],
   );
   const start = () =>
     void perform(async () => {
@@ -363,7 +437,7 @@ export const CalibrationBatchPanel = forwardRef<
         </Typography.Text>
         {batch && !isActive && (
           <Button
-            disabled={working}
+            disabled={working || debugging}
             onClick={() =>
               void perform(async () => {
                 await api.clearCalibrationBatches();
@@ -412,12 +486,8 @@ export const CalibrationBatchPanel = forwardRef<
                 <Tag>{t(itemLabels[item.status] ?? item.status)}</Tag>
                 {index === batch.currentIndex &&
                   item.status === 'exploring' &&
-                  item.progress && (
-                    <div>
-                      {t(item.progress.message ?? item.progress.phase)}
-                      {item.progress.total > 1 &&
-                        ` ${item.progress.index}/${item.progress.total}`}
-                    </div>
+                  item.progress?.message && (
+                    <div>{t(item.progress.message)}</div>
                   )}
                 {index === batch.currentIndex &&
                   item.status.startsWith('awaiting-') &&
@@ -426,6 +496,14 @@ export const CalibrationBatchPanel = forwardRef<
                   <Typography.Paragraph type="danger">
                     {calibrationErrorText(item.error)}
                   </Typography.Paragraph>
+                )}
+                {item.status === 'completed' && (
+                  <CalibrationQualityWarnings
+                    key={`${batch.id}:${item.runIds.at(-1) ?? ''}`}
+                    warnings={item.qualityWarnings}
+                    advisory
+                    dismissible
+                  />
                 )}
                 {item.runIds.length > 0 && (
                   <details>
@@ -459,11 +537,14 @@ export const CalibrationBatchPanel = forwardRef<
                   </>
                 )}
                 {calibrationErrorText(batch.error)}
-                {batch.visibilityMissingScreens?.length
-                  ? ` (${batch.visibilityMissingScreens.join(' · ')})`
-                  : null}
               </Typography.Paragraph>
             )}
+          {batch.sharedParkingFailureVisibility && (
+            <ParkingVisibilityFailure
+              evidence={batch.sharedParkingFailureVisibility}
+              items={batch.items}
+            />
+          )}
           <Space wrap>
             {isActive && (
               <Button danger onClick={() => command('stop')}>
@@ -547,7 +628,8 @@ export const CalibrationBatchPanel = forwardRef<
                   </Button>
                 </>
               )}
-            {(!isActive || row?.status === 'awaiting-boundary-review') &&
+            {!debugging &&
+              (!isActive || row?.status === 'awaiting-boundary-review') &&
               batch.status !== 'completed' && (
                 <>
                   <Button
@@ -596,6 +678,145 @@ export const CalibrationBatchPanel = forwardRef<
             {calibrationErrorText(error)}
           </Typography.Paragraph>
         )}
+      <details>
+        <summary>{t('Advanced debugging')}</summary>
+        {(
+          [
+            [
+              'debug-shared-parking',
+              'Debug shared Safe Position search',
+              'Start search',
+            ],
+            [
+              'recheck-shared-parking',
+              'Recheck historical Safe Position',
+              'Start recheck',
+            ],
+          ] as const
+        ).map(([action, label, confirmation]) => (
+          <Popconfirm
+            key={action}
+            title={t('Confirm the motion area is clear. The robot will move.')}
+            okText={t(confirmation)}
+            cancelText={t('Cancel')}
+            onConfirm={() => command(action)}
+          >
+            <Button
+              disabled={
+                disabled ||
+                working ||
+                busyBatch ||
+                !parkingOnly ||
+                batch?.cameraId !== cameraId
+              }
+              size="small"
+              type="link"
+            >
+              {t(label)}
+            </Button>
+          </Popconfirm>
+        ))}
+        {debugging && (
+          <Space wrap>
+            <output>
+              {t(
+                debug.status === 'stopping'
+                  ? 'Stopping'
+                  : 'Checking phone pages and finding the shared Safe Position',
+              )}
+            </output>
+            <Button
+              danger
+              size="small"
+              disabled={debug.status === 'stopping'}
+              onClick={() => command('stop')}
+            >
+              {t('Stop search')}
+            </Button>
+          </Space>
+        )}
+        {!batch?.sharedParkingFailureVisibility &&
+        batch?.visibilityMissingScreens?.length ? (
+          <Typography.Paragraph type="secondary">
+            {t('Unverified screens in last Safe Position check')} ·{' '}
+            {batch.visibilityMissingScreens.join(' · ')}
+          </Typography.Paragraph>
+        ) : null}
+        {debug?.error && (
+          <Alert type="error" message={calibrationErrorText(debug.error)} />
+        )}
+        {debug?.status === 'stopped' && <output>{t('Stopped')}</output>}
+        {debug?.status === 'completed' && debug.pose && (
+          <Typography.Paragraph type="success">
+            {t('Found shared Safe Position: X {0} mm / Y {1} mm / Z {2} mm', [
+              debug.pose.positionMm.x.toFixed(1),
+              debug.pose.positionMm.y.toFixed(1),
+              debug.pose.positionMm.z.toFixed(1),
+            ])}
+          </Typography.Paragraph>
+        )}
+        {debug && !debugging && batch?.status === 'completed' && (
+          <Button
+            disabled={working || disabled}
+            onClick={() => command('retry')}
+            size="small"
+          >
+            {t('Retry parking')}
+          </Button>
+        )}
+        {debug?.visibility && !debugging && (
+          <div aria-live="polite">
+            <Typography.Text
+              type={debug.visibility.clear ? 'success' : 'warning'}
+            >
+              {t(
+                debug.visibility.clear
+                  ? 'Screen visibility passed'
+                  : debug.visibility.screens.some(
+                        (screen) =>
+                          screen.assessment === 'insufficient-evidence',
+                      )
+                    ? 'Insufficient image evidence'
+                    : 'Screen visibility did not pass',
+              )}
+            </Typography.Text>
+            <Table
+              size="small"
+              rowKey="id"
+              pagination={false}
+              scroll={{ x: 'max-content' }}
+              dataSource={debug.visibility.screens}
+              columns={[
+                {
+                  title: t('Screen name'),
+                  render: (_, screen) =>
+                    screens.find(({ screenId }) => screenId === screen.id)
+                      ?.name ?? screen.id,
+                },
+                {
+                  title: t('Visibility assessment'),
+                  render: (_, screen) => visibilityAssessment(screen),
+                },
+                {
+                  title: t('Whole screen'),
+                  dataIndex: 'visibleFraction',
+                  render: visibilityPercent,
+                },
+                {
+                  title: t('Screen interior'),
+                  dataIndex: 'interiorVisibleFraction',
+                  render: visibilityPercent,
+                },
+                {
+                  title: t('Largest unresponsive region (samples)'),
+                  dataIndex: 'largestUnresponsiveRegion',
+                  render: (samples: number | undefined) => samples ?? '—',
+                },
+              ]}
+            />
+          </div>
+        )}
+      </details>
       <Modal
         destroyOnClose
         footer={
@@ -613,7 +834,7 @@ export const CalibrationBatchPanel = forwardRef<
         }
         onCancel={() => setPlan(undefined)}
         open={Boolean(plan)}
-        title={t('Start automatic calibration')}
+        title={t('Calibrate multiple screens')}
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <Typography.Text>{t('Calibration Order')}</Typography.Text>
@@ -646,17 +867,23 @@ export const CalibrationBatchPanel = forwardRef<
               );
             })}
           </ol>
-          <Radio.Group
-            aria-label={t('Sampling mode')}
-            value={samplingMode}
-            onChange={(event) => {
-              setSamplingMode(event.target.value);
-              setHorizontalConfirmed(false);
-            }}
-          >
-            <Radio.Button value="standard">{t('Regular')}</Radio.Button>
-            <Radio.Button value="slide">{t('Fast')}</Radio.Button>
-          </Radio.Group>
+          <details>
+            <summary>
+              {t('Sampling mode')} ·{' '}
+              {t(samplingMode === 'slide' ? 'Fast' : 'Regular')}
+            </summary>
+            <Radio.Group
+              aria-label={t('Sampling mode')}
+              value={samplingMode}
+              onChange={(event) => {
+                setSamplingMode(event.target.value);
+                setHorizontalConfirmed(false);
+              }}
+            >
+              <Radio.Button value="slide">{t('Fast')}</Radio.Button>
+              <Radio.Button value="standard">{t('Regular')}</Radio.Button>
+            </Radio.Group>
+          </details>
           <Checkbox
             checked={horizontalConfirmed}
             onChange={(event) => setHorizontalConfirmed(event.target.checked)}
