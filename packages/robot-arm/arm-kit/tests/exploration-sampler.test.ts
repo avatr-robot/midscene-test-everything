@@ -121,12 +121,16 @@ describe('first-time automatic exploration', () => {
       let gridPressReleased = false;
       const auditPressHeights: number[] = [];
       let auditPressReleased = false;
-      const confirmedSweeps = new Set<string>();
       const heightSweeps: Array<{ z: number; touching: boolean }> = [];
       const gridStarted = new Error('Reached the sampling grid');
       const usePreviousHeight = mode === 'fast-previous-height-slide';
+      const heightReturnMisses = usePreviousHeight
+        ? 2
+        : mode === 'fast-intermittent-height-slide'
+          ? 1
+          : 0;
       const testHeightReturn =
-        usePreviousHeight || mode === 'fast-return-height-slide';
+        heightReturnMisses > 0 || mode === 'fast-return-height-slide';
       const slideRecoveries: SlideRecovery[] = [];
       const slideEndpoints = new Map<number, { x: number; y: number }>();
       let refining = false;
@@ -218,8 +222,8 @@ describe('first-time automatic exploration', () => {
               (sample) => !sample.touching,
             );
             if (
-              usePreviousHeight &&
               firstMiss > 0 &&
+              heightSweeps.length - firstMiss <= heightReturnMisses &&
               heightSweeps[firstMiss - 1].z === contact.z
             )
               screen = null;
@@ -253,20 +257,6 @@ describe('first-time automatic exploration', () => {
               auditPressHeights.push(contact.z);
               if (auditPressHeights.length === 1) screen = null;
             }
-          }
-          if (
-            mode === 'fast-intermittent-height-slide' &&
-            purpose === 'slide' &&
-            session.auto?.progress?.phase === 'height' &&
-            screen &&
-            contact
-          ) {
-            const position = `${contact.x},${contact.y},${contact.z}`;
-            if (confirmedSweeps.has(position) && !missedSlide) {
-              missedSlide = true;
-              screen = null;
-            }
-            confirmedSweeps.add(position);
           }
           if (
             mode === 'fast-adaptive-slide' &&
@@ -577,11 +567,10 @@ describe('first-time automatic exploration', () => {
             : previous;
           const upper = usePreviousHeight ? previous : miss;
           const missedRecheck = { z: previous.z, touching: false };
-          expect(heightSweeps.slice(firstMiss + 1)).toEqual(
-            usePreviousHeight
-              ? [missedRecheck, missedRecheck, retained]
-              : [retained],
-          );
+          expect(heightSweeps.slice(firstMiss + 1)).toEqual([
+            ...Array.from({ length: heightReturnMisses }, () => missedRecheck),
+            retained,
+          ]);
           expect(session.auto?.collectedSamples?.[3]).toMatchObject({
             pressedZMm: retained.z,
             heightIntervalMm: [retained.z, upper.z],
@@ -822,10 +811,7 @@ describe('first-time automatic exploration', () => {
           samples
             .filter((sample) => sample.role === role)
             .map((sample) => sample.method);
-        if (
-          mode === 'fast-corner-slide' ||
-          mode === 'fast-intermittent-height-slide'
-        ) {
+        if (mode === 'fast-corner-slide') {
           const switchToVertical = slideRecoveries.find(
             (recovery) => recovery.switchedToVertical,
           );
@@ -928,8 +914,6 @@ describe('first-time automatic exploration', () => {
             ).toBeGreaterThanOrEqual(missedPressZ! - 2);
           }
         }
-        if (mode === 'fast-intermittent-height-slide')
-          expect(missedSlide).toBe(true);
         expect(f.store.getScreen(f.screen.id)).toEqual(f.screen);
       } finally {
         await f.cleanup();
