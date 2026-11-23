@@ -10,8 +10,6 @@
 </p>
 
 <p align="center">
-  <a href="https://midscenejs.com/zh/universal-device/">文档</a> ·
-  <a href="https://github.com/web-infra-dev/midscene">Midscene.js</a> ·
   <a href="./README.md">English</a> / 简体中文
 </p>
 
