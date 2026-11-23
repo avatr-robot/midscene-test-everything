@@ -631,13 +631,6 @@ export class CalibrationHost {
           observed = this.service.markerObservation(request);
         }
         const { pageId, browserInstanceId, layout } = observed;
-        const paintedAt = Date.now();
-        const captureAt = paintedAt + 3000;
-        this.service.setMarkerCapture({
-          request,
-          attempt,
-          captureAt,
-        });
         const check = () => {
           signal.throwIfAborted();
           this.editable();
@@ -675,46 +668,48 @@ export class CalibrationHost {
           return result.correction;
         };
         try {
-          const stream = fast ? camera.stream : undefined;
-          const early = stream
-            ? await recognize(async () => {
-                const remaining = paintedAt + 1000 - Date.now();
-                if (remaining <= 0)
-                  throw new RobotArmError(
-                    'VISION_UNAVAILABLE',
-                    'Early marker capture timed out',
-                  );
-                // The frame wait itself must be bounded: a camera stream that
-                // ignores the timeout would otherwise stall the whole batch
-                // instead of falling back to the fixed capture delay.
-                const frame = await Promise.race([
-                  stream.getFrame({ fresh: true, timeoutMs: remaining }),
-                  delay(remaining, undefined, { ref: false }).then(() => {
+          correction = await camera.withMarkerImaging(async () => {
+            check();
+            const readyAt = Date.now();
+            const captureAt = readyAt + 3000;
+            this.service.setMarkerCapture({ request, attempt, captureAt });
+            const stream = fast ? camera.stream : undefined;
+            const early = stream
+              ? await recognize(async () => {
+                  const remaining = readyAt + 1000 - Date.now();
+                  if (remaining <= 0)
                     throw new RobotArmError(
                       'VISION_UNAVAILABLE',
                       'Early marker capture timed out',
                     );
-                  }),
-                ]);
-                check();
-                if (frame.capturedAt <= paintedAt)
-                  throw new RobotArmError(
-                    'VISION_UNAVAILABLE',
-                    'Camera frame predates the marker page',
-                  );
-                return frame.jpeg;
-              }, true).catch(() => {
-                check();
-                return undefined;
-              })
-            : undefined;
-          if (early) correction = early;
-          else {
+                  // Keep a stalled stream from blocking the fixed-delay retry.
+                  const frame = await Promise.race([
+                    stream.getFrame({ fresh: true, timeoutMs: remaining }),
+                    delay(remaining, undefined, { ref: false }).then(() => {
+                      throw new RobotArmError(
+                        'VISION_UNAVAILABLE',
+                        'Early marker capture timed out',
+                      );
+                    }),
+                  ]);
+                  check();
+                  if (frame.capturedAt <= readyAt)
+                    throw new RobotArmError(
+                      'VISION_UNAVAILABLE',
+                      'Camera frame predates marker capture',
+                    );
+                  return frame.jpeg;
+                }, true).catch(() => {
+                  check();
+                  return undefined;
+                })
+              : undefined;
+            if (early) return early;
             await delay(Math.max(0, captureAt - Date.now()), undefined, {
               signal,
             });
-            correction = await recognize(() => camera.rawFrame());
-          }
+            return recognize(() => camera.rawFrame());
+          });
         } catch (error) {
           signal.throwIfAborted();
           const current = this.service.markerObservation(request);
@@ -1016,9 +1011,9 @@ export class CalibrationHost {
         const layout = setup.layout;
         if (!layout || !setup.phoneConnected)
           throw new RobotArmError('INVALID_MAPPING', 'Connect Phone', 409);
-        const result = await captureScreenMarkers(
-          () => this.options.camera.rawFrame(),
-          layout,
+        const camera = this.options.camera;
+        const result = await camera.withMarkerImaging(() =>
+          captureScreenMarkers(() => camera.rawFrame(), layout),
         );
         const current = this.service.setup();
         this.editable();

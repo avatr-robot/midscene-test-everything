@@ -138,6 +138,48 @@ async function calibrationPattern(warm = false) {
 }
 
 describe('camera imaging', () => {
+  it('adjusts imaging before marker capture without a perspective and restores it on failure', async () => {
+    const controls = new FakeCameraControl();
+    controls.values.focus.mode = 'manual';
+    const original = await controls.read();
+    const frame = (level: number) =>
+      sharp({
+        create: {
+          width: 64,
+          height: 48,
+          channels: 3,
+          background: { r: level, g: level, b: level },
+        },
+      })
+        .jpeg()
+        .toBuffer();
+    const [clipped, balanced] = await Promise.all([frame(255), frame(205)]);
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      {
+        getInfo: () => ({ state: 'running', fps: 30 }),
+        getFrame: async () => ({
+          jpeg: controls.values.exposure.value === -5 ? clipped : balanced,
+        }),
+      } as never,
+      tmpdir(),
+      controls,
+    );
+    try {
+      await expect(
+        imaging.withMarkerImaging(async () => {
+          const { exposure, focus } = await controls.read();
+          expect(exposure).toMatchObject({ value: -6, mode: 'manual' });
+          expect(focus.mode).toBe('auto');
+          throw new Error('Marker capture failed');
+        }),
+      ).rejects.toThrow('Marker capture failed');
+      expect(await controls.read()).toEqual(original);
+    } finally {
+      await imaging.close();
+    }
+  });
+
   it('rejects neutral patches with a clipped colour channel', async () => {
     const strips = Array.from({ length: 7 }, (_, index) => {
       const offset = index * 2;

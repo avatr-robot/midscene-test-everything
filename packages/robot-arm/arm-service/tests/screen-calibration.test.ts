@@ -545,7 +545,36 @@ it('applies a screen mapping when only its four outer markers remain visible', a
     f.devices.entries.get(second.targetId)?.camera.getCorrection(),
   ).toBeDefined();
 });
-it('keeps markers visible on the screen whose perspective passed but page mapping failed', async () => {
+it('maps a screen from fresh source markers when its corrected image loses the codes', async () => {
+  const f = await fixture();
+  await f.connect();
+  const second = await f.connect();
+  const command = { cameraId: 'cam', id: f.session.id, token: f.session.token };
+  await f.render();
+  await f.service.markerAction({ ...command, action: 'detect' });
+  const blank = await sharp({
+    create: { width: 400, height: 800, channels: 3, background: '#fff' },
+  })
+    .jpeg()
+    .toBuffer();
+  const camera = f.devices.entries.get(second.targetId)!.camera;
+  const correctedFrame = rstest
+    .spyOn(camera, 'correctedFrame')
+    .mockResolvedValue(blank);
+  try {
+    expect(
+      await f.service.markerAction({ ...command, action: 'apply' }),
+    ).toMatchObject({ mappingErrors: {} });
+    expect(second.targetHost.service.setup().mapping?.accuracy).toMatchObject({
+      fit: { count: 4 },
+      validation: { count: 2 },
+    });
+  } finally {
+    correctedFrame.mockRestore();
+  }
+});
+
+it('keeps markers visible and retries applying a screen whose page mapping failed', async () => {
   const f = await fixture();
   const first = await f.connect();
   const second = await f.connect();
@@ -575,7 +604,10 @@ it('keeps markers visible on the screen whose perspective passed but page mappin
     markersPainted: true,
     markerRequest: undefined,
   });
-  expect((await second.targetHost.service.mapSetup()).mapping).toBeDefined();
+  expect(
+    await f.service.markerAction({ ...command, action: 'apply' }),
+  ).toMatchObject({ mappingErrors: {} });
+  expect(second.targetHost.service.setup().mapping).toBeDefined();
   expect(second.targetHost.service.phoneView().view).toBe('touch-preview');
   expect(f.adapter.movements).toHaveLength(0);
 });

@@ -6,7 +6,7 @@ import type {
 import { Alert, Button, Card, Modal, Space, Tag, Typography } from 'antd';
 import { Check, Crosshair, ScanLine } from 'lucide-react';
 import { useEffect } from 'react';
-import { t } from '../i18n';
+import { calibrationErrorText, t } from '../i18n';
 import { hasMultipleCalibrationTargets } from '../multi-screen-review';
 import { speakCalibration } from '../voice/calibration';
 
@@ -16,6 +16,7 @@ export function MultiScreenCalibrationReviewDialog({
   open,
   applying = false,
   error,
+  mappingErrors,
   retryingTargetId,
   onApply,
   onClose,
@@ -28,6 +29,7 @@ export function MultiScreenCalibrationReviewDialog({
   applying?: boolean;
   /** Why the automatic apply did not run; kept visible instead of a toast. */
   error?: string;
+  mappingErrors?: Record<string, string>;
   retryingTargetId?: string;
   onApply: () => void;
   onClose: () => void;
@@ -80,7 +82,7 @@ export function MultiScreenCalibrationReviewDialog({
         </Typography.Paragraph>
         {error ? (
           <Alert
-            description={error}
+            description={calibrationErrorText(error)}
             message={t('The detected screens were not applied automatically.')}
             showIcon
             type="error"
@@ -97,13 +99,16 @@ export function MultiScreenCalibrationReviewDialog({
           {(session?.targets ?? []).map((target, index) => {
             const result = target.result;
             const frame = frames[target.id];
+            const mappingError = mappingErrors?.[target.id];
             return (
               <Card
                 key={target.id}
                 size="small"
                 title={`${index + 1}. ${target.name}`}
                 extra={
-                  <Tag color={result ? 'success' : 'error'}>{target.state}</Tag>
+                  <Tag color={result && !mappingError ? 'success' : 'error'}>
+                    {mappingError ? t('Page mapping failed') : target.state}
+                  </Tag>
                 }
                 actions={[
                   <Button
@@ -160,6 +165,13 @@ export function MultiScreenCalibrationReviewDialog({
                     showIcon
                     type="error"
                     message={target.error ? t(target.error) : ''}
+                  />
+                )}
+                {mappingError && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message={calibrationErrorText(mappingError)}
                   />
                 )}
               </Card>

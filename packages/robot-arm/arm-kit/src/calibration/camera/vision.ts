@@ -14,9 +14,16 @@ export interface CalibrationVisionOptions {
   width: number;
   height: number;
 }
+
+interface DetectedMarkerMapping {
+  webToImage: number[];
+  markerErrorPx: number;
+  accuracy?: CameraMappingAccuracy;
+}
 /** In-process seam shared by SDK calibration and the Playground host. */
 export interface CalibrationVision {
   rawFrame?(): Promise<Buffer>;
+  withMarkerImaging?<T>(capture: () => Promise<T>): Promise<T>;
   calibrateImaging?(): Promise<CalibrationImagingStatus>;
   imagingStatus?(): CalibrationImagingStatus;
   releaseImaging?(): Promise<void>;
@@ -28,9 +35,9 @@ export interface CalibrationVision {
   detectMarkers(
     jpeg: Buffer,
     markers: CalibrationPageLayout['markers'],
-  ): Promise<{
-    webToImage: number[];
-    markerErrorPx: number;
-    accuracy?: CameraMappingAccuracy;
-  }>;
+  ): Promise<DetectedMarkerMapping>;
+  detectMarkersInSource?(
+    binding: VisionBinding,
+    layout: CalibrationPageLayout,
+  ): Promise<DetectedMarkerMapping>;
 }

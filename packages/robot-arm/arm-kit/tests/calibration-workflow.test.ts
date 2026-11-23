@@ -375,6 +375,22 @@ describe('phone-assisted calibration coordinator', () => {
       await f.dispose();
     }
   });
+  it('requires a new camera mapping after the phone layout changes', async () => {
+    const f = await setup();
+    try {
+      f.resize();
+      await f.send();
+      expect(f.service.setup()).toMatchObject({
+        phoneConnected: true,
+        mapping: undefined,
+      });
+      await expect(f.service.create()).rejects.toMatchObject({
+        code: 'MAPPING_REQUIRED',
+      });
+    } finally {
+      await f.dispose();
+    }
+  });
   it('cannot install a draft after the operator cancels during a slow mapping check', async () => {
     const f = await setup('right');
     try {

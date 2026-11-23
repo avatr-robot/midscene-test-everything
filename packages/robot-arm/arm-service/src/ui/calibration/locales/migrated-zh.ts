@@ -1028,6 +1028,7 @@ const calibrationZh: Record<string, string> = {
     '屏幕已应用。请在“相机映射”步骤重新选择主屏幕。',
   'The detected screens were not applied automatically.':
     '检测到的屏幕未能自动应用。',
+  'Page mapping failed': '页面映射失败',
   'Each screen has its own perspective result. Review successful screens individually and retry only the screens that failed.':
     '每个屏幕都有独立的透视结果。请分别检查成功屏幕，并只重试失败屏幕。',
   'Each screen has its own perspective result. Review or retry screens individually, then apply all successful results together.':
@@ -1066,6 +1067,7 @@ const calibrationZh: Record<string, string> = {
     '标定显示页面尚未上报全屏尺寸。',
   'Markers are ready': '标记已就绪',
   'Detecting markers': '正在检测标记',
+  'Optimizing camera image and detecting markers': '正在优化相机成像并识别标记',
   'Keep the camera and screen stationary.': '请保持相机和屏幕静止。',
   'Calibration session': '标定会话',
   'Marker detection failed': '标记检测失败',

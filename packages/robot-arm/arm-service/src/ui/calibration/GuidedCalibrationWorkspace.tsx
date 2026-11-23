@@ -221,7 +221,10 @@ function GuidedContent({
   const [markerSession, setMarkerSession] =
     useState<MarkerCalibrationCreateResult>();
   const [review, setReview] = useState<
-    MarkerCalibrationDetectionResponse & { token: string }
+    MarkerCalibrationDetectionResponse & {
+      token: string;
+      mappingErrors?: Record<string, string>;
+    }
   >();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewing, setReviewing] = useState<{
@@ -969,9 +972,21 @@ function GuidedContent({
         );
         if (currentBase.current !== base) return;
         const failures = Object.values(applied.mappingErrors);
-        setMappingError(failures.join('\n') || undefined);
-        if (failures.length) setError(failures.join('\n'));
-        if (failures.length) throw new Error(failures.join('\n'));
+        setMappingError(
+          failures.map(calibrationErrorText).join('\n') || undefined,
+        );
+        if (failures.length) {
+          if (hasMultipleCalibrationTargets(session)) {
+            setReview({
+              ...result,
+              token,
+              mappingErrors: applied.mappingErrors,
+            });
+            setReviewOpen(true);
+            return;
+          }
+          throw new Error(failures.join('\n'));
+        }
         mappingApplied = true;
         await waitForImagingCalibration();
         if (currentBase.current !== base) return;
@@ -2045,6 +2060,7 @@ function GuidedContent({
         open={reviewOpen && hasMultipleCalibrationTargets(review?.session)}
         applying={applying}
         error={error}
+        mappingErrors={review?.mappingErrors}
         retryingTargetId={retryId}
         onClose={() => setReviewOpen(false)}
         onReview={(target, frame) => setReviewing({ target, frame })}
@@ -2082,9 +2098,13 @@ function GuidedContent({
             .then(async (result) => {
               if (currentBase.current !== base) return;
               const failures = Object.values(result.mappingErrors);
-              setMappingError(failures.join('\n') || undefined);
-              if (failures.length) setError(failures.join('\n'));
-              if (failures.length) throw new Error(failures.join('\n'));
+              setMappingError(
+                failures.map(calibrationErrorText).join('\n') || undefined,
+              );
+              if (failures.length) {
+                setReview({ ...review, mappingErrors: result.mappingErrors });
+                return;
+              }
               await waitForImagingCalibration();
               if (currentBase.current !== base) return;
               pendingAddedScreen.current = undefined;

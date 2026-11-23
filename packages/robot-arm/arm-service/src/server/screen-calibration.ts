@@ -1136,9 +1136,12 @@ export class ScreenCalibration {
         const observed = request && host.service.markerObservation(request);
         if (observed) observations.set(id, structuredClone(observed));
       }
-      const frames: Buffer[] = [];
-      for (let index = 0; index < 8; index++)
-        frames.push(await camera.rawFrame());
+      const frames = await camera.withMarkerImaging(async () => {
+        const batch: Buffer[] = [];
+        for (let index = 0; index < 8; index++)
+          batch.push(await camera.rawFrame());
+        return batch;
+      });
       const detector = new MarkerCalibrationDetector();
       const groups = [...observations.values()].map(
         ({ layout }) => new Set(layout.markers.map((marker) => marker.code)),
@@ -1264,7 +1267,10 @@ export class ScreenCalibration {
   }
   private async apply(session: MarkerSession, allowMismatch: boolean) {
     const targets = session.targets.filter(
-      (t) => t.state === 'succeeded' && t.result && !session.applied.has(t.id),
+      (t) =>
+        t.state === 'succeeded' &&
+        t.result &&
+        (!session.applied.has(t.id) || session.applied.get(t.id) !== undefined),
     );
     const response = () => ({
       screenIds: [...session.applied.keys()],

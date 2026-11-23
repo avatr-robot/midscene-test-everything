@@ -344,6 +344,7 @@ export class MarkerCalibrationDetector {
       reprojectionRmsePx: number;
       area: number;
       markerIds: number[];
+      markerCorners: DetectedArUcoMarker[];
     }> = [];
     // Lens distortion and corner quantisation grow with capture resolution, so
     // the gate scales with the image diagonal instead of staying at a fixed 2 px.
@@ -409,6 +410,7 @@ export class MarkerCalibrationDetector {
       );
       return {
         points,
+        imageCorners,
         residuals,
         reprojectionRmsePx: Math.sqrt(
           residuals.reduce((sum, value) => sum + value ** 2, 0) /
@@ -461,6 +463,16 @@ export class MarkerCalibrationDetector {
           reprojectionRmsePx: fit.reprojectionRmsePx,
           area: convexArea(imageCenters),
           markerIds: used.map((marker) => marker.layout.id),
+          markerCorners: used.flatMap((marker, index) =>
+            fit.residuals[index] <= limitPx
+              ? [
+                  {
+                    id: marker.layout.id,
+                    corners: fit.imageCorners.slice(index * 4, (index + 1) * 4),
+                  },
+                ]
+              : [],
+          ),
         });
       } catch {
         // Collinear combinations are expected when a redundant marker is hidden.
@@ -488,6 +500,7 @@ export class MarkerCalibrationDetector {
       imageHeight: decoded.imageHeight,
       reprojectionRmsePx: result.reprojectionRmsePx,
       markerIds: result.markerIds,
+      markerCorners: result.markerCorners,
     };
   }
 }

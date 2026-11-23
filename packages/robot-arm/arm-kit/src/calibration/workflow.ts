@@ -1008,8 +1008,14 @@ export class CalibrationWorkflow {
     this.changed();
   }
   setup(): AssistedCalibrationSetup {
+    const setup = this.configuration.status();
+    const { layout, mapping } = setup;
     return {
-      ...this.configuration.status(),
+      ...setup,
+      mapping:
+        layout && mapping && sameLayout(mapping.layout, layout)
+          ? mapping
+          : undefined,
       markerCapture: this.markerCapture,
       mappingCheck: this.mappingCheck,
       imaging: this.options.vision.imagingStatus?.() ?? this.imagingStatus,

@@ -1824,7 +1824,7 @@ export function MarkerCalibrationDialog({
             message={t(
               handoffPending
                 ? 'Optimizing camera image quality'
-                : 'Detecting markers',
+                : 'Optimizing camera image and detecting markers',
             )}
           />
         ) : null}

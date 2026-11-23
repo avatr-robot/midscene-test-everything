@@ -8,12 +8,17 @@ import { MarkerCalibrationDetector } from './screen-marker-detector.js';
 import {
   applyHomography,
   computeHomography,
+  destinationCorners,
   invertHomography,
   pointDistance,
   quadFromArray,
   quadMedian,
   quadToArray,
 } from './vision-geometry.js';
+import type {
+  ImagePoint,
+  PerspectiveTransformOptions,
+} from './vision-types.js';
 
 export { markerSvg } from './aruco-markers.js';
 type Markers = CalibrationPageLayout['markers'];
@@ -64,6 +69,13 @@ export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
       ...observed,
       ...(await decodeArucoMarkers(jpeg, true)),
     ]);
+  return fitCalibrationMarkerMapping(observed, markers);
+}
+
+function fitCalibrationMarkerMapping(
+  observed: readonly { id: number; corners: ImagePoint[] }[],
+  markers: Markers,
+) {
   const pairs = markers.flatMap((m) => {
     const matches = observed.filter((o) => o.id === m.code);
     if (!matches.length) return [];
@@ -137,6 +149,42 @@ export async function detectCalibrationMarkers(jpeg: Buffer, markers: Markers) {
   };
 }
 
+/** Avoid decoding resampled marker pixels when the corrected JPEG loses detail. */
+export async function detectCalibrationMarkersInSource(
+  jpeg: Buffer,
+  layout: CalibrationPageLayout,
+  {
+    points,
+    targetWidth,
+    targetHeight,
+    rotation = 0,
+  }: PerspectiveTransformOptions,
+) {
+  const problem = screenBoundsProblem(layout);
+  if (problem) throw new RobotVisionError('NO_SCREEN_DETECTED', problem);
+  const detection = await new MarkerCalibrationDetector().detectFrame(
+    jpeg,
+    screenMarkerLayout(layout),
+  );
+  const toCorrected = invertHomography(
+    computeHomography(
+      destinationCorners(targetWidth, targetHeight, rotation),
+      quadToArray(points),
+    ),
+  );
+  const observed = detection.markerCorners
+    .map(({ id, corners }) => ({
+      id,
+      corners: corners.map((point) => applyHomography(toCorrected, point)),
+    }))
+    .filter(({ corners }) =>
+      corners.every(
+        ({ x, y }) => x >= 0 && x < targetWidth && y >= 0 && y < targetHeight,
+      ),
+    );
+  return fitCalibrationMarkerMapping(observed, layout.markers);
+}
+
 /** Also serialized into the phone page; use only the supplied layout. */
 export function screenBoundsProblem(
   layout: CalibrationPageLayout,
@@ -162,6 +210,21 @@ function screenCorners(width: number, top: number, bottom: number) {
     { x: width, y: bottom },
     { x: 0, y: bottom },
   ];
+}
+
+function screenMarkerLayout(layout: CalibrationPageLayout) {
+  const top = -(layout.topInset ?? 0);
+  const bottom = top + Math.max(layout.screen.height, layout.height);
+  return {
+    points: quadFromArray(
+      screenCorners(Math.max(layout.width, layout.screen.width), top, bottom),
+    ),
+    markers: layout.markers.map((marker) => ({
+      id: marker.code,
+      center: { x: marker.x, y: marker.y },
+      side: marker.size,
+    })),
+  };
 }
 export const MARKER_CAPTURE_ATTEMPTS = 3;
 class UnstableMarkerCapture extends RobotVisionError {}
@@ -198,18 +261,7 @@ export async function recognizeScreenMarkers(
 ) {
   const problem = screenBoundsProblem(layout);
   if (problem) throw new RobotVisionError('CALIBRATION_MISMATCH', problem);
-  const top = -(layout.topInset ?? 0);
-  const bottom = top + Math.max(layout.screen.height, layout.height);
-  const target = {
-    points: quadFromArray(
-      screenCorners(Math.max(layout.width, layout.screen.width), top, bottom),
-    ),
-    markers: layout.markers.map((m) => ({
-      id: m.code,
-      center: { x: m.x, y: m.y },
-      side: m.size,
-    })),
-  };
+  const target = screenMarkerLayout(layout);
   const detector = shared?.detector ?? new MarkerCalibrationDetector();
   const frames: Array<{
     detection: Awaited<ReturnType<typeof detector.detectFrame>>;
