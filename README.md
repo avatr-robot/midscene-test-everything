@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="Midscene Test Everything" width="160" src="https://github.com/user-attachments/assets/f60de3c1-dd6f-4213-97a1-85bf7c6e79e4"><br />
+  <img alt="Midscene Test Everything" width="160" src="./assets/midscene-test-everything-logo.png"><br />
 </p>
 
 <h1 align="center">Midscene Test Everything</h1>
@@ -10,8 +10,6 @@
 </p>
 
 <p align="center">
-  <a href="https://midscenejs.com/universal-device/">Docs</a> ·
-  <a href="https://github.com/web-infra-dev/midscene">Midscene.js</a> ·
   English / <a href="./README.zh.md">简体中文</a>
 </p>
 
@@ -35,9 +33,11 @@ This repository explores **universal physical & device integrations**, bringing 
 
 ### 🦾 Robot Arm × Physical Touchscreen (Car Screens & Beyond)
 
-Automotive cockpits and industrial panels rarely expose debug bridges. Our approach is **using a robotic arm paired with a camera to operate and observe physical screens just like a human**.
-
-We explored and validated a complete physical automation workflow (camera calibration, coordinate mapping, and motion control) as reusable infrastructure. We provide an end-to-end reference demo based on the **DOBOT MG400**; you can replicate this setup directly, or assemble like LEGO by plugging in any robot arm via [`arm-kit`](./packages/robot-arm/arm-kit/README.md).
+Automate physical touchscreens (car cockpits, industrial panels) via a robotic arm and camera observation. We provide the complete physical automation toolchain:
+- **Spatial Calibration & Mapping**: Camera calibration and screen-to-arm coordinate transformation.
+- **Motion Control Primitives**: Reusable tap, swipe, and gesture execution for automated testing.
+- **Modular Arm SDK ([`arm-kit`](./packages/robot-arm/arm-kit/README.md))**: Pluggable interface to connect and control any robotic arm.
+- **End-to-End Reference Demo**: Ready-to-run setup based on the **DOBOT MG400**.
 
 <!-- TODO: Replace with the robot arm demo video (upload to GitHub to get a user-attachments URL). -->
 > 🎥 _Video placeholder: robot arm demo coming soon._
@@ -64,7 +64,9 @@ We warmly welcome community contributions of successful integrations across diff
 
 ## 🏗️ Architecture & Workflow
 
-Testing real-world physical devices and screens is inherently complex and involves both hardware and software coordination — it is rarely a trivial task. To make integration as clean and approachable as possible, we maintain a clear separation of concerns: **the framework handles all generic AI testing infrastructure, while developers only implement hardware-specific sensing and control.**
+We provide the complete infrastructure needed to bridge any physical device into vision-based AI testing:
+- **AI Testing Infrastructure (Provided)**: Natural-language test execution (`aiAct`, `aiAssert`), Web Playground for live visual inspection, session management, and Agent tooling (MCP Server, CLI).
+- **Universal Device Interface**: A minimal contract where developers only need to connect screen capture (`screenshot`) and action execution (`execute`).
 
 ```text
 ┌────────────────────────────────────────────────────────┐
@@ -148,7 +150,7 @@ See the [Universal Device documentation](./packages/universal-device/README.md) 
 | --- | --- |
 | [`universal-device`](./packages/universal-device/README.md) | Shared device interface, TypeScript SDK, HTTP API, CLI, and MCP server |
 | [`universal-device-playground`](./packages/universal-device-playground/README.md) | Preview device screens and try actions in a browser |
-| [`arm-service`](./packages/robot-arm/arm-service/README.md) | DOBOT MG400 device service, including setup, calibration, and touchscreen control |
+| [`mg400-service`](./packages/robot-arm/mg400-service/README.md) | DOBOT MG400 device service, including setup, calibration, and touchscreen control |
 | [`arm-kit`](./packages/robot-arm/arm-kit/README.md) | Adapter API for integrating custom robot arms |
 | [`ios-airlink`](./packages/ios-airlink/README.md) | Connect to and control physical iPhones from macOS |
 
