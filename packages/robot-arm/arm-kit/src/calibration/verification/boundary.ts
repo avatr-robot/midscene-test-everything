@@ -16,9 +16,7 @@ import { atTravelHeight } from './travel-height.js';
 
 export const BOUNDARY_HOVER_HOLD_MS = 500;
 export const BOUNDARY_HOVER_HOLD_MS_FAST = 150;
-// Verification is a light contact demonstration, not force-controlled pressing.
 // Keep the sliding contour away from OS edge-gesture origins.
-const BOUNDARY_CONTACT_DEPTH_MM = 0.1;
 const BOUNDARY_CONTACT_MIN_INSET_MM = 8;
 const BOUNDARY_CONTACT_INSET_FRACTION = 0.15;
 
@@ -125,10 +123,6 @@ export async function runBoundaryVerification(
       ctx,
     ),
   );
-  const contactDepthMm = Math.min(
-    ctx.screen.pressDepthMm,
-    BOUNDARY_CONTACT_DEPTH_MM,
-  );
   // All contacts, including taps, stay inside the display. Apply the margin
   // per axis so the long edges of a phone also clear system gesture regions.
   // The quarter-size cap preserves a usable rectangle on small displays.
@@ -154,7 +148,7 @@ export async function runBoundaryVerification(
     y: p.y / physicalHeightMm,
   }));
   const contourContact = innerCorners.map((p) =>
-    screenPoseMm(s.candidate!, ctx.tool, p, contactDepthMm),
+    screenPoseMm(s.candidate!, ctx.tool, p, ctx.screen.pressDepthMm),
   );
   const contourHover = innerCorners.map((p) =>
     atTravelHeight(

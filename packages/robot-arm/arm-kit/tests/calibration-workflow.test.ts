@@ -282,6 +282,13 @@ describe('phone-assisted calibration coordinator', () => {
         expect(
           runs[1].targets.some((t) => t.name === 'Boundary segment 1 lift'),
         ).toBe(true);
+        const contactTargets = runs[1].targets.filter(
+          ({ name }) =>
+            name.endsWith(' contact') || name.startsWith('Boundary edge '),
+        );
+        expect(contactTargets).toHaveLength(12);
+        for (const { positionMm } of contactTargets)
+          expect(positionMm.z).toBeCloseTo(30 - f.screen.pressDepthMm);
         await expect(
           f.service.command(before.id, 'accept', true),
         ).rejects.toThrow('Complete boundary verification');
