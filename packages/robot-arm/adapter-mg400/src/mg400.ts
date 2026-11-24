@@ -169,6 +169,9 @@ const LIFECYCLE_TIMEOUT_MS = 5000;
  * while a caller polling at 50 ms still gets the full interval's freshness.
  */
 const STATE_POLL_IDLE_INTERVALS = 3;
+const SEQUENCE_FAULT_POLL_MS = 40;
+const SEQUENCE_MODE_FRAME_MAX_AGE_MS = 100;
+const SEQUENCE_POSE_POLL_MS = 10;
 /** How long `emergencyStop()` waits for the controller to report no motion. */
 const EMERGENCY_STOP_CONFIRM_MS = 5000;
 /** `MoveJog` acknowledgement window; the controller answers in milliseconds. */
@@ -546,6 +549,8 @@ export function buildMg400MotionCommand(
   const l = name === 'MovL';
   return `${name}(${p.x},${p.y},${p.z},${r},User=0,Tool=0,${l ? 'SpeedL' : 'SpeedJ'}=${Math.max(1, Math.round(speed.value * 100))},${l ? 'AccL' : 'AccJ'}=${Math.max(1, Math.round(acceleration.value * 100))},CP=${blendPercent})`;
 }
+type MonitoringDispatch = { beforeWrite?: () => void };
+
 /** One in-flight response per command. A timeout quarantines the socket; never reuse a late reply. */
 class TextChannel {
   connectedAt?: number;
@@ -554,7 +559,8 @@ class TextChannel {
   private opening?: Promise<void>;
   private cancelOpening?: (error: unknown) => void;
   private buffer = '';
-  private serial: Promise<unknown> = Promise.resolve();
+  private requests: { telemetry: boolean; run: () => Promise<void> }[] = [];
+  private requestRunning = false;
   /**
    * Replies are matched to commands in the order the controller returns them.
    * A batch writes several independent commands at once and queues one entry
@@ -583,7 +589,11 @@ class TextChannel {
     const epoch = this.epoch;
     const opening: Promise<void> = new Promise<void>((resolve, reject) => {
       this.cancelOpening = reject;
-      const socket = createConnection({ host: this.host, port: this.port });
+      const socket = createConnection({
+        host: this.host,
+        port: this.port,
+        noDelay: true,
+      });
       this.socket = socket;
       this.buffer = '';
       socket.setEncoding('utf8');
@@ -663,8 +673,12 @@ class TextChannel {
     this.opening = opening;
     return opening;
   }
-  send(command: string, timeoutMs = this.timeoutMs): Promise<string> {
-    return this.sendWith(parseMg400Response, command, timeoutMs);
+  send(
+    command: string,
+    timeoutMs = this.timeoutMs,
+    monitoring?: MonitoringDispatch,
+  ): Promise<string> {
+    return this.sendWith(parseMg400Response, command, timeoutMs, monitoring);
   }
   /**
    * Send a command whose reply cannot go through the strict generic parser.
@@ -675,8 +689,9 @@ class TextChannel {
     parse: (line: string, command: string) => T,
     command: string,
     timeoutMs = this.timeoutMs,
+    monitoring?: MonitoringDispatch,
   ): Promise<T> {
-    return this.sendLines([command], timeoutMs).then(([line]) =>
+    return this.sendLines([command], timeoutMs, monitoring).then(([line]) =>
       parse(line, command),
     );
   }
@@ -700,6 +715,45 @@ class TextChannel {
       entries[index].parse(line, entries[index].command),
     );
   }
+  private schedule<T>(
+    work: () => Promise<T>,
+    telemetry = false,
+    monitoring?: MonitoringDispatch,
+  ): Promise<T> {
+    const epoch = this.epoch;
+    return new Promise<T>((resolve, reject) => {
+      const run = async () => {
+        try {
+          if (epoch !== this.epoch)
+            throw new RobotArmError(
+              'QUERY_INTERRUPTED',
+              'Command belongs to an isolated channel',
+              409,
+            );
+          resolve(await work());
+        } catch (error) {
+          reject(error);
+        }
+      };
+      let index = this.requests.length;
+      // Let the motion monitor overtake waiting telemetry, while respecting
+      // every command already sent and the ordering of controller writes.
+      if (monitoring)
+        while (index > 0 && this.requests[index - 1].telemetry) index--;
+      this.requests.splice(index, 0, { telemetry, run });
+      this.runNext();
+    });
+  }
+  private runNext(): void {
+    if (this.requestRunning) return;
+    const request = this.requests.shift();
+    if (!request) return;
+    this.requestRunning = true;
+    void request.run().then(() => {
+      this.requestRunning = false;
+      this.runNext();
+    });
+  }
   /**
    * Write the commands as one queued unit and collect their raw replies in
    * order. Parsing happens after every reply is in, so a bad reply can never
@@ -708,60 +762,64 @@ class TextChannel {
   private sendLines(
     commands: string[],
     timeoutMs = this.timeoutMs,
+    monitoring?: MonitoringDispatch,
   ): Promise<string[]> {
     if (!commands.length) return Promise.resolve([]);
-    const epoch = this.epoch;
-    const work = this.serial.then(() => {
-      if (epoch !== this.epoch)
-        throw new RobotArmError(
-          'QUERY_INTERRUPTED',
-          'Command belongs to an isolated channel',
-          409,
-        );
-      if (!this.connected)
-        throw new RobotArmError(
-          'DISCONNECTED',
-          'MG400 channel requires explicit reconnect',
-          503,
-        );
-      return new Promise<string[]>((resolve, reject) => {
-        const lines: string[] = [];
-        const timer = setTimeout(
-          () =>
-            this.close(
-              new RobotArmError(
-                'COMMAND_TIMEOUT',
-                'MG400 command completion is unknown',
-                504,
-                { command: commands.join(' + ') },
+    const telemetry =
+      !monitoring &&
+      commands.every((command) =>
+        /^(RobotMode|GetErrorID|GetPose|GetAngle|PositiveSolution)\(/.test(
+          command,
+        ),
+      );
+    return this.schedule(
+      () => {
+        if (!this.connected)
+          throw new RobotArmError(
+            'DISCONNECTED',
+            'MG400 channel requires explicit reconnect',
+            503,
+          );
+        monitoring?.beforeWrite?.();
+        return new Promise<string[]>((resolve, reject) => {
+          const lines: string[] = [];
+          const timer = setTimeout(
+            () =>
+              this.close(
+                new RobotArmError(
+                  'COMMAND_TIMEOUT',
+                  'MG400 command completion is unknown',
+                  504,
+                  { command: commands.join(' + ') },
+                ),
               ),
-            ),
-          timeoutMs,
-        );
-        for (const command of commands)
-          this.pending.push({
-            command,
-            timer,
-            resolve: (line) => {
-              lines.push(line);
-              if (lines.length === commands.length) {
+            timeoutMs,
+          );
+          for (const command of commands)
+            this.pending.push({
+              command,
+              timer,
+              resolve: (line) => {
+                lines.push(line);
+                if (lines.length === commands.length) {
+                  clearTimeout(timer);
+                  resolve(lines);
+                }
+              },
+              reject: (error) => {
                 clearTimeout(timer);
-                resolve(lines);
-              }
-            },
-            reject: (error) => {
-              clearTimeout(timer);
-              reject(error);
-            },
-          });
-        // The controller frames commands by their own syntax, not by lines:
-        // the single-command path never sent a newline either. Concatenating
-        // keeps both paths byte-compatible with that parser.
-        this.socket!.write(commands.join(''));
-      });
-    });
-    this.serial = work.catch(() => undefined);
-    return work;
+                reject(error);
+              },
+            });
+          // The controller frames commands by their own syntax, not by lines:
+          // the single-command path never sent a newline either. Concatenating
+          // keeps both paths byte-compatible with that parser.
+          this.socket!.write(commands.join(''));
+        });
+      },
+      telemetry,
+      monitoring,
+    );
   }
   /**
    * Send a command whose acknowledgement is not a contract, then drop the
@@ -776,7 +834,7 @@ class TextChannel {
     // release must reach the controller *before* the stop; writing straight to
     // the socket let a queued `MoveJog(axis)` land after it and keep the arm
     // moving with nobody holding the button.
-    const work = this.serial.then(async () => {
+    return this.schedule(async () => {
       const socket = this.socket;
       if (!socket) throw new RobotArmError('DISCONNECTED', 'No channel', 503);
       // `end()` flushes and sends FIN. Destroying right after the write can
@@ -792,8 +850,6 @@ class TextChannel {
       });
       this.close(undefined, true);
     });
-    this.serial = work.catch(() => undefined);
-    return work;
   }
   close(
     error: unknown = new RobotArmError(
@@ -1574,6 +1630,14 @@ export class Mg400Adapter implements RobotArmAdapter {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let released = false;
     let faultAt = 0;
+    let faultPollStartedAt: number | undefined;
+    let lastFaultPollMs: number | undefined;
+    type FaultReadTiming = {
+      queuedAt: number;
+      sentAt?: number;
+      sampledAt?: number;
+    };
+    let faultReadTiming: FaultReadTiming | undefined;
     let latest: SequenceFeedback | undefined;
     type QueuedPathTiming = {
       startedAt: number;
@@ -1594,6 +1658,9 @@ export class Mg400Adapter implements RobotArmAdapter {
       if (poseReading || released) return;
       poseReading = true;
       try {
+        // The dashboard is serial. Let the safety sample finish before adding
+        // another pose read between its requests.
+        if (faultPollStartedAt !== undefined) return;
         const sample = await this.readPoseSample(true);
         control();
         if (!released) {
@@ -1632,7 +1699,10 @@ export class Mg400Adapter implements RobotArmAdapter {
       } finally {
         poseReading = false;
         if (!released && generation === this.generation)
-          poseTimer = setTimeout(() => void readSequencePose(), 10);
+          poseTimer = setTimeout(
+            () => void readSequencePose(),
+            SEQUENCE_POSE_POLL_MS,
+          );
       }
     };
     let faultError: unknown;
@@ -1677,13 +1747,45 @@ export class Mg400Adapter implements RobotArmAdapter {
     };
     const pollFaults = async () => {
       const started = Date.now();
+      faultPollStartedAt = started;
+      faultReadTiming = undefined;
+      const monitoring = { beforeWrite: control };
+      const realtimeMode = () => {
+        const frame = this.feedback.current();
+        return frame &&
+          Date.now() - frame.receivedAt <= SEQUENCE_MODE_FRAME_MAX_AGE_MS
+          ? frame.mode
+          : undefined;
+      };
       try {
         this.requireConnected();
-        const mode = await this.readControllerMode();
+        const modeRead =
+          realtimeMode() === undefined
+            ? this.readControllerMode(monitoring)
+            : undefined;
         control();
         // The pose observer polls separately. Keep fault freshness independent
         // of the time needed to read or reconstruct a Cartesian pose.
-        const { fault, sampledAt } = await this.readControllerFaults();
+        const timing: FaultReadTiming = {
+          queuedAt: Date.now(),
+        };
+        faultReadTiming = timing;
+        const faultRead = this.readControllerFaults({
+          beforeWrite: () => {
+            control();
+            timing.sentAt = Date.now();
+          },
+        });
+        const [dashboardMode, { fault, sampledAt }] = await Promise.all([
+          modeRead,
+          faultRead,
+        ]);
+        timing.sampledAt = sampledAt;
+        control();
+        const mode =
+          dashboardMode ??
+          realtimeMode() ??
+          (await this.readControllerMode(monitoring));
         control();
         this.requireConnected();
         const faults = mg400Faults(fault.groups, mode);
@@ -1713,10 +1815,15 @@ export class Mg400Adapter implements RobotArmAdapter {
                   { cause: String(error) },
                 );
       } finally {
+        faultPollStartedAt = undefined;
+        lastFaultPollMs = Date.now() - started;
         if (!released && generation === this.generation)
           timer = setTimeout(
             () => void pollFaults(),
-            Math.max(0, 100 - (Date.now() - started)),
+            Math.max(
+              SEQUENCE_POSE_POLL_MS,
+              SEQUENCE_FAULT_POLL_MS - lastFaultPollMs,
+            ),
           );
       }
     };
@@ -1743,13 +1850,28 @@ export class Mg400Adapter implements RobotArmAdapter {
         control();
         if (controlOnly) return;
         if (faultError) throw faultError;
-        const faultSampleAgeMs = Date.now() - faultAt;
+        const now = Date.now();
+        const faultSampleAgeMs = now - faultAt;
         if (faultSampleAgeMs > 200)
           throw new RobotArmError(
             'SEQUENCE_FAULT_STATE_STALE',
             'MG400 fault state is older than 200 ms',
             409,
-            { faultSampleAgeMs },
+            {
+              faultSampleAgeMs,
+              lastFaultPollMs,
+              faultPollInFlightMs:
+                faultPollStartedAt === undefined
+                  ? undefined
+                  : now - faultPollStartedAt,
+              faultReadQueueMs: faultReadTiming
+                ? (faultReadTiming.sentAt ?? now) - faultReadTiming.queuedAt
+                : undefined,
+              faultReadResponseMs:
+                faultReadTiming?.sentAt === undefined
+                  ? undefined
+                  : (faultReadTiming.sampledAt ?? now) - faultReadTiming.sentAt,
+            },
           );
         const frame = this.feedback.current();
         if (
@@ -1884,7 +2006,7 @@ export class Mg400Adapter implements RobotArmAdapter {
       });
       timer = setTimeout(
         () => void pollFaults(),
-        Math.max(0, faultAt + 100 - Date.now()),
+        Math.max(0, faultAt + SEQUENCE_FAULT_POLL_MS - Date.now()),
       );
       return sequence;
     } catch (error) {
@@ -2173,6 +2295,10 @@ export class Mg400Adapter implements RobotArmAdapter {
       interval * STATE_POLL_IDLE_INTERVALS
     )
       return;
+    if (this.sequenceOwner) {
+      this.ensureStatePoller();
+      return;
+    }
     try {
       await this.refreshState();
     } catch {
@@ -2180,8 +2306,12 @@ export class Mg400Adapter implements RobotArmAdapter {
     }
     this.ensureStatePoller();
   }
-  private async readControllerMode() {
-    const body = await this.dashboard.send('RobotMode()');
+  private async readControllerMode(monitoring?: MonitoringDispatch) {
+    const body = await this.dashboard.send(
+      'RobotMode()',
+      undefined,
+      monitoring,
+    );
     const mode = Number(body);
     if (!isMg400Mode(mode))
       throw new RobotArmError('PROTOCOL_ERROR', 'Unknown MG400 mode', 502, {
@@ -2189,12 +2319,13 @@ export class Mg400Adapter implements RobotArmAdapter {
       });
     return mode;
   }
-  private async readControllerFaults() {
+  private async readControllerFaults(monitoring?: MonitoringDispatch) {
     // This parser tolerates the ErrorID prefix used by some firmware.
     const fault = await this.dashboard.sendWith(
       parseMg400ErrorIdResponse,
       'GetErrorID()',
       this.config.commandTimeoutMs,
+      monitoring,
     );
     const sampledAt = Date.now();
     this.lastFaultSampleAt = sampledAt;

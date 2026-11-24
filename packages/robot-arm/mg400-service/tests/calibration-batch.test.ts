@@ -1,6 +1,7 @@
 import type { ArmController } from '@midscene/arm-kit';
 import { RobotArmError } from '@midscene/arm-kit';
 import { ArmActionQueue } from '@midscene/arm-kit/internal/action-queue';
+import { verificationContextKey } from '@midscene/arm-kit/internal/calibration/verification/session-state';
 import { registerControllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import { fixture, pose } from '@midscene/arm-kit/internal/testkit/fixtures';
 import type { AssistedCalibrationState } from '@midscene/robotics-shared/assisted-contracts';
@@ -117,6 +118,13 @@ async function setup() {
     screens: () => f.store.list().screenTargets!,
     ensureHost: async (id: string) => entries.get(id).host,
     calibrateCameraImaging: rstest.fn(),
+    activateCameraImaging: rstest.fn(
+      async (_cameraId: string, screenId: string) => ({
+        state: 'ready' as const,
+        screenId,
+        active: true,
+      }),
+    ),
   } as unknown as PlaygroundDevices;
   const batch = new CalibrationBatch(devices);
   rstest.spyOn(f.runtime, 'parkScreenGroup').mockImplementation(async () => {
@@ -247,7 +255,7 @@ it('rejects an unconfirmed tool payload before creating a batch or starting samp
   }
 });
 
-it('prepares the last screen mapping and camera imaging before sampling any screen', async () => {
+it('prepares all mappings and activates each screen imaging profile before starting it', async () => {
   const f = await setup();
   const first = f.entries.get('one').host;
   const second = f.entries.get('two').host;
@@ -275,6 +283,11 @@ it('prepares the last screen mapping and camera imaging before sampling any scre
       imaging = 'ready';
       return { state: 'ready' };
     });
+  const activate = rstest.mocked(f.devices.activateCameraImaging);
+  activate.mockImplementation(async (_cameraId, screenId) => {
+    expect(f.starts).toEqual(screenId === 'one' ? [] : ['one']);
+    return { state: 'ready', screenId, active: true };
+  });
   await f.start();
   await rstest.waitFor(() =>
     expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
@@ -284,6 +297,10 @@ it('prepares the last screen mapping and camera imaging before sampling any scre
     expect(f.batch.read()?.items[1].status).toBe('awaiting-acceptance'),
   );
   expect(f.devices.calibrateCameraImaging).toHaveBeenCalledTimes(1);
+  expect(activate.mock.calls).toEqual([
+    ['cam', 'one'],
+    ['cam', 'two'],
+  ]);
 });
 
 it('waits for camera imaging to become ready before starting a screen', async () => {
@@ -310,6 +327,26 @@ it('waits for camera imaging to become ready before starting a screen', async ()
   );
 
   expect(f.devices.calibrateCameraImaging).toHaveBeenCalledTimes(2);
+});
+
+it('fails the batch before starting a screen whose imaging profile stays inactive', async () => {
+  const f = await setup();
+  const service = f.entries.get('one').host.service;
+  const setupState = service.setup();
+  service.setup = () => ({ ...setupState, imaging: { state: 'ready' } });
+  rstest.mocked(f.devices.activateCameraImaging).mockResolvedValue({
+    state: 'ready',
+    screenId: 'one',
+    active: false,
+  });
+
+  await f.start();
+  await rstest.waitFor(() => expect(f.batch.read()?.status).toBe('failed'));
+
+  expect(f.starts).toEqual([]);
+  expect(f.batch.read()?.items[0].error).toBe(
+    'Could not activate camera imaging for this screen.',
+  );
 });
 
 it('holds the shared queue while waiting for acceptance and retains completed screen results', async () => {
@@ -373,7 +410,7 @@ it('rejects stale commands, retries only the failed screen and stops its current
   expect(f.stops).toContain('two');
 });
 
-it('reports the drawing error when the active screen stops during Logo drawing', async () => {
+it('retains accepted calibration when Logo drawing stops and resumes at the next screen', async () => {
   const f = await setup();
   const error = 'MG400 fault state is older than 200 ms';
   f.entries
@@ -391,8 +428,16 @@ it('reports the drawing error when the active screen stops during Logo drawing',
   await rstest.waitFor(() =>
     expect(f.batch.read()).toMatchObject({ status: 'stopped', error }),
   );
-  expect(f.batch.read()?.items[0]).toMatchObject({ status: 'stopped', error });
+  const stopped = f.batch.read()!;
+  expect(stopped.items[0]).toMatchObject({
+    status: 'completed',
+    calibrationProfileId: 'saved-one',
+    note: error,
+  });
   expect(f.starts).toEqual(['one']);
+  await f.runtime.recover();
+  await f.batch.command(stopped.revision, 'retry');
+  await rstest.waitFor(() => expect(f.starts).toEqual(['one', 'two']));
 });
 
 it('continues boundary review on the same samples when manual acceptance is selected', async () => {
@@ -611,6 +656,99 @@ it('honours Stop while a retry is waiting for motion readiness', async () => {
     readiness.mockRestore();
   }
 });
+it('restores pending parking when the last accepted screen was saved before the queue stopped', async () => {
+  const f = await setup();
+  await f.start();
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
+  );
+  const stopped = (await f.batch.command(f.batch.read()!.revision, 'stop'))!;
+  const error = 'MG400 fault state is older than 200 ms';
+  stopped.currentIndex = 1;
+  Object.assign(stopped.items[0], {
+    status: 'completed',
+    calibrationProfileId: 'saved-one',
+  });
+  Object.assign(stopped.items[1], {
+    status: 'stopped',
+    error,
+    runIds: ['two-attempt'],
+  });
+  await f.store.saveCalibrationBatch(stopped);
+  const installationTeaching = f.store.installationTeaching({
+    ...f.binding,
+    cameraId: 'cam',
+  })!;
+  const key = verificationContextKey({
+    robot: f.robot,
+    tool: f.tool,
+    screen: f.screen,
+    installationTeaching,
+    minimumTravelTipZMm: installationTeaching.referencePose.positionMm.z,
+  });
+  for (const deviceId of ['one', 'two']) {
+    const workstation = f.store.list().workstation!;
+    const candidate = {
+      ...f.calibration,
+      id: `saved-${deviceId}`,
+      pendingParkingBatchId: stopped.id,
+    };
+    await f.store.commitCalibration(
+      {
+        ...f.binding,
+        id: `${deviceId}-calibration`,
+        stage: 'completed',
+        status: 'completed',
+        revision: 1,
+        dragMode: false,
+        boundary: { hoverCorners: true, hoverEdges: true, hoverHuman: true },
+        context: {
+          adapterId: f.robot.adapterId,
+          connectionIdentity: f.robot.connectionIdentity,
+          robotGeometryRevision: f.robot.geometryRevision,
+          toolGeometryRevision: f.tool.geometryRevision,
+          screenGeometryRevision: f.screen.geometryRevision,
+          workstationRevision: workstation.revision,
+          verificationKey: key,
+        },
+        auto: {
+          startPose: f.calibration.observationPose!,
+          fast: false,
+          deferParkingBatchId: stopped.id,
+          evidence: {
+            planeRmseMm: 0,
+            gridRmsPx: 0,
+            gridRmsMm: 0,
+            validationRmsPx: 0,
+            validationMaxPx: 0,
+            validationMaxMm: 0,
+            coverage: 1,
+            samples: [],
+          },
+        },
+        candidate,
+      },
+      undefined,
+      {
+        ...f.binding,
+        deviceId,
+        cameraId: 'cam',
+        calibrationProfileId: candidate.id,
+        revision: 0,
+        vision: workstation.vision!,
+      },
+    );
+  }
+  const restored = new CalibrationBatch(f.devices).read();
+  expect(restored?.status).toBe('stopped');
+  expect(restored?.items[1]).toMatchObject({
+    status: 'completed',
+    calibrationProfileId: 'saved-two',
+    note: error,
+  });
+  expect(f.runtime.parkScreenGroup).not.toHaveBeenCalled();
+});
+
 it('restores the confirmed travel height of a batch saved by an earlier version', async () => {
   const f = await setup();
   await f.start();
