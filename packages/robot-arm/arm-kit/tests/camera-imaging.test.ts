@@ -139,10 +139,19 @@ async function calibrationPattern(warm = false) {
 
 async function exposureReferencePattern({
   glare,
+  scale = 1,
 }: {
-  glare?: 'white-bar' | 'partial-ramp' | 'entire-ramp' | 'entire-screen';
+  glare?:
+    | 'white-bar'
+    | 'partial-ramp'
+    | 'colored-glare'
+    | 'entire-ramp'
+    | 'entire-screen';
+  scale?: number;
 } = {}) {
-  const levels = [205, 185, 154, 120, 86, 54, 19];
+  const levels = [205, 185, 154, 120, 86, 54, 19].map((value) =>
+    Math.round(Math.min(255, value * scale)),
+  );
   const strips = levels
     .map(
       (value, index) =>
@@ -156,12 +165,16 @@ async function exposureReferencePattern({
       ? '<rect x="0" y="584" width="58" height="192" fill="white"/>'
       : glare === 'partial-ramp'
         ? '<rect x="58" y="584" width="112" height="192" fill="white"/>'
-        : glare === 'entire-ramp'
-          ? '<rect x="0" y="560" width="400" height="240" fill="white"/>'
-          : glare === 'entire-screen'
-            ? '<rect width="400" height="800" fill="white"/>'
-            : '';
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><defs><pattern id="clean-checker" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="rgb(220,220,220)"/><rect width="8" height="8" fill="rgb(24,24,24)"/><rect x="8" y="8" width="8" height="8" fill="rgb(24,24,24)"/></pattern></defs><rect width="400" height="800" fill="#cfcfcf"/><rect width="400" height="144" fill="rgb(220,220,220)"/><rect y="144" width="400" height="416" fill="url(#clean-checker)"/>${strips}${glareOverlay}</svg>`;
+        : glare === 'colored-glare'
+          ? '<rect x="58" y="584" width="19" height="192" fill="rgb(255,0,0)"/>'
+          : glare === 'entire-ramp'
+            ? '<rect x="0" y="560" width="400" height="240" fill="white"/>'
+            : glare === 'entire-screen'
+              ? '<rect width="400" height="800" fill="white"/>'
+              : '';
+  const checkerWhite = Math.round(Math.min(255, 220 * scale));
+  const checkerBlack = Math.round(Math.min(255, 24 * scale));
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><defs><pattern id="clean-checker" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="rgb(${checkerWhite},${checkerWhite},${checkerWhite})"/><rect width="8" height="8" fill="rgb(${checkerBlack},${checkerBlack},${checkerBlack})"/><rect x="8" y="8" width="8" height="8" fill="rgb(${checkerBlack},${checkerBlack},${checkerBlack})"/></pattern></defs><rect width="400" height="800" fill="#cfcfcf"/><rect width="400" height="144" fill="rgb(${checkerWhite},${checkerWhite},${checkerWhite})"/><rect y="144" width="400" height="416" fill="url(#clean-checker)"/>${strips}${glareOverlay}</svg>`;
   return sharp(Buffer.from(svg)).jpeg({ quality: 100 }).toBuffer();
 }
 
@@ -658,6 +671,7 @@ describe('camera imaging', () => {
     ['clean ramp', undefined, 'grayscale-ramp'],
     ['a fully reflected white bar', 'white-bar', 'grayscale-ramp'],
     ['a partially reflected ramp', 'partial-ramp', 'grayscale-ramp'],
+    ['a colored reflection on the ramp', 'colored-glare', 'grayscale-ramp'],
     ['a fully reflected ramp', 'entire-ramp', 'fullscreen-masked'],
     ['a fully reflected screen', 'entire-screen', 'insufficient'],
   ] as const)(
@@ -690,8 +704,43 @@ describe('camera imaging', () => {
       }
       if (glare === 'partial-ramp')
         expect(assessment?.validToneLevels).toBeLessThan(7);
+      if (glare === 'colored-glare')
+        expect(assessment?.contaminationRatio).toBeGreaterThan(0);
     },
   );
+
+  it('selects the same target exposure when the white bar is reflected', async () => {
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const scores: Array<{ scale: number; score: number }> = [];
+    for (const scale of [0.85, 0.9, 0.95, 1, 1.05, 1.1]) {
+      const jpeg = await exposureReferencePattern({
+        glare: 'white-bar',
+        scale,
+      });
+      const reading = await measureCalibrationExposure(jpeg, [
+        { screenId: 'screen', correction },
+      ]);
+      scores.push({
+        scale,
+        score: reading.screenReadings[0]!.assessment.score,
+      });
+    }
+    expect(
+      scores.reduce((best, candidate) =>
+        candidate.score < best.score ? candidate : best,
+      ).scale,
+    ).toBe(1);
+  });
 
   it('matches the service overexposure and underexposure thresholds', () => {
     const base = {
@@ -1796,15 +1845,27 @@ describe('camera imaging', () => {
     await writeFile(
       file,
       JSON.stringify({
-        version: 6,
+        version: 7,
         cameraId: control.deviceId,
-        rois: [{ screenId, fingerprint }],
-        focus: { value: 45, score: 1 },
-        exposure: { value: -8 },
-        gain: { value: 16 },
-        whiteBalance: { value: 4800 },
-        brightness: { value: 132 },
-        contrast: { value: 136 },
+        screens: [
+          {
+            screenId,
+            fingerprint,
+            focus: { value: 45, score: 1 },
+            exposure: { value: -8 },
+            exposureReference: {
+              mode: 'grayscale-ramp',
+              confidence: 0.95,
+              contaminationRatio: 0,
+              validToneLevels: 7,
+            },
+            gain: { value: 16 },
+            whiteBalance: { value: 4800 },
+            brightness: { value: 132 },
+            contrast: { value: 136 },
+            calibratedAt: new Date().toISOString(),
+          },
+        ],
         original: {
           focus: { value: 100, mode: 'auto' },
           exposure: { value: -5, mode: 'auto' },
@@ -1848,6 +1909,62 @@ describe('camera imaging', () => {
         brightness: { value: 128, mode: 'manual' },
         contrast: { value: 128, mode: 'manual' },
       });
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('requires recalibration for an old v7 exposure without reflected-reference evidence', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const screenId = 'screen';
+    const fingerprint = createHash('sha256')
+      .update(JSON.stringify([screenId, correction]))
+      .digest('hex');
+    await writeFile(
+      cameraImagingFile(directory, control.deviceId),
+      JSON.stringify({
+        version: 7,
+        cameraId: control.deviceId,
+        screens: [
+          {
+            screenId,
+            fingerprint,
+            focus: { value: 45, score: 1 },
+            exposure: { value: -8 },
+            calibratedAt: new Date().toISOString(),
+          },
+        ],
+        calibratedAt: new Date().toISOString(),
+      }),
+    );
+    const imaging = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    try {
+      await imaging.load();
+      imaging.registerScreen(screenId, () => correction);
+      await imaging.resumeStored();
+      expect(imaging.status(screenId)).toMatchObject({
+        state: 'unconfigured',
+        message: 'Calibrate camera imaging for this screen',
+      });
+      expect(control.setCalls).toEqual([]);
     } finally {
       await imaging.close();
       await rm(directory, { recursive: true, force: true });

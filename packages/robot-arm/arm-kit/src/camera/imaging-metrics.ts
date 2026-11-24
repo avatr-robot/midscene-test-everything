@@ -1066,7 +1066,8 @@ function analyzeToneRamp(
     const clean = cells.filter(
       (cell) =>
         cell.mean <= center + Math.max(12, 3 * deviation) &&
-        cell.clippedRatio <= 0.2,
+        cell.clippedRatio <= 0.2 &&
+        (cell.mean < 45 || cell.chroma <= 0.18),
     );
     const clippedRatio =
       cells.reduce((sum, cell) => sum + cell.clippedRatio, 0) / cells.length;
@@ -1134,11 +1135,15 @@ function analyzeToneRamp(
         ),
       0,
     ) / Math.max(1, validIndexes.length);
+  const usingCheckerWhite = !active[0] && checker.usable;
   const white = active[0]
     ? observations[0]!
     : checker.usable
       ? checker.white
       : fit.white;
+  const whiteTarget = usingCheckerWhite
+    ? CALIBRATION_CHECKER_TARGET_WHITE
+    : CALIBRATION_TARGET_WHITE;
   const black = active[6]
     ? observations[6]!
     : checker.usable
@@ -1164,13 +1169,13 @@ function analyzeToneRamp(
     (1 - validIndexes.length / bars.length) * 0.35 +
     Math.max(0, 0.6 - levelSpan) * 0.5;
   const score =
-    Math.abs(white - CALIBRATION_TARGET_WHITE) / CALIBRATION_TARGET_WHITE +
+    Math.abs(white - whiteTarget) / whiteTarget +
     (Math.abs(black - CALIBRATION_TARGET_BLACK) / 96) * 0.25 +
     (residual / 255) * 2 +
     Math.max(0, clippedRatio - 0.05) * 2 +
     coveragePenalty;
   const direction =
-    white >= 238 || clippedRatio >= 0.25
+    white >= whiteTarget + (usingCheckerWhite ? 25 : 33) || clippedRatio >= 0.25
       ? 'too-bright'
       : white <= 155
         ? 'too-dark'

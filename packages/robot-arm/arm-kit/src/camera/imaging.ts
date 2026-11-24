@@ -540,7 +540,19 @@ export class CameraImagingController {
           )
         )
           return;
-        this.stored = value;
+        const screens = value.screens.filter(
+          (screen) =>
+            screen.exposureReference &&
+            ['grayscale-ramp', 'fullscreen-masked'].includes(
+              screen.exposureReference.mode,
+            ) &&
+            Number.isFinite(screen.exposureReference.confidence) &&
+            Number.isFinite(screen.exposureReference.contaminationRatio) &&
+            Number.isFinite(screen.exposureReference.validToneLevels),
+        );
+        this.stored = { ...value, screens };
+        if (screens.length !== value.screens.length)
+          await this.persist(this.stored);
         this.statusValue = { state: 'idle', updatedAt: Date.now() };
         return;
       }
@@ -553,44 +565,17 @@ export class CameraImagingController {
         return;
       // Version 5 could persist a clipped white-balance and tone result.
       if (value.version === 5) return;
-      const original = value.original;
-      if (value.rois.length === 1) {
-        const roi = value.rois[0]!;
-        this.stored = {
-          version: 7,
-          cameraId: value.cameraId,
-          screens: [
-            {
-              screenId: roi.screenId,
-              fingerprint: roi.fingerprint,
-              focus: { ...value.focus },
-              exposure: { ...value.exposure },
-              ...(value.gain ? { gain: { ...value.gain } } : {}),
-              ...(value.whiteBalance
-                ? { whiteBalance: { ...value.whiteBalance } }
-                : {}),
-              ...(value.brightness
-                ? { brightness: { ...value.brightness } }
-                : {}),
-              ...(value.contrast ? { contrast: { ...value.contrast } } : {}),
-              calibratedAt: value.calibratedAt,
-            },
-          ],
-          ...(original ? { original } : {}),
-          calibratedAt: value.calibratedAt,
-        };
-        await this.persist(this.stored);
-      } else {
-        // A shared multi-screen profile cannot be split into valid per-screen
-        // values. Preserve the original state while requiring recalibration.
-        this.stored = {
-          version: 7,
-          cameraId: value.cameraId,
-          screens: [],
-          ...(original ? { original } : {}),
-          calibratedAt: value.calibratedAt,
-        };
-      }
+      // Profiles written before reflected-reference handling cannot prove that
+      // their exposure was measured from clean references. Preserve the
+      // original hardware controls but require one fresh camera calibration.
+      this.stored = {
+        version: 7,
+        cameraId: value.cameraId,
+        screens: [],
+        ...(value.original ? { original: value.original } : {}),
+        calibratedAt: value.calibratedAt,
+      };
+      await this.persist(this.stored);
       this.statusValue = { state: 'idle', updatedAt: Date.now() };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
