@@ -500,6 +500,7 @@ export function buildMg400MotionCommand(
   name: 'MovL' | 'MovJ',
   pose: CartesianPose,
   options: MotionOptions = {},
+  blendPercent = 0,
 ): string {
   assertPose(pose);
   const q = pose.orientation;
@@ -534,10 +535,16 @@ export function buildMg400MotionCommand(
       'MG400 minimum ratio is 0.01; adjust the configured base parameters',
       422,
     );
+  if (!Number.isInteger(blendPercent) || blendPercent < 0 || blendPercent > 100)
+    throw new RobotArmError(
+      'MOTION_PARAMETER_LIMIT',
+      'MG400 continuous path ratio must be an integer from 0 to 100',
+      422,
+    );
   const r = mg400RzDegrees(pose);
   const p = pose.positionMm;
   const l = name === 'MovL';
-  return `${name}(${p.x},${p.y},${p.z},${r},User=0,Tool=0,${l ? 'SpeedL' : 'SpeedJ'}=${Math.max(1, Math.round(speed.value * 100))},${l ? 'AccL' : 'AccJ'}=${Math.max(1, Math.round(acceleration.value * 100))},CP=0)`;
+  return `${name}(${p.x},${p.y},${p.z},${r},User=0,Tool=0,${l ? 'SpeedL' : 'SpeedJ'}=${Math.max(1, Math.round(speed.value * 100))},${l ? 'AccL' : 'AccJ'}=${Math.max(1, Math.round(acceleration.value * 100))},CP=${blendPercent})`;
 }
 /** One in-flight response per command. A timeout quarantines the socket; never reuse a late reply. */
 class TextChannel {
@@ -1568,6 +1575,19 @@ export class Mg400Adapter implements RobotArmAdapter {
     let released = false;
     let faultAt = 0;
     let latest: SequenceFeedback | undefined;
+    type QueuedPathTiming = {
+      startedAt: number;
+      intervals: number;
+      slowSampleMs: number;
+      groups: {
+        firstTarget: number;
+        targets: number;
+        submittedMs: number;
+        acknowledgedMs: number;
+      }[];
+      lowSpeedWindows: { fromMs: number; toMs: number }[];
+    };
+    let queuedTrace: QueuedPathTiming | undefined;
     let poseTimer: ReturnType<typeof setTimeout> | undefined;
     let poseReading = false;
     const readSequencePose = async () => {
@@ -1576,13 +1596,37 @@ export class Mg400Adapter implements RobotArmAdapter {
       try {
         const sample = await this.readPoseSample(true);
         control();
-        if (!released)
+        if (!released) {
+          const receivedAt = Date.parse(sample.receivedAt);
+          if (
+            queuedTrace &&
+            latest &&
+            latest.receivedAt >= queuedTrace.startedAt
+          ) {
+            const interval = receivedAt - latest.receivedAt;
+            if (interval > 0 && interval <= 200) {
+              queuedTrace.intervals++;
+              if (
+                distance(sample.pose.positionMm, latest.pose.positionMm) *
+                  1000 <
+                interval
+              ) {
+                queuedTrace.slowSampleMs += interval;
+                const fromMs = latest.receivedAt - queuedTrace.startedAt;
+                const toMs = receivedAt - queuedTrace.startedAt;
+                const previous = queuedTrace.lowSpeedWindows.at(-1);
+                if (previous?.toMs === fromMs) previous.toMs = toMs;
+                else queuedTrace.lowSpeedWindows.push({ fromMs, toMs });
+              }
+            }
+          }
           latest = {
             sampleId: sample.sampleId,
             connectionGeneration: generation,
-            receivedAt: Date.parse(sample.receivedAt),
+            receivedAt,
             pose: sample.pose,
           };
+        }
       } catch (error) {
         if (!released) faultError = error;
       } finally {
@@ -1634,23 +1678,29 @@ export class Mg400Adapter implements RobotArmAdapter {
     const pollFaults = async () => {
       const started = Date.now();
       try {
-        const state = await this.getStateFresh();
+        this.requireConnected();
+        const mode = await this.readControllerMode();
         control();
+        // The pose observer polls separately. Keep fault freshness independent
+        // of the time needed to read or reconstruct a Cartesian pose.
+        const { fault, sampledAt } = await this.readControllerFaults();
+        control();
+        this.requireConnected();
+        const faults = mg400Faults(fault.groups, mode);
         if (
-          !state.connected ||
-          !state.enabled ||
-          state.paused ||
-          state.dragMode ||
-          state.faults.length ||
+          !isMg400ModeEnabled(mode) ||
+          isMg400ModePaused(mode) ||
+          mode === MG400_DRAG_MODE ||
+          faults.length ||
           this.softwarePaused
         )
           faultError = new RobotArmError(
             'ROBOT_FAULT',
             'MG400 is no longer ready during the sequence',
             409,
-            { faults: state.faults, mode: state.mode },
+            { faults, mode: String(mode) },
           );
-        faultAt = Date.now();
+        faultAt = sampledAt;
       } catch (error) {
         if (!released)
           faultError =
@@ -1689,32 +1739,35 @@ export class Mg400Adapter implements RobotArmAdapter {
       // Never use the incompatible 30004 TCP vector to time a handoff.
       await readSequencePose();
       if (faultError) throw faultError;
+      const checkFeedback = (controlOnly?: boolean) => {
+        control();
+        if (controlOnly) return;
+        if (faultError) throw faultError;
+        const faultSampleAgeMs = Date.now() - faultAt;
+        if (faultSampleAgeMs > 200)
+          throw new RobotArmError(
+            'SEQUENCE_FAULT_STATE_STALE',
+            'MG400 fault state is older than 200 ms',
+            409,
+            { faultSampleAgeMs },
+          );
+        const frame = this.feedback.current();
+        if (
+          frame &&
+          (!frame.enabled ||
+            frame.dragStatus !== 0 ||
+            frame.pauseCmdFlag ||
+            ![5, 7, 8].includes(frame.mode) ||
+            this.softwarePaused)
+        )
+          throw new RobotArmError(
+            'ROBOT_FAULT',
+            'MG400 sequence interrupted by controller state',
+            409,
+          );
+      };
       const sequence = createLinearMotionSequence(targets, options, {
-        check: (controlOnly) => {
-          control();
-          if (controlOnly) return;
-          if (faultError) throw faultError;
-          if (Date.now() - faultAt > 200)
-            throw new RobotArmError(
-              'SEQUENCE_FAULT_STATE_STALE',
-              'MG400 fault state is older than 200 ms',
-              409,
-            );
-          const frame = this.feedback.current();
-          if (
-            frame &&
-            (!frame.enabled ||
-              frame.dragStatus !== 0 ||
-              frame.pauseCmdFlag ||
-              ![5, 7, 8].includes(frame.mode) ||
-              this.softwarePaused)
-          )
-            throw new RobotArmError(
-              'ROBOT_FAULT',
-              'MG400 sequence interrupted by controller state',
-              409,
-            );
-        },
+        check: checkFeedback,
         feedback: () => latest,
         submit: async (target, terminal) => {
           control();
@@ -1733,6 +1786,49 @@ export class Mg400Adapter implements RobotArmAdapter {
           control();
           return { id: randomUUID(), acceptedAt: Date.now(), submittedAt };
         },
+        submitQueued: async (path, blendPercentages) => {
+          if (path.length > 48)
+            throw new RobotArmError(
+              'INVALID_SEQUENCE',
+              'MG400 queued paths are limited to 48 targets',
+              409,
+            );
+          const commands = path.map((target, index) => ({
+            command: buildMg400MotionCommand(
+              'MovL',
+              target.pose,
+              target.options,
+              blendPercentages[index],
+            ),
+            parse: parseMg400Response,
+          }));
+          this.assertMotionChannelReadyAfterDrag();
+          const submittedAt = Date.now();
+          const timing: QueuedPathTiming = {
+            startedAt: submittedAt,
+            intervals: 0,
+            slowSampleMs: 0,
+            groups: [],
+            lowSpeedWindows: [],
+          };
+          queuedTrace = timing;
+          for (let start = 0; start < commands.length; start += 4) {
+            checkFeedback();
+            this.invalidateStateSample();
+            const group = commands.slice(start, start + 4);
+            this.lastCommandAt = Date.now();
+            const submittedMs = this.lastCommandAt - submittedAt;
+            await this.motion.sendBatch(group);
+            timing.groups.push({
+              firstTarget: start + 1,
+              targets: group.length,
+              submittedMs,
+              acknowledgedMs: Date.now() - submittedAt,
+            });
+          }
+          control();
+          return { id: randomUUID(), acceptedAt: Date.now(), submittedAt };
+        },
         terminal: async (target) => {
           control();
           await this.motion.send(
@@ -1740,6 +1836,20 @@ export class Mg400Adapter implements RobotArmAdapter {
             Math.min(options.timeoutMs, this.config.motionTimeoutMs),
           );
           control();
+          if (queuedTrace) {
+            debugMg400(
+              `Queued path timing ${JSON.stringify({
+                elapsedMs: Date.now() - queuedTrace.startedAt,
+                sampleIntervals: queuedTrace.intervals,
+                sampledBelowOneMmPerSecondMs: queuedTrace.slowSampleMs,
+                groups: queuedTrace.groups,
+                lowSpeedWindows: queuedTrace.lowSpeedWindows.filter(
+                  ({ fromMs, toMs }) => toMs - fromMs >= 32,
+                ),
+              })}`,
+            );
+            queuedTrace = undefined;
+          }
           const state = await this.getStateFresh();
           control();
           assertIdle(state);
@@ -1772,7 +1882,10 @@ export class Mg400Adapter implements RobotArmAdapter {
         stopped: () => this.sequenceOwner !== owner,
         release,
       });
-      timer = setTimeout(() => void pollFaults(), 100);
+      timer = setTimeout(
+        () => void pollFaults(),
+        Math.max(0, faultAt + 100 - Date.now()),
+      );
       return sequence;
     } catch (error) {
       release();
@@ -2067,6 +2180,26 @@ export class Mg400Adapter implements RobotArmAdapter {
     }
     this.ensureStatePoller();
   }
+  private async readControllerMode() {
+    const body = await this.dashboard.send('RobotMode()');
+    const mode = Number(body);
+    if (!isMg400Mode(mode))
+      throw new RobotArmError('PROTOCOL_ERROR', 'Unknown MG400 mode', 502, {
+        body,
+      });
+    return mode;
+  }
+  private async readControllerFaults() {
+    // This parser tolerates the ErrorID prefix used by some firmware.
+    const fault = await this.dashboard.sendWith(
+      parseMg400ErrorIdResponse,
+      'GetErrorID()',
+      this.config.commandTimeoutMs,
+    );
+    const sampledAt = Date.now();
+    this.lastFaultSampleAt = sampledAt;
+    return { fault, sampledAt };
+  }
   private async queryState(forcePolling = false): Promise<RobotState> {
     const payloadGeneration = this.payloadEvidence().generation;
     // A fresh 30004 frame supplies mode and motion flags, never Base poses.
@@ -2144,24 +2277,8 @@ export class Mg400Adapter implements RobotArmAdapter {
         }
       }
     }
-    let mode: number;
-    if (feedback) mode = feedback.mode;
-    else {
-      const body = await this.dashboard.send('RobotMode()');
-      mode = Number(body);
-      if (!isMg400Mode(mode))
-        throw new RobotArmError('PROTOCOL_ERROR', 'Unknown MG400 mode', 502, {
-          body,
-        });
-    }
-    // Dedicated parser: this one query tolerates the `ErrorID,` prefix that some
-    // firmware uses. Every other command keeps the strict generic parser.
-    const fault = await this.dashboard.sendWith(
-      parseMg400ErrorIdResponse,
-      'GetErrorID()',
-      this.config.commandTimeoutMs,
-    );
-    this.lastFaultSampleAt = Date.now();
+    const mode = feedback?.mode ?? (await this.readControllerMode());
+    const { fault } = await this.readControllerFaults();
     // Mode 9 with no error codes is genuinely broken. Mode 10 is only paused: it
     // is enabled and carries no fault, and reporting it as one used to make
     // `Clear faults` impossible to satisfy, because ClearError() cannot leave

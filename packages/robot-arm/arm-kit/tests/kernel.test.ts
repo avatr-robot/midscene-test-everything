@@ -6,16 +6,77 @@ import {
   RobotKernel,
   validateMotionOptions,
 } from '../src/kernel.js';
+import { RobotDriverBoundary } from '../src/kernel/driver-boundary.js';
 import { ProfileStore, RobotArmRuntime } from '../src/runtime.js';
 import {
   stageOptions,
   validateContactPolicy,
 } from '../src/screen-interaction/motion-policy.js';
 import { planAction } from '../src/screen-interaction/planner.js';
-import { createFakeAdapter, runAdapterConformance } from '../src/testkit.js';
+import {
+  TestRobotAdapter,
+  createFakeAdapter,
+  runAdapterConformance,
+} from '../src/testkit.js';
 import { fixture, pose } from './fixtures.js';
 
 describe('versioned vendor-neutral kernel', () => {
+  it('reuses reachability within a sequence preflight scope until the controller stops', async () => {
+    const adapter = new TestRobotAdapter();
+    const reachability = rstest.fn(adapter.driver.checkReachability!);
+    adapter.driver.checkReachability = reachability;
+    const boundary = new RobotDriverBoundary(adapter);
+    await boundary.connect();
+    await adapter.enable();
+    const target = { pose: pose(1, 2, 100), options: {} };
+    const options = { signal: new AbortController().signal, timeoutMs: 1000 };
+    const preflight = boundary.createLinearPreflightScope(options.signal);
+    await boundary.preflightCartesian(
+      'linear',
+      target.pose,
+      target.options,
+      undefined,
+      preflight,
+    );
+    (
+      await boundary.beginLinearSequence([target], options, preflight)
+    )?.dispose();
+    expect(reachability).toHaveBeenCalledTimes(1);
+
+    await boundary.stop();
+    (
+      await boundary.beginLinearSequence([target], options, preflight)
+    )?.dispose();
+    expect(reachability).toHaveBeenCalledTimes(2);
+  });
+  it('reuses an inverse result for the same scoped pose with different motion options', async () => {
+    const adapter = new TestRobotAdapter();
+    const inverse = rstest.fn(async () => [0, 0, 0, 0]);
+    adapter.driver.inverseKinematics = inverse;
+    const boundary = new RobotDriverBoundary(adapter);
+    await boundary.connect();
+    await adapter.enable();
+    const scope = boundary.createLinearPreflightScope(
+      new AbortController().signal,
+    );
+    const target = pose(1, 2, 100);
+    await boundary.preflightCartesian('linear', target, {}, undefined, scope);
+    await boundary.preflightCartesian(
+      'linear',
+      target,
+      { speed: { kind: 'ratio', value: 0.5 } },
+      undefined,
+      scope,
+    );
+    expect(inverse).toHaveBeenCalledTimes(1);
+    expect(boundary.linearPreflightTiming(scope)).toMatchObject({
+      inverseKinematicsCalls: 1,
+      inverseKinematicsReused: 1,
+    });
+    await boundary.stop();
+    await boundary.preflightCartesian('linear', target, {}, undefined, scope);
+    expect(inverse).toHaveBeenCalledTimes(2);
+  });
   it('rejects malformed native diagnostics instead of returning an empty state', async () => {
     const fake = createFakeAdapter();
     const adapter: RobotArmAdapter = {

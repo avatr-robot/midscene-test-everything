@@ -225,6 +225,8 @@ export interface LinearSequenceOptions {
 export interface LinearMotionSequence {
   /** Indices increase; skipping a prevalidated intermediate target is allowed. */
   submit(index: number, mode?: 'feedback' | 'terminal'): Promise<MotionReceipt>;
+  /** Queue consecutive targets after a confirmed handoff. The last target must have zero blend. */
+  submitQueued?(blendPercentages: readonly number[]): Promise<MotionReceipt>;
   waitForHandoff(): Promise<CartesianHandoff>;
   /** Drain the current command before a conservative release. */
   waitForCurrent(): Promise<MotionResult>;

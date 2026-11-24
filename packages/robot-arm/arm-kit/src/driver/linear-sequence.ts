@@ -26,6 +26,10 @@ export interface LinearSequencePort {
     target: LinearSequenceTarget,
     terminal: boolean,
   ): Promise<MotionReceipt>;
+  submitQueued?(
+    targets: readonly LinearSequenceTarget[],
+    blendPercentages: readonly number[],
+  ): Promise<MotionReceipt>;
   terminal(target: LinearSequenceTarget): Promise<MotionResult>;
   stopped(): boolean;
   release(): void;
@@ -154,8 +158,52 @@ export function createLinearMotionSequence(
     readyForSuccessor = true;
     return result;
   };
+  const enqueue = port.submitQueued?.bind(port);
   return {
     check,
+    submitQueued: enqueue
+      ? async (blendPercentages) => {
+          check();
+          const tail = index + blendPercentages.length;
+          if (
+            submitting ||
+            confirming ||
+            observing ||
+            !readyForSuccessor ||
+            !receipt ||
+            tail >= targets.length ||
+            blendPercentages.at(-1) !== 0 ||
+            blendPercentages.some(
+              (value) => !Number.isInteger(value) || value < 0 || value > 100,
+            )
+          )
+            throw new RobotArmError(
+              'INVALID_SEQUENCE',
+              'Queued targets require a confirmed start and an unblended tail',
+              409,
+            );
+          const queued = targets.slice(index + 1, tail + 1);
+          submitting = true;
+          attempted = true;
+          readyForSuccessor = false;
+          index = tail;
+          receipt = undefined;
+          terminal = undefined;
+          try {
+            receipt = await enqueue(queued, [...blendPercentages]);
+            port.check(true);
+            if (options.signal?.aborted)
+              throw new RobotArmError(
+                'ACTION_STOPPED',
+                'Motion sequence interrupted',
+                409,
+              );
+            return receipt;
+          } finally {
+            submitting = false;
+          }
+        }
+      : undefined,
     async submit(next, mode = 'feedback') {
       if (mode === 'terminal') {
         if (disposed || finished || finishing || options.signal?.aborted)
