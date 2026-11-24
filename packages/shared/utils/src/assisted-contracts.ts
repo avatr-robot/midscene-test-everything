@@ -675,7 +675,15 @@ export interface CalibrationBatchState {
   sharedParkingFailureVisibility?: ScreenVisibilityEvidence;
   planVersion?: string;
   contextVersion?: string;
-  transfer?: CalibrationBatchPlan['transfer'];
+  /** Confirmed corridor recorded by an earlier version of batch calibration. */
+  transfer?: {
+    travelTipZMm: number;
+    highestObstacleZMm: number;
+    clearanceMm: number;
+    corridor: { minX: number; maxX: number; minY: number; maxY: number };
+    waypoints: WebPoint[];
+    corridorConfirmed: true;
+  };
   currentIndex: number;
   items: Array<{
     deviceId: string;
@@ -724,14 +732,6 @@ export interface CalibrationBatchPlan {
     expectedCenterMm?: WebPoint;
     expectedSource?: 'calibration' | 'estimate';
   }[];
-  transfer?: {
-    travelTipZMm: number;
-    highestObstacleZMm: number;
-    clearanceMm: number;
-    corridor: { minX: number; maxX: number; minY: number; maxY: number };
-    waypoints: WebPoint[];
-    corridorConfirmed: true;
-  };
 }
 export interface WorkstationScreenState {
   cameraId: string;

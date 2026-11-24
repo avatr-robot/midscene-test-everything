@@ -1,5 +1,5 @@
 import {
-  type CalibrationBatchPlan,
+  type CalibrationBatchState,
   type CalibrationProfile,
   type CameraAvoidanceEstimate,
   type CameraCorrection,
@@ -68,7 +68,7 @@ export function parkingFootprintClearance(
 
 export function assertParkingCorridor(
   tip: PlanePoint,
-  corridor?: NonNullable<CalibrationBatchPlan['transfer']>['corridor'],
+  corridor?: NonNullable<CalibrationBatchState['transfer']>['corridor'],
 ): void {
   if (
     corridor &&
@@ -104,7 +104,7 @@ export function sharedParkingPoints(
   footprintPoints: readonly PlanePoint[],
   references: readonly PlanePoint[],
   corridor:
-    | NonNullable<CalibrationBatchPlan['transfer']>['corridor']
+    | NonNullable<CalibrationBatchState['transfer']>['corridor']
     | undefined,
   cameraExcess: (point: PlanePoint) => number,
 ): PlanePoint[] {

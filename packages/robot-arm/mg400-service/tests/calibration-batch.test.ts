@@ -487,7 +487,7 @@ it('continues a fast batch through quality warnings and parks after both screens
   ).toHaveBeenCalledWith(f.batch.read()?.id);
   expect(f.runtime.parkScreenGroup).toHaveBeenCalledTimes(1);
 });
-it('includes the measured start in the confirmed transfer corridor and invalidates a plan after repositioning', async () => {
+it('starts a new calibration for every screen when they are already calibrated', async () => {
   const f = await setup();
   const secondScreen = await f.store.putScreen({
     ...f.screen,
@@ -519,21 +519,23 @@ it('includes the measured start in the confirmed transfer corridor and invalidat
       vision,
     });
   }
-  f.adapter.setPoseForTesting(pose(100, -180, 130));
   const plan = await f.batch.plan('cam');
-  expect(plan.transfer).toBeDefined();
-  expect(plan.transfer!.corridor.minY).toBeLessThanOrEqual(-180);
-  expect(plan.transfer!.travelTipZMm).toBeGreaterThanOrEqual(130);
-  f.adapter.setPoseForTesting(pose(100, -250, 130));
-  await expect(
-    f.batch.start({
-      cameraId: 'cam',
-      planVersion: plan.version,
-      horizontalConfirmed: true,
-      corridorConfirmed: true,
-    }),
-  ).rejects.toMatchObject({ code: 'STALE_CONTEXT' });
-  expect(f.adapter.movements).toHaveLength(0);
+  expect(plan.screens.map((screen) => screen.calibrated)).toEqual([true, true]);
+  const [first, second] = plan.screens;
+  await f.batch.start({
+    cameraId: 'cam',
+    planVersion: plan.version,
+    horizontalConfirmed: true,
+    acceptance: 'manual',
+  });
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
+  );
+  f.complete(first.screenId);
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[1].status).toBe('awaiting-acceptance'),
+  );
+  expect(f.starts).toEqual([first.screenId, second.screenId]);
 });
 it('rejects retry after geometry changes and releases the per-batch travel floor on stop', async () => {
   const f = await setup();
@@ -583,60 +585,32 @@ it('honours Stop while a retry is waiting for motion readiness', async () => {
     readiness.mockRestore();
   }
 });
-it('restores the confirmed travel height after a stopped batch is loaded again', async () => {
+it('restores the confirmed travel height of a batch saved by an earlier version', async () => {
   const f = await setup();
-  const secondScreen = await f.store.putScreen({
-    ...f.screen,
-    id: 'second-screen',
-    name: 'Second screen',
-  });
-  const secondCalibration = {
-    ...f.calibration,
-    id: 'second-calibration',
-    screenProfileId: secondScreen.id,
-    screenGeometryRevision: secondScreen.geometryRevision,
-    screenRevision: secondScreen.revision,
-    origin: { ...f.calibration.origin, x: f.calibration.origin.x + 300 },
-  };
-  await f.store.saveCalibration(secondCalibration);
-  const vision = f.store.list().workstation!.vision!;
-  for (const [deviceId, calibration] of [
-    ['one', f.calibration],
-    ['two', secondCalibration],
-  ] as const)
-    await f.store.acceptDeviceBinding({
-      deviceId,
-      cameraId: 'cam',
-      robotProfileId: f.robot.id,
-      toolProfileId: f.tool.id,
-      screenProfileId: calibration.screenProfileId,
-      calibrationProfileId: calibration.id,
-      revision: 0,
-      vision,
-    });
-  const plan = await f.batch.plan('cam');
-  await f.batch.start({
-    cameraId: 'cam',
-    planVersion: plan.version,
-    horizontalConfirmed: true,
-    corridorConfirmed: true,
-    acceptance: 'manual',
-  });
+  await f.start();
   await rstest.waitFor(() =>
     expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
   );
-  await f.batch.command(f.batch.read()!.revision, 'stop');
+  const stopped = (await f.batch.command(f.batch.read()!.revision, 'stop'))!;
+  const transfer = {
+    travelTipZMm: 130,
+    highestObstacleZMm: 110,
+    clearanceMm: 20,
+    corridor: { minX: 0, maxX: 400, minY: -200, maxY: 200 },
+    waypoints: [],
+    corridorConfirmed: true as const,
+  };
+  await f.store.saveCalibrationBatch({ ...stopped, transfer });
   await f.runtime.recover();
   const restored = new CalibrationBatch(f.devices);
   try {
-    expect(restored.read()?.transfer).toEqual(plan.transfer);
     await restored.command(restored.read()!.revision, 'retry');
     await rstest.waitFor(() =>
       expect(restored.read()?.items[0].status).toBe('awaiting-acceptance'),
     );
     expect(
       f.entries.get('one').host.service.setBatchTravelHeight,
-    ).toHaveBeenLastCalledWith(plan.transfer!.travelTipZMm);
+    ).toHaveBeenLastCalledWith(transfer.travelTipZMm);
     expect(f.starts).toEqual(['one', 'one']);
     expect(f.adapter.movements).toHaveLength(0);
   } finally {

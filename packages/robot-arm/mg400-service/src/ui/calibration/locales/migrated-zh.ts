@@ -200,7 +200,6 @@ const teachingBoundaryZh: Record<string, string> = {
   'Pause for acceptance on each screen': '每块屏幕等待人工验收',
   'Automatic transfer between screens uses the swept area below. Check the whole arm, cables and fixtures before starting.':
     '屏幕之间会自动转场，使用下方扫掠范围。开始前请检查整条机械臂、线缆和支架。',
-  'Transfer corridor (mm)': '转场走廊（mm）',
   'Confirm the fixed horizontal installation before the automatic batch':
     '开始自动标定前，请确认所有屏幕已水平固定。',
   'Confirm the automatic transfer corridor and clearance before the batch':
@@ -219,17 +218,11 @@ const teachingBoundaryZh: Record<string, string> = {
     '在已有标定的屏幕之间自动转场',
   'Transfer coordinates are stylus-tip millimeters in the robot base frame. Include every neighboring screen, fixture and cable in the measured obstacle height.':
     '转场坐标为机械臂基坐标系下的笔尖毫米坐标。测量最高障碍高度时，应包含所有相邻屏幕、支架和线缆。',
-  'Global travel tip Z (mm)': '全局横移笔尖 Z（mm）',
-  'Highest obstacle Z (mm)': '最高障碍 Z（mm）',
-  'Transfer clearance (mm)': '转场净空（mm）',
   'Corridor minimum X (mm)': '走廊最小 X（mm）',
   'Corridor maximum X (mm)': '走廊最大 X（mm）',
   'Corridor minimum Y (mm)': '走廊最小 Y（mm）',
   'Corridor maximum Y (mm)': '走廊最大 Y（mm）',
-  'Transfer waypoints': '转场途经点',
   'Optional waypoints: one X,Y pair per line': '可选途经点：每行填写一组 X,Y',
-  'I have checked the full arm swept corridor and the measured global clearance.':
-    '我已检查整条机械臂扫掠走廊，并确认实测的全局净空。',
   'Enter every measured transfer coordinate.': '请填写全部实测转场坐标。',
   'Enter one X,Y transfer waypoint per line.':
     '请每行填写一组 X,Y 转场途经点。',
@@ -246,8 +239,6 @@ const teachingBoundaryZh: Record<string, string> = {
   'Calibration Order': '标定顺序',
   'Retry This Screen': '重试当前屏幕',
   'Skip This Screen': '跳过当前屏幕',
-  'Check clearance for the full arm, cables and fixtures.':
-    '请检查整条机械臂、线缆和支架的转场净空。',
   'Keep the phone page visible and the workspace clear.':
     '保持手机页面在前台，作业区无障碍。',
   'Prepare selected screen mapping': '准备所选屏幕映射',

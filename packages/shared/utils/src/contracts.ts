@@ -1063,7 +1063,7 @@ export interface CalibrationSession extends ProfileBinding {
       /** Additional tip clearance for moving through the confirmed corridor. */
       corridorTravelTipZMm?: number;
       corridor?: NonNullable<
-        import('./assisted-contracts.js').CalibrationBatchPlan['transfer']
+        import('./assisted-contracts.js').CalibrationBatchState['transfer']
       >['corridor'];
     };
   };

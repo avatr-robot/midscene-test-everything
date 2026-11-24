@@ -55,7 +55,6 @@ export class CalibrationBatch {
   private choice?: 'retry' | 'skip';
   private writes: Promise<unknown> = Promise.resolve();
   private stopRevision?: number;
-  private transfer?: CalibrationBatchPlan['transfer'];
   constructor(private readonly devices: PlaygroundDevices) {}
   get active() {
     return Boolean(this.task || this.starting || this.stopping || this.busy);
@@ -68,7 +67,6 @@ export class CalibrationBatch {
       const saved = this.runtime.profileStore.list().calibrationBatch;
       if (!saved) return null;
       this.state = structuredClone(saved);
-      this.transfer = this.state.transfer;
       if (['running', 'waiting', 'stopping'].includes(this.state.status)) {
         this.state.status = 'stopped';
         this.state.revision++;
@@ -204,7 +202,6 @@ export class CalibrationBatch {
           409,
         );
     }
-    this.transfer = state.transfer;
   }
   private async assertPerspectives(cameraId: string) {
     for (const target of this.devices
@@ -669,69 +666,6 @@ export class CalibrationBatch {
     );
     const first = current >= 0 ? current : reference;
     if (first > 0) entries.unshift(...entries.splice(first, 1));
-    let transfer: CalibrationBatchPlan['transfer'];
-    if (entries.length > 1 && entries.every((e) => e.calibration && e.screen)) {
-      const points = entries.flatMap((e) =>
-        [
-          [0, 0],
-          [e.screen!.physicalWidthMm, 0],
-          [e.screen!.physicalWidthMm, e.screen!.physicalHeightMm],
-          [0, e.screen!.physicalHeightMm],
-        ].map(([x, y]) => ({
-          x:
-            e.calibration!.origin.x +
-            e.calibration!.xAxis.x * x +
-            e.calibration!.yAxis.x * y,
-          y:
-            e.calibration!.origin.y +
-            e.calibration!.xAxis.y * x +
-            e.calibration!.yAxis.y * y,
-          z:
-            e.calibration!.origin.z +
-            e.calibration!.xAxis.z * x +
-            e.calibration!.yAxis.z * y,
-        })),
-      );
-      const highest = Math.max(...points.map((p) => p.z));
-      const parking = this.savedSharedPosition(cameraId);
-      const corridorPoints = parking
-        ? [
-            ...points,
-            contactPoint(
-              parking,
-              this.runtime.profileStore.getTool(input.toolProfileId).offsetMm,
-            ),
-          ]
-        : points;
-      transfer = {
-        travelTipZMm: Math.max(
-          Math.ceil(highest + 60),
-          Math.ceil(tip.z),
-          contactPoint(
-            teaching.referencePose,
-            this.runtime.profileStore.getTool(input.toolProfileId).offsetMm,
-          ).z,
-        ),
-        highestObstacleZMm: Math.ceil(highest + 40),
-        clearanceMm: 20,
-        corridor: {
-          minX: Math.floor(
-            Math.min(tip.x, ...corridorPoints.map((p) => p.x)) - 40,
-          ),
-          maxX: Math.ceil(
-            Math.max(tip.x, ...corridorPoints.map((p) => p.x)) + 40,
-          ),
-          minY: Math.floor(
-            Math.min(tip.y, ...corridorPoints.map((p) => p.y)) - 40,
-          ),
-          maxY: Math.ceil(
-            Math.max(tip.y, ...corridorPoints.map((p) => p.y)) + 40,
-          ),
-        },
-        waypoints: [],
-        corridorConfirmed: true,
-      };
-    }
     const version = createHash('sha256')
       .update(
         semanticJson([
@@ -744,7 +678,6 @@ export class CalibrationBatch {
             this.devices.entries.get(e.target.id)?.camera.getCorrection(),
           ]),
           input,
-          transfer,
           this.runtime.stopRevision,
         ]),
       )
@@ -752,7 +685,6 @@ export class CalibrationBatch {
     return {
       cameraId,
       version,
-      transfer,
       screens: entries.map((e, index) => {
         const quad =
           e.calibration && e.screen && calibrationQuad(e.calibration, e.screen);
@@ -780,7 +712,6 @@ export class CalibrationBatch {
     planVersion: string;
     horizontalConfirmed: boolean;
     compliantSetupConfirmed?: boolean;
-    corridorConfirmed?: boolean;
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual' | 'automatic';
   }) {
@@ -806,12 +737,11 @@ export class CalibrationBatch {
         );
       if (
         input.horizontalConfirmed !== true ||
-        (samplingMode === 'slide' && input.compliantSetupConfirmed !== true) ||
-        (plan.transfer && input.corridorConfirmed !== true)
+        (samplingMode === 'slide' && input.compliantSetupConfirmed !== true)
       )
         throw new RobotArmError(
           'CONFIRMATION_REQUIRED',
-          'Confirm fixed screens, a compliant tip for Fast, and the full arm corridor before starting',
+          'Confirm fixed screens and a compliant tip for Fast before starting',
           409,
         );
       const selected = this.selection(input.cameraId);
@@ -820,7 +750,6 @@ export class CalibrationBatch {
       const sharedSafePosition = this.savedSharedPosition(input.cameraId);
       this.assertLaunchCurrent(launchRevision);
       this.stopRevision = this.runtime.stopRevision;
-      this.transfer = plan.transfer;
       this.state = {
         id: randomUUID(),
         revision: 0,
@@ -836,7 +765,6 @@ export class CalibrationBatch {
         acceptance: input.acceptance ?? 'automatic',
         planVersion: plan.version,
         contextVersion,
-        transfer: plan.transfer,
         items: plan.screens.map((s) => ({
           deviceId: s.screenId,
           screenId: s.screenId,
@@ -1113,7 +1041,7 @@ export class CalibrationBatch {
                 );
               return status;
             };
-            host.service.setBatchTravelHeight(this.transfer?.travelTipZMm);
+            host.service.setBatchTravelHeight(state.transfer?.travelTipZMm);
             if (state.usesSharedSafePosition)
               host.service.setBatchParking(state.id);
             const selection = this.selection(state.cameraId!);
@@ -1133,7 +1061,7 @@ export class CalibrationBatch {
                 const z = Math.max(
                   contactPoint(teaching.referencePose, tool.offsetMm).z,
                   source.origin.z + 30,
-                  this.transfer?.travelTipZMm ?? Number.NEGATIVE_INFINITY,
+                  state.transfer?.travelTipZMm ?? Number.NEGATIVE_INFINITY,
                 );
                 host.service.setBatchReference(
                   flangePose(

@@ -158,8 +158,7 @@ export interface CalibrationBatchPanelHandle {
  *
  * The section is informational plus the running queue: the primary action lives
  * in the workspace footer, and the confirmation dialog carries the safety
- * acknowledgements. The server plans the screens, the order and the transfer
- * corridor.
+ * acknowledgements. The server plans the screen order.
  */
 export const CalibrationBatchPanel = forwardRef<
   CalibrationBatchPanelHandle,
@@ -191,7 +190,6 @@ export const CalibrationBatchPanel = forwardRef<
     useState<CalibrationBatchSamplingMode>('slide');
   const [horizontalConfirmed, setHorizontalConfirmed] = useState(false);
   const [manualAcceptance, setManualAcceptance] = useState(false);
-  const [corridorConfirmed, setCorridorConfirmed] = useState(false);
   const latest = useRef({ onChanged, onActiveChange });
   latest.current = { onChanged, onActiveChange };
   const signature = useRef('');
@@ -284,11 +282,9 @@ export const CalibrationBatchPanel = forwardRef<
       const next = await api.calibrationBatchPlan(cameraId);
       if (!mounted.current) return;
       setPlan(next);
-      speakCalibration('batchClearance', 2);
       setHorizontalConfirmed(false);
       setSamplingMode('slide');
       setManualAcceptance(false);
-      setCorridorConfirmed(false);
     });
   useImperativeHandle(
     ref,
@@ -315,7 +311,6 @@ export const CalibrationBatchPanel = forwardRef<
         compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
         samplingMode,
         ...(manualAcceptance ? { acceptance: 'manual' as const } : {}),
-        ...(plan.transfer ? { corridorConfirmed: true as const } : {}),
       });
       setPlan(undefined);
       setStartedHere(true);
@@ -425,9 +420,6 @@ export const CalibrationBatchPanel = forwardRef<
       })}
     </div>
   );
-  const needsCorridor = Boolean(plan?.transfer);
-  const readyToStart =
-    horizontalConfirmed && (!needsCorridor || corridorConfirmed);
   return (
     <section
       className="robot-calibration-batch"
@@ -827,7 +819,7 @@ export const CalibrationBatchPanel = forwardRef<
             <Button onClick={() => setPlan(undefined)}>{t('Cancel')}</Button>
             <Button
               type="primary"
-              disabled={!readyToStart || working}
+              disabled={!horizontalConfirmed || working}
               loading={working}
               onClick={start}
             >
@@ -903,50 +895,6 @@ export const CalibrationBatchPanel = forwardRef<
           >
             {t('Pause for acceptance on each screen')}
           </Checkbox>
-          {plan?.transfer && (
-            <>
-              <Alert
-                showIcon
-                message={t(
-                  'Check clearance for the full arm, cables and fixtures.',
-                )}
-                type="warning"
-              />
-              <ul>
-                <li>
-                  {t('Global travel tip Z (mm)')}: {plan.transfer.travelTipZMm}
-                </li>
-                <li>
-                  {t('Highest obstacle Z (mm)')}:{' '}
-                  {plan.transfer.highestObstacleZMm}
-                </li>
-                <li>
-                  {t('Transfer clearance (mm)')}: {plan.transfer.clearanceMm}
-                </li>
-                <li>
-                  {t('Transfer corridor (mm)')}: X {plan.transfer.corridor.minX}{' '}
-                  … {plan.transfer.corridor.maxX}, Y{' '}
-                  {plan.transfer.corridor.minY} … {plan.transfer.corridor.maxY}
-                </li>
-                {plan.transfer.waypoints.length > 0 && (
-                  <li>
-                    {t('Transfer waypoints')}:{' '}
-                    {plan.transfer.waypoints
-                      .map((point) => `${point.x},${point.y}`)
-                      .join(' · ')}
-                  </li>
-                )}
-              </ul>
-              <Checkbox
-                checked={corridorConfirmed}
-                onChange={(event) => setCorridorConfirmed(event.target.checked)}
-              >
-                {t(
-                  'I have checked the full arm swept corridor and the measured global clearance.',
-                )}
-              </Checkbox>
-            </>
-          )}
         </Space>
       </Modal>
     </section>
