@@ -276,19 +276,23 @@ describe('phone-assisted calibration coordinator', () => {
           runs.every((r) => r.speed.kind === f.screen.actionSpeed.kind),
         ).toBe(true);
         expect(runs[0].targets[0].name).toBe('Initial lift');
-        expect(runs[1].targets.some((t) => t.name === 'Corner 1 lift')).toBe(
-          true,
+        expect(runs[0].targets.at(-1)?.name).toBe('Boundary edge 4');
+        const contactZ = 30 - f.screen.pressDepthMm;
+        const contactRun = runs[1].targets;
+        const contactTargets = contactRun.filter(
+          ({ positionMm }) => Math.abs(positionMm.z - contactZ) < 0.005,
         );
-        expect(
-          runs[1].targets.some((t) => t.name === 'Boundary segment 1 lift'),
-        ).toBe(true);
-        const contactTargets = runs[1].targets.filter(
-          ({ name }) =>
-            name.endsWith(' contact') || name.startsWith('Boundary edge '),
+        expect(contactTargets).toHaveLength(5);
+        expect(contactTargets.at(-1)?.positionMm).toEqual(
+          contactTargets[0].positionMm,
         );
-        expect(contactTargets).toHaveLength(12);
-        for (const { positionMm } of contactTargets)
-          expect(positionMm.z).toBeCloseTo(30 - f.screen.pressDepthMm);
+        const firstContact = contactRun.indexOf(contactTargets[0]);
+        expect(contactRun.slice(firstContact, firstContact + 5)).toEqual(
+          contactTargets,
+        );
+        expect(contactRun[firstContact + 5].positionMm.z).toBeGreaterThan(
+          contactZ,
+        );
         await expect(
           f.service.command(before.id, 'accept', true),
         ).rejects.toThrow('Complete boundary verification');
@@ -1779,9 +1783,7 @@ it.each([
       const hoverRun = state.calibration?.verificationRuns?.find(
         (run) => run.group === 'hover',
       );
-      expect(hoverRun?.targets.at(-1)?.name).toBe(
-        mode === 'slide' ? 'Boundary edge 4' : 'Return observation',
-      );
+      expect(hoverRun?.targets.at(-1)?.name).toBe('Boundary edge 4');
       const automatic = await f.service.acceptAutomatically();
       expect(automatic.accepted).toBe(true);
       const saved = f.service.status()!;

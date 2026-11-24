@@ -42,6 +42,7 @@ export interface CalibrationHost {
   drag(enter: boolean): Promise<void>;
   target(p: CartesianPose, ctx: ApplicationContext): void;
   preflight(targets: MotionTarget[], ctx: ApplicationContext): Promise<void>;
+  /** Resolves after the target pose has been measured and confirmed stable. */
   move(
     p: CartesianPose,
     ctx: ApplicationContext,
@@ -105,12 +106,13 @@ export async function applyCalibrationCommand(
         allowUnacceptedHover: true,
         returnPose: s.auto.startPose,
         fast,
-        continueAtBoundary: fast,
+        continueAtBoundary: true,
       });
       await runBoundaryVerification(this, s, ctx, 'contact', {
         allowUnacceptedHover: true,
         returnPose: s.auto.startPose,
         fast,
+        continuousContact: true,
       });
       if (s.auto.deferParkingBatchId) {
         s.stage = 'verification';
