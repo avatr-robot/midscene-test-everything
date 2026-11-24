@@ -37,6 +37,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { activateCameraImaging } from '../cameras';
 import { useArmTheme } from '../theme';
 import {
   CalibrationPowerButton,
@@ -72,6 +73,7 @@ import {
   t,
   useLanguage,
 } from './i18n';
+import { finishCameraImagingForScreen } from './imaging-completion';
 import {
   RobotVisionApiError,
   RobotVisionClient,
@@ -896,20 +898,17 @@ function GuidedContent({
     }
   };
   const waitForImagingCalibration = useCallback(async () => {
-    const deadline = Date.now() + 120_000;
     try {
-      while (currentBase.current === base) {
-        const { imaging } = await client.assistedCalibrationSetup();
-        if (imaging?.state === 'ready' || imaging?.state === 'unsupported')
-          return;
-        if (imaging?.state === 'error')
-          throw new Error(
-            imaging.message ?? 'Could not calibrate the camera image.',
-          );
-        if (Date.now() >= deadline)
-          throw new Error('Timed out while calibrating the camera image.');
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      await finishCameraImagingForScreen({
+        screenId: selectedId,
+        load: () => client.assistedCalibrationSetup(),
+        activate: async () => {
+          const imaging = await activateCameraImaging(cameraId, selectedId);
+          if (!imaging) throw new Error('Camera imaging switch failed');
+          return imaging;
+        },
+        shouldContinue: () => currentBase.current === base,
+      });
     } catch (cause) {
       if (currentBase.current === base)
         void message.warning(
@@ -918,7 +917,7 @@ function GuidedContent({
           ),
         );
     }
-  }, [base, client, message]);
+  }, [base, cameraId, client, message, selectedId]);
   const detected = useCallback(
     async (
       _session: unknown,
