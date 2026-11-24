@@ -12,14 +12,16 @@ export type CameraPreviewView = 'raw' | 'corrected';
 type FrameTransform = (frame: CameraFrame) => Promise<Buffer>;
 
 /**
- * A phone-screen preview lives in a panel of a few hundred CSS pixels. Cap the
- * rectified stream so a multi-megapixel target does not block the Node event
- * loop (and every other request) several times per second.
+ * Keep enough detail for small UI text when the preview is shown full screen,
+ * while still capping a multi-megapixel target before rectifying every frame.
  */
-const CORRECTED_PREVIEW_MAX_SIDE = 900;
-const CORRECTED_PREVIEW_MAX_PIXELS = 450_000;
-/** Every camera frame is cheap enough at this size with nearest sampling. */
+export const CORRECTED_PREVIEW_OPTIONS = {
+  maxSide: 1600,
+  maxPixels: 1_440_000,
+  sampling: 'bilinear',
+} as const;
 const CORRECTED_PREVIEW_INTERVAL_MS = 0;
+const PREVIEW_TRANSFORM_CONCURRENCY = 4;
 /**
  * Calibration keeps the right-hand preview mounted while the perspective
  * editor opens live and corrected previews. Four streams leave two of the
@@ -123,8 +125,8 @@ export function registerClientPreview(
 }
 
 /**
- * One MJPEG response over one live stream. Frames are dropped, never queued, so
- * a slow perspective transform cannot build latency or outlive its viewer.
+ * One MJPEG response over one live stream. Bounded concurrent transforms keep
+ * the stream smooth while preserved frame order prevents latency or reordering.
  */
 async function streamFrames(
   res: ServerResponse,
@@ -144,36 +146,57 @@ async function streamFrames(
   res.socket?.setTimeout(30_000, () => res.destroy());
   let blocked = false;
   let blockedSince = 0;
-  let processing = false;
+  let inFlight = 0;
   let lastWrittenAt = 0;
-  const writeFrame = async (frame: CameraFrame) => {
-    if (res.destroyed || res.writableEnded) return;
-    if (blocked) {
-      if (Date.now() - blockedSince > 10_000) res.destroy();
-      return;
-    }
-    if (processing) return;
-    if (minIntervalMs && Date.now() - lastWrittenAt < minIntervalMs) return;
-    processing = true;
-    try {
-      const jpeg = transform ? await transform(frame) : frame.jpeg;
-      if (res.destroyed || res.writableEnded) return;
+  let nextFrame = 0;
+  let nextWrite = 0;
+  const completed = new Map<number, Buffer>();
+  const maxInFlight =
+    transform && !minIntervalMs ? PREVIEW_TRANSFORM_CONCURRENCY : 1;
+  const flush = () => {
+    while (
+      !res.destroyed &&
+      !res.writableEnded &&
+      !blocked &&
+      completed.has(nextWrite)
+    ) {
+      const jpeg = completed.get(nextWrite)!;
+      completed.delete(nextWrite);
+      nextWrite += 1;
       const header = Buffer.from(
         `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`,
       );
       blocked = !res.write(Buffer.concat([header, jpeg, Buffer.from('\r\n')]));
       blockedSince = blocked ? Date.now() : 0;
       lastWrittenAt = Date.now();
+    }
+  };
+  const writeFrame = async (frame: CameraFrame) => {
+    if (res.destroyed || res.writableEnded) return;
+    if (blocked) {
+      if (Date.now() - blockedSince > 10_000) res.destroy();
+      return;
+    }
+    if (inFlight + completed.size >= maxInFlight) return;
+    if (minIntervalMs && Date.now() - lastWrittenAt < minIntervalMs) return;
+    const sequence = nextFrame++;
+    inFlight += 1;
+    try {
+      const jpeg = transform ? await transform(frame) : frame.jpeg;
+      if (res.destroyed || res.writableEnded) return;
+      completed.set(sequence, jpeg);
+      flush();
     } catch {
       // Never silently substitute raw frames for an invalid corrected view.
       res.destroy();
     } finally {
-      processing = false;
+      inFlight -= 1;
     }
   };
   const drained = () => {
     blocked = false;
     blockedSince = 0;
+    flush();
   };
   const ended = () => res.end();
   res.on('drain', drained);
@@ -235,15 +258,13 @@ export async function streamCameraPreview(
   }
 }
 
-function rectifyPreviewFrame(
+export function rectifyPreviewFrame(
   camera: DeviceEntry['camera'],
   frame: CameraFrame,
 ) {
-  return camera.rectifiedFrame(frame.jpeg, {
-    maxSide: CORRECTED_PREVIEW_MAX_SIDE,
-    maxPixels: CORRECTED_PREVIEW_MAX_PIXELS,
-    sampling: 'nearest',
-  });
+  if (typeof camera.rectifiedPreviewFrame === 'function')
+    return camera.rectifiedPreviewFrame(frame.jpeg, CORRECTED_PREVIEW_OPTIONS);
+  return camera.rectifiedFrame(frame.jpeg, CORRECTED_PREVIEW_OPTIONS);
 }
 
 function closedResponse(res: ServerResponse) {

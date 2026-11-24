@@ -265,9 +265,19 @@ export class PlaygroundDevices {
         }
       : undefined;
   }
-  async setCameraImagingPattern(cameraId: string, request?: string) {
+  async setCameraImagingPattern(
+    cameraId: string,
+    request?: string,
+    screenIds?: readonly string[],
+  ) {
+    const requested = screenIds?.length ? new Set(screenIds) : undefined;
     const hosts = [...this.entries.values()]
-      .filter((entry) => entry.cameraId === cameraId && entry.host)
+      .filter(
+        (entry) =>
+          entry.cameraId === cameraId &&
+          entry.host &&
+          (!requested || requested.has(entry.device.id)),
+      )
       .map((entry) => entry.host!);
     if (!request) {
       for (const host of hosts) host.service.clearImagingPattern();
@@ -276,6 +286,12 @@ export class PlaygroundDevices {
     const connected = hosts.filter(
       (host) => host.service.phoneStatus().state === 'connected',
     );
+    if (requested && connected.length !== requested.size)
+      throw new RobotArmError(
+        'PHONE_UNAVAILABLE',
+        'Reconnect every target screen calibration page before tuning the camera image.',
+        409,
+      );
     if (!connected.length)
       throw new RobotArmError(
         'PHONE_UNAVAILABLE',
@@ -312,12 +328,29 @@ export class PlaygroundDevices {
         409,
       );
   }
-  async calibrateCameraImaging(cameraId: string) {
+  async calibrateCameraImaging(
+    cameraId: string,
+    screenIds?: readonly string[],
+  ) {
+    const targetIds = screenIds?.length
+      ? [...new Set(screenIds)]
+      : [...this.entries.values()]
+          .filter((entry) => entry.cameraId === cameraId && entry.host)
+          .map((entry) => entry.device.id);
+    if (!targetIds.length)
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'No mapped screens are available for camera imaging calibration',
+        409,
+      );
     const request = randomUUID();
+    await this.setCameraImagingPattern(cameraId, request, targetIds);
     try {
-      await this.setCameraImagingPattern(cameraId, request);
       const entry = [...this.entries.values()].find(
-        (item) => item.cameraId === cameraId && item.host,
+        (item) =>
+          item.cameraId === cameraId &&
+          item.host &&
+          targetIds.includes(item.device.id),
       );
       if (!entry)
         throw new RobotArmError(
@@ -325,10 +358,24 @@ export class PlaygroundDevices {
           'No calibration host is active for this camera',
           409,
         );
-      return await entry.camera.calibrateImaging();
+      return await entry.camera.calibrateScreens(targetIds);
     } finally {
-      await this.setCameraImagingPattern(cameraId);
+      await this.setCameraImagingPattern(cameraId, undefined, targetIds);
     }
+  }
+
+  async activateCameraImaging(cameraId: string, screenId: string) {
+    const target = this.screenTarget(screenId);
+    if (!target || target.cameraId !== cameraId)
+      throw new RobotArmError(
+        'PROFILE_MISMATCH',
+        'Screen belongs to another camera',
+        409,
+      );
+    const entry = this.entries.get(screenId) ?? (await this.open(screenId));
+    if (entry.cameraId !== cameraId)
+      throw new RobotArmError('PROFILE_MISMATCH', 'Screen camera changed', 409);
+    return entry.camera.activateImaging();
   }
   async ensureHost(id: string, runningOnly = false) {
     const entry = runningOnly ? this.entries.get(id) : await this.open(id);
@@ -351,7 +398,7 @@ export class PlaygroundDevices {
         deviceId: id,
         markerCodes: this.markerCodes(id),
         onImagingPattern: (request) =>
-          this.setCameraImagingPattern(entry.cameraId, request),
+          this.setCameraImagingPattern(entry.cameraId, request, [id]),
         basePath: `/api/devices/${encodeURIComponent(id)}/calibration`,
         phoneLinks: () => this.phoneLinks(token),
       });

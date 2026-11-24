@@ -1043,17 +1043,35 @@ export class CalibrationBatch {
           409,
         );
     }
-    const imaging = prepared[0].service.setup().imaging?.state;
-    if (imaging === 'ready' || imaging === 'unsupported') return;
     await this.update(() => {
       const row = state.items[state.currentIndex];
       row.status = 'preparing';
       row.note = 'Optimizing camera image quality';
     });
     this.check(signal);
-    await this.devices.calibrateCameraImaging(cameraId);
+    await this.ensureBatchImaging(
+      cameraId,
+      state.items
+        .filter((row) => !terminal(row.status))
+        .map((row) => row.deviceId),
+    );
     this.check(signal);
   }
+  private async ensureBatchImaging(
+    cameraId: string,
+    deviceIds: readonly string[],
+  ) {
+    const missing: string[] = [];
+    for (const deviceId of deviceIds) {
+      const host = await this.devices.ensureHost(deviceId);
+      const imaging = host.service.setup().imaging;
+      if (!imaging || !['ready', 'unsupported'].includes(imaging.state))
+        missing.push(deviceId);
+    }
+    if (missing.length)
+      await this.devices.calibrateCameraImaging(cameraId, missing);
+  }
+
   private async run(
     signal: AbortSignal,
     operatorConfirmedParking: boolean,

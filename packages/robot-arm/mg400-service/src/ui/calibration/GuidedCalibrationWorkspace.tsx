@@ -896,7 +896,7 @@ function GuidedContent({
     }
   };
   const waitForImagingCalibration = useCallback(async () => {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + 120_000;
     try {
       while (currentBase.current === base) {
         const { imaging } = await client.assistedCalibrationSetup();
