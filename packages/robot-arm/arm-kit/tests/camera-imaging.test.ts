@@ -137,6 +137,34 @@ async function calibrationPattern(warm = false) {
   return sharp(Buffer.from(svg)).jpeg({ quality: 100 }).toBuffer();
 }
 
+async function exposureReferencePattern({
+  glare,
+}: {
+  glare?: 'white-bar' | 'partial-ramp' | 'entire-ramp' | 'entire-screen';
+} = {}) {
+  const levels = [205, 185, 154, 120, 86, 54, 19];
+  const strips = levels
+    .map(
+      (value, index) =>
+        `<rect x="${Math.floor((index * 400) / 7)}" y="584" width="${Math.ceil(
+          400 / 7,
+        )}" height="192" fill="rgb(${value},${value},${value})"/>`,
+    )
+    .join('');
+  const glareOverlay =
+    glare === 'white-bar'
+      ? '<rect x="0" y="584" width="58" height="192" fill="white"/>'
+      : glare === 'partial-ramp'
+        ? '<rect x="58" y="584" width="112" height="192" fill="white"/>'
+        : glare === 'entire-ramp'
+          ? '<rect x="0" y="560" width="400" height="240" fill="white"/>'
+          : glare === 'entire-screen'
+            ? '<rect width="400" height="800" fill="white"/>'
+            : '';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800"><defs><pattern id="clean-checker" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="rgb(220,220,220)"/><rect width="8" height="8" fill="rgb(24,24,24)"/><rect x="8" y="8" width="8" height="8" fill="rgb(24,24,24)"/></pattern></defs><rect width="400" height="800" fill="#cfcfcf"/><rect width="400" height="144" fill="rgb(220,220,220)"/><rect y="144" width="400" height="416" fill="url(#clean-checker)"/>${strips}${glareOverlay}</svg>`;
+  return sharp(Buffer.from(svg)).jpeg({ quality: 100 }).toBuffer();
+}
+
 describe('camera imaging', () => {
   it('adjusts imaging before marker capture without a perspective and restores it on failure', async () => {
     const controls = new FakeCameraControl();
@@ -626,6 +654,45 @@ describe('camera imaging', () => {
     );
   });
 
+  it.each([
+    ['clean ramp', undefined, 'grayscale-ramp'],
+    ['a fully reflected white bar', 'white-bar', 'grayscale-ramp'],
+    ['a partially reflected ramp', 'partial-ramp', 'grayscale-ramp'],
+    ['a fully reflected ramp', 'entire-ramp', 'fullscreen-masked'],
+    ['a fully reflected screen', 'entire-screen', 'insufficient'],
+  ] as const)(
+    'classifies exposure references for %s',
+    async (_label, glare, mode) => {
+      const jpeg = await exposureReferencePattern({ glare });
+      const correction: CameraCorrection = {
+        points: {
+          topLeft: { x: 0, y: 0 },
+          topRight: { x: 399, y: 0 },
+          bottomRight: { x: 399, y: 799 },
+          bottomLeft: { x: 0, y: 799 },
+        },
+        sourceWidth: 400,
+        sourceHeight: 800,
+        rotation: 0,
+      };
+      const reading = await measureCalibrationExposure(jpeg, [
+        { screenId: 'screen', correction },
+      ]);
+      const assessment = reading.screenReadings[0]?.assessment;
+      expect(assessment).toMatchObject({ mode });
+      if (mode === 'grayscale-ramp')
+        expect(assessment?.validToneLevels).toBeGreaterThanOrEqual(4);
+      if (glare === 'white-bar') {
+        expect(assessment?.validToneLevels).toBeLessThan(7);
+        expect(assessment?.warnings).toContain(
+          'The white calibration bar was excluded',
+        );
+      }
+      if (glare === 'partial-ramp')
+        expect(assessment?.validToneLevels).toBeLessThan(7);
+    },
+  );
+
   it('matches the service overexposure and underexposure thresholds', () => {
     const base = {
       mean: 120,
@@ -923,6 +990,17 @@ describe('camera imaging', () => {
         screenReadings: Array<{
           screenId: string;
           metrics: Record<string, number>;
+          assessment: {
+            mode: 'grayscale-ramp';
+            score: number;
+            direction?: 'too-bright' | 'too-dark';
+            confidence: number;
+            contaminationRatio: number;
+            validToneLevels: number;
+            white: number;
+            black: number;
+            warnings: string[];
+          };
         }>;
       }>;
       optimizeExposureForScreens(
@@ -935,6 +1013,7 @@ describe('camera imaging', () => {
         screenReadings: screens.map(({ screenId }) => {
           const target = screenId === 'left' ? -8 : -5;
           const mean = Math.max(0, 205 - Math.abs(value - target) * 10);
+          const score = Math.abs(mean - 205) / 205;
           return {
             screenId,
             metrics: {
@@ -950,6 +1029,16 @@ describe('camera imaging', () => {
               hiComponentCount: 0,
               hiComponentLargestShare: 0,
             },
+            assessment: {
+              mode: 'grayscale-ramp',
+              score,
+              confidence: 1,
+              contaminationRatio: 0,
+              validToneLevels: 7,
+              white: mean,
+              black: 24,
+              warnings: [],
+            },
           };
         }),
       };
@@ -961,6 +1050,187 @@ describe('camera imaging', () => {
       ]);
       expect(result.get('left')?.exposure).toBe(-8);
       expect(result.get('right')?.exposure).toBe(-5);
+    } finally {
+      await controller.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('excludes screens without clean exposure evidence from shared exposure', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const control = new FakeCameraControl();
+    const controller = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    const search = controller as unknown as {
+      calibrationExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<{
+        screenReadings: Array<{
+          screenId: string;
+          metrics: Record<string, number>;
+          assessment: {
+            mode: 'grayscale-ramp' | 'insufficient';
+            score: number;
+            confidence: number;
+            contaminationRatio: number;
+            validToneLevels: number;
+            white: number;
+            black: number;
+            warnings: string[];
+          };
+        }>;
+      }>;
+      optimizeExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<Map<string, { exposure: number }>>;
+      screenErrors: Map<string, string>;
+    };
+    search.calibrationExposureForScreens = async (screens) => ({
+      screenReadings: screens.map(({ screenId }) => ({
+        screenId,
+        metrics: {
+          mean: screenId === 'left' ? 205 : 250,
+          stddev: 12,
+          brightRatio: 0.8,
+          darkRatio: 0.05,
+          p95: 230,
+          p99: 240,
+          overExposedRatio: screenId === 'left' ? 0 : 0.6,
+          underExposedRatio: 0,
+          hiTileRatio: 0,
+          hiComponentCount: 0,
+          hiComponentLargestShare: 0,
+        },
+        assessment:
+          screenId === 'left'
+            ? {
+                mode: 'grayscale-ramp',
+                score: Math.abs(control.values.exposure.value + 6) / 10,
+                confidence: 1,
+                contaminationRatio: 0,
+                validToneLevels: 7,
+                white: 205,
+                black: 24,
+                warnings: [],
+              }
+            : {
+                mode: 'insufficient',
+                score: 1_000,
+                confidence: 0,
+                contaminationRatio: 1,
+                validToneLevels: 0,
+                white: 255,
+                black: 255,
+                warnings: ['Clean exposure references are unavailable'],
+              },
+      })),
+    });
+    try {
+      const result = await search.optimizeExposureForScreens([
+        { screenId: 'left', correction },
+        { screenId: 'right', correction },
+      ]);
+      expect(result.get('left')?.exposure).toBe(-6);
+      expect(result.has('right')).toBe(false);
+      expect(search.screenErrors.get('right')).toBe(
+        'Clean exposure references are unavailable',
+      );
+    } finally {
+      await controller.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses exposure selection when every screen reference is obscured', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const controller = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const search = controller as unknown as {
+      calibrationExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<{
+        screenReadings: Array<{
+          screenId: string;
+          metrics: Record<string, number>;
+          assessment: {
+            mode: 'insufficient';
+            score: number;
+            confidence: number;
+            contaminationRatio: number;
+            validToneLevels: number;
+            white: number;
+            black: number;
+            warnings: string[];
+          };
+        }>;
+      }>;
+      optimizeExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<Map<string, { exposure: number }>>;
+    };
+    search.calibrationExposureForScreens = async (screens) => ({
+      screenReadings: screens.map(({ screenId }) => ({
+        screenId,
+        metrics: {
+          mean: 255,
+          stddev: 0,
+          brightRatio: 1,
+          darkRatio: 0,
+          p95: 255,
+          p99: 255,
+          overExposedRatio: 1,
+          underExposedRatio: 0,
+          hiTileRatio: 1,
+          hiComponentCount: 1,
+          hiComponentLargestShare: 1,
+        },
+        assessment: {
+          mode: 'insufficient',
+          score: 1_000,
+          confidence: 0,
+          contaminationRatio: 1,
+          validToneLevels: 0,
+          white: 255,
+          black: 255,
+          warnings: ['Clean exposure references are unavailable'],
+        },
+      })),
+    });
+    try {
+      await expect(
+        search.optimizeExposureForScreens([{ screenId: 'left', correction }]),
+      ).rejects.toThrow('obscured by reflection');
     } finally {
       await controller.close();
       await rm(directory, { recursive: true, force: true });
@@ -1637,27 +1907,30 @@ describe('camera imaging', () => {
       rotation: 0,
     };
     const controller = imaging as unknown as {
-      currentCalibrationExposureReading(): Promise<{
-        selected: {
-          mean: number;
-          stddev: number;
-          brightRatio: number;
-          darkRatio: number;
-          p95: number;
-          p99: number;
-          overExposedRatio: number;
-          underExposedRatio: number;
-          hiTileRatio: number;
-          hiComponentCount: number;
-          hiComponentLargestShare: number;
-        };
-        updatedAt: number;
+      calibrationExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<{
+        screenReadings: Array<{
+          screenId: string;
+          metrics: Record<string, number>;
+          assessment: {
+            mode: 'grayscale-ramp';
+            score: number;
+            direction?: 'too-bright' | 'too-dark';
+            confidence: number;
+            contaminationRatio: number;
+            validToneLevels: number;
+            white: number;
+            black: number;
+            warnings: string[];
+          };
+        }>;
       }>;
       optimizeExposureAndGain(
         screens: Array<{ screenId: string; correction: CameraCorrection }>,
       ): Promise<{ value: number; gain?: number }>;
     };
-    controller.currentCalibrationExposureReading = async () => {
+    controller.calibrationExposureForScreens = async (screens) => {
       const mean = Math.min(
         254,
         5 +
@@ -1665,20 +1938,37 @@ describe('camera imaging', () => {
           (control.values.gain.value - 100) * 0.6,
       );
       return {
-        selected: {
-          mean,
-          stddev: 8,
-          brightRatio: 0.8,
-          darkRatio: 0.05,
-          p95: Math.min(255, mean + 10),
-          p99: Math.min(255, mean + 20),
-          overExposedRatio: Math.max(0, (mean - 245) / 20),
-          underExposedRatio: Math.max(0, (175 - mean) / 175),
-          hiTileRatio: 0,
-          hiComponentCount: 0,
-          hiComponentLargestShare: 0,
-        },
-        updatedAt: Date.now(),
+        screenReadings: screens.map(({ screenId }) => ({
+          screenId,
+          metrics: {
+            mean,
+            stddev: 8,
+            brightRatio: 0.8,
+            darkRatio: 0.05,
+            p95: Math.min(255, mean + 10),
+            p99: Math.min(255, mean + 20),
+            overExposedRatio: Math.max(0, (mean - 245) / 20),
+            underExposedRatio: Math.max(0, (175 - mean) / 175),
+            hiTileRatio: 0,
+            hiComponentCount: 0,
+            hiComponentLargestShare: 0,
+          },
+          assessment: {
+            mode: 'grayscale-ramp',
+            score: Math.abs(mean - 205) / 205,
+            ...(mean > 238
+              ? { direction: 'too-bright' as const }
+              : mean < 155
+                ? { direction: 'too-dark' as const }
+                : {}),
+            confidence: 1,
+            contaminationRatio: 0,
+            validToneLevels: 7,
+            white: mean,
+            black: 24,
+            warnings: [],
+          },
+        })),
       };
     };
     try {
@@ -1933,80 +2223,6 @@ describe('camera imaging', () => {
     }
   });
 
-  it('converges calibration exposure from overexposed ROI samples', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
-    const control = new FakeCameraControl();
-    control.values.exposure = {
-      ...control.values.exposure,
-      value: -5,
-      mode: 'manual',
-    };
-    const stream = {
-      getInfo: () => ({
-        state: 'running',
-        width: 400,
-        height: 800,
-        fps: 30,
-        frameId: 1,
-        hasFrame: true,
-        actualFps: 30,
-      }),
-      getFrame: async () => ({
-        id: 1,
-        capturedAt: Date.now(),
-        jpeg: Buffer.alloc(0),
-      }),
-    };
-    const imaging = new CameraImagingController(
-      { id: 'camera', name: 'Camera', backend: 'dshow' },
-      stream as never,
-      directory,
-      control,
-    );
-    const metrics = {
-      mean: 250,
-      stddev: 3,
-      brightRatio: 1,
-      darkRatio: 0,
-      p95: 255,
-      p99: 255,
-      overExposedRatio: 1,
-      underExposedRatio: 0,
-      hiTileRatio: 1,
-      hiComponentCount: 1,
-      hiComponentLargestShare: 1,
-    };
-    const controller = imaging as unknown as {
-      currentCalibrationExposureReading(): Promise<{
-        selected: typeof metrics;
-        updatedAt: number;
-      }>;
-      convergeExposureForCalibration(): Promise<void>;
-    };
-    controller.currentCalibrationExposureReading = async () => ({
-      selected: metrics,
-      updatedAt: Date.now(),
-    });
-    try {
-      await controller.convergeExposureForCalibration();
-      expect(control.values.exposure).toMatchObject({
-        value: -11,
-        mode: 'manual',
-      });
-      expect(
-        control.setCalls.filter((call) => call.property === 'exposure'),
-      ).toHaveLength(2);
-      expect(
-        control.setCalls.some(
-          (call) => call.property === 'exposure' && call.mode === 'auto',
-        ),
-      ).toBe(false);
-    } finally {
-      await imaging.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  }, 10_000);
-
   it('keeps background exposure changes limited to extreme samples', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
@@ -2178,8 +2394,42 @@ describe('camera imaging', () => {
       }),
       optimizeExposureForScreens: async () =>
         new Map([
-          ['left', { exposure: -8, score: 0.1, gain: 0 }],
-          ['right', { exposure: -4, score: 0.2, gain: 0 }],
+          [
+            'left',
+            {
+              exposure: -8,
+              score: 0.1,
+              gain: 0,
+              assessment: {
+                mode: 'grayscale-ramp' as const,
+                score: 0.1,
+                confidence: 1,
+                contaminationRatio: 0,
+                validToneLevels: 7,
+                white: 205,
+                black: 24,
+                warnings: [],
+              },
+            },
+          ],
+          [
+            'right',
+            {
+              exposure: -4,
+              score: 0.2,
+              gain: 0,
+              assessment: {
+                mode: 'grayscale-ramp' as const,
+                score: 0.2,
+                confidence: 1,
+                contaminationRatio: 0,
+                validToneLevels: 7,
+                white: 205,
+                black: 24,
+                warnings: [],
+              },
+            },
+          ],
         ]),
       tuneToneForScreens: async () =>
         new Map([
@@ -2222,6 +2472,12 @@ describe('camera imaging', () => {
           screenId: string;
           focus: { value: number };
           exposure: { value: number };
+          exposureReference: {
+            mode: string;
+            confidence: number;
+            contaminationRatio: number;
+            validToneLevels: number;
+          };
         }>;
       };
       expect(stored.screens).toHaveLength(2);
@@ -2230,12 +2486,24 @@ describe('camera imaging', () => {
       ).toMatchObject({
         focus: { value: 40 },
         exposure: { value: -8 },
+        exposureReference: {
+          mode: 'grayscale-ramp',
+          confidence: 1,
+          contaminationRatio: 0,
+          validToneLevels: 7,
+        },
       });
       expect(
         stored.screens.find((screen) => screen.screenId === 'right'),
       ).toMatchObject({
         focus: { value: 180 },
         exposure: { value: -4 },
+        exposureReference: {
+          mode: 'grayscale-ramp',
+          confidence: 1,
+          contaminationRatio: 0,
+          validToneLevels: 7,
+        },
       });
 
       await imaging.activateScreen('right');

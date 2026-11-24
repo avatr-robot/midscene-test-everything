@@ -15,13 +15,14 @@ import type { CalibrationImagingStatus } from '../assisted-contracts.js';
 import type { CameraCorrection } from '../contracts.js';
 import { RobotArmError } from '../contracts.js';
 import {
+  type CalibrationExposureReading,
+  type ExposureCalibrationAssessment,
   type FocusReading,
   type ImagingScreen,
   type LumaMetrics,
   type ToneReading,
   type WhiteBalanceReading,
   classifyExposureExtreme,
-  exposureCalibrationScore,
   exposureSeverity,
   exposureTargetDirection,
   isStructuredDarkUiHighlight,
@@ -44,6 +45,12 @@ interface StoredScreenImaging {
   fingerprint: string;
   focus: { value: number; score: number };
   exposure: { value: number };
+  exposureReference?: {
+    mode: ExposureCalibrationAssessment['mode'];
+    confidence: number;
+    contaminationRatio: number;
+    validToneLevels: number;
+  };
   gain?: { value: number };
   whiteBalance?: { value: number };
   brightness?: { value: number };
@@ -85,7 +92,6 @@ const CONSECUTIVE_SAMPLES = 2;
 const CAPTURE_SETTLE_MS = 300;
 const CAPTURE_TIMEOUT_MS = 2_000;
 const MAX_CAPTURE_ITERATIONS = 3;
-const MAX_CALIBRATION_EXPOSURE_ITERATIONS = 6;
 const MAX_STEP_UNITS = 3;
 const CONTROL_SETTLE_MS = 120;
 const MARKER_FOCUS_SETTLE_MS = 600;
@@ -1060,6 +1066,11 @@ export class CameraImagingController {
       const gain = original.gain?.supportsManual
         ? (await controls.read()).gain
         : undefined;
+      if (exposure.assessment.mode === 'fullscreen-masked')
+        warnings.push(
+          'Camera exposure used the masked full-screen reference because the grayscale bar was obscured',
+        );
+      warnings.push(...exposure.assessment.warnings);
 
       this.statusValue = {
         state: 'tone',
@@ -1153,6 +1164,12 @@ export class CameraImagingController {
         fingerprint: correctionFingerprint(screen),
         focus: { value: focus.value, score: focus.score },
         exposure: { value: finalExposure.value },
+        exposureReference: {
+          mode: exposure.assessment.mode,
+          confidence: exposure.assessment.confidence,
+          contaminationRatio: exposure.assessment.contaminationRatio,
+          validToneLevels: exposure.assessment.validToneLevels,
+        },
         ...(finalControls.gain
           ? { gain: { value: finalControls.gain.value } }
           : {}),
@@ -1345,7 +1362,11 @@ export class CameraImagingController {
         if (!exposureResult || !focusResult) return [];
         const toneResult = tone.get(screen.screenId);
         const whiteBalanceValue = whiteBalance.get(screen.screenId);
-        const warnings: string[] = [];
+        const warnings = [...exposureResult.assessment.warnings];
+        if (exposureResult.assessment.mode === 'fullscreen-masked')
+          warnings.push(
+            'Camera exposure used the masked full-screen reference because the grayscale bar was obscured',
+          );
         if (
           focusResult.value === focusResult.min ||
           focusResult.value === focusResult.max
@@ -1369,6 +1390,12 @@ export class CameraImagingController {
               score: focusResult.score,
             },
             exposure: { value: exposureResult.exposure },
+            exposureReference: {
+              mode: exposureResult.assessment.mode,
+              confidence: exposureResult.assessment.confidence,
+              contaminationRatio: exposureResult.assessment.contaminationRatio,
+              validToneLevels: exposureResult.assessment.validToneLevels,
+            },
             ...(original.gain?.supportsManual
               ? {
                   gain: {
@@ -1463,9 +1490,16 @@ export class CameraImagingController {
       this.stream.getInfo().fps,
     ) ?? { min: exposure.min, max: exposure.max };
     const seen = new Set<number>();
+    const insufficient = new Map<string, string>();
     const best = new Map<
       string,
-      { exposure: number; score: number; metrics: LumaMetrics }
+      {
+        exposure: number;
+        score: number;
+        metrics: LumaMetrics;
+        assessment: ExposureCalibrationAssessment;
+        gain?: number;
+      }
     >();
     const evaluate = async (value: number) => {
       const quantized = quantizeControl(value, exposure);
@@ -1476,8 +1510,17 @@ export class CameraImagingController {
       await delay(CONTROL_SETTLE_MS);
       const reading = await this.calibrationExposureForScreens(screens);
       for (const screen of reading.screenReadings) {
+        if (screen.assessment.mode === 'insufficient') {
+          insufficient.set(
+            screen.screenId,
+            screen.assessment.warnings.at(-1) ??
+              'Clean exposure references are unavailable',
+          );
+          continue;
+        }
+        insufficient.delete(screen.screenId);
         const score =
-          exposureCalibrationScore(screen.metrics) +
+          screen.assessment.score +
           distancePenalty(key, exposure.value, window, 0.02);
         const current = best.get(screen.screenId);
         if (!current || score < current.score - 1e-9)
@@ -1485,6 +1528,7 @@ export class CameraImagingController {
             exposure: key,
             score,
             metrics: screen.metrics,
+            assessment: screen.assessment,
           });
       }
     };
@@ -1499,12 +1543,25 @@ export class CameraImagingController {
     for (const value of fine)
       if (value >= window.min && value <= window.max) await evaluate(value);
 
+    if (!best.size)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Camera exposure references are obscured by reflection. Adjust the lighting or camera angle and retry.',
+        409,
+      );
+    for (const screen of screens) {
+      const error = insufficient.get(screen.screenId);
+      if (!best.has(screen.screenId) && error)
+        this.screenErrors.set(screen.screenId, error);
+    }
+
     if (gain?.supportsManual) {
       const dark = screens.filter((screen) => {
         const result = best.get(screen.screenId);
         return (
           result &&
-          result.metrics.mean < 175 &&
+          (result.assessment.direction === 'too-dark' ||
+            result.assessment.white < 175) &&
           (result.exposure === window.max ||
             classifyExposureExtreme(result.metrics) === 'too-dark')
         );
@@ -1521,8 +1578,9 @@ export class CameraImagingController {
           await delay(CONTROL_SETTLE_MS);
           const reading = await this.calibrationExposureForScreens(dark);
           for (const screen of reading.screenReadings) {
+            if (screen.assessment.mode === 'insufficient') continue;
             const score =
-              exposureCalibrationScore(screen.metrics) +
+              screen.assessment.score +
               distancePenalty(gainValue, gain.default, gain, 0.08);
             const previous = gainBest.get(screen.screenId);
             if (previous === undefined || score < previous - 1e-9) {
@@ -1532,7 +1590,8 @@ export class CameraImagingController {
                 result.exposure = window.max;
                 result.metrics = screen.metrics;
                 result.score = score;
-                (result as typeof result & { gain?: number }).gain = gainValue;
+                result.assessment = screen.assessment;
+                result.gain = gainValue;
               }
             }
           }
@@ -1545,12 +1604,15 @@ export class CameraImagingController {
         exposure: number;
         score: number;
         metrics: LumaMetrics;
+        assessment: ExposureCalibrationAssessment;
         gain?: number;
       }
     >;
   }
 
-  private calibrationExposureForScreens(screens: readonly ImagingScreen[]) {
+  private calibrationExposureForScreens(
+    screens: readonly ImagingScreen[],
+  ): Promise<CalibrationExposureReading> {
     return this.freshFrame().then((jpeg) =>
       measureCalibrationExposure(jpeg, screens),
     );
@@ -1827,71 +1889,43 @@ export class CameraImagingController {
   private async optimizeExposureAndGain(screens: readonly ImagingScreen[]) {
     const controls = await this.ensureControls();
     const values = await controls.read();
-    const exposure = values.exposure;
-    if (!exposure?.supportsManual)
+    if (!values.exposure?.supportsManual)
       throw new RobotArmError(
         'VISION_UNAVAILABLE',
         'This camera does not support manual exposure control',
         409,
       );
-    const gain = values.gain;
-    if (gain?.supportsManual)
-      await controls.set('gain', gain.default, 'manual');
-    const window = resolveFrameSafeExposureWindow(
-      exposure,
-      this.stream.getInfo().fps,
-    ) ?? {
-      min: exposure.min,
-      max: exposure.max,
-    };
-    const initialExposure = clamp(exposure.value, window.min, window.max);
-    if (initialExposure !== exposure.value)
-      await controls.set('exposure', initialExposure, 'manual');
-    await this.convergeExposureForCalibration();
-
-    let bestGain = gain?.value;
-    const currentExposure = (await controls.read()).exposure;
-    if (!currentExposure)
+    const best = await this.optimizeExposureForScreens(screens);
+    const result = screens.flatMap((screen) => {
+      const value = best.get(screen.screenId);
+      return value ? [value] : [];
+    })[0];
+    if (!result)
       throw new RobotArmError(
         'VISION_UNAVAILABLE',
-        'Exposure control disappeared during calibration',
+        'Camera exposure references are obscured by reflection. Adjust the lighting or camera angle and retry.',
         409,
       );
-    const finalReading = await this.currentCalibrationExposureReading();
-    const exposureScore =
-      exposureCalibrationScore(finalReading.selected) +
-      distancePenalty(currentExposure.value, exposure.value, window, 0.02);
-    if (
-      gain?.supportsManual &&
-      currentExposure.value === window.max &&
-      (finalReading.selected.mean < 175 ||
-        classifyExposureExtreme(finalReading.selected) === 'too-dark')
-    ) {
-      let bestGainScore = exposureScore;
-      for (const gainValue of uniqueCandidates(gainCandidates(gain))) {
-        await controls.set('gain', gainValue, 'manual');
-        await delay(CONTROL_SETTLE_MS);
-        const reading = await this.currentCalibrationExposureReading();
-        const score =
-          exposureCalibrationScore(reading.selected) +
-          distancePenalty(gainValue, gain.default, gain, 0.08);
-        if (score < bestGainScore - 1e-9) {
-          bestGainScore = score;
-          bestGain = gainValue;
-        }
-      }
-    }
+    await controls.set('exposure', result.exposure, 'manual');
+    const gain = values.gain;
+    const bestGain = gain?.supportsManual
+      ? (result.gain ?? gain.default)
+      : gain?.value;
     if (gain?.supportsManual)
       await controls.set('gain', bestGain ?? gain.default, 'manual');
     this.statusValue = {
       ...this.statusValue,
       state: 'exposure',
-      exposure: currentExposure.value,
+      exposure: result.exposure,
       ...(bestGain !== undefined ? { gain: bestGain } : {}),
       message: 'Exposure and gain converged',
       updatedAt: Date.now(),
     };
-    return { value: currentExposure.value, gain: bestGain };
+    return {
+      value: result.exposure,
+      gain: bestGain,
+      assessment: result.assessment,
+    };
   }
 
   private async searchWhiteBalance(screens: readonly ImagingScreen[]) {
@@ -2250,34 +2284,6 @@ export class CameraImagingController {
     }
   }
 
-  private async convergeExposureForCalibration(): Promise<void> {
-    if (!this.controls || this.captureInProgress || this.adjusting) return;
-    this.captureInProgress = true;
-    try {
-      let previousDirection: 'too-bright' | 'too-dark' | undefined;
-      for (
-        let iteration = 0;
-        iteration < MAX_CALIBRATION_EXPOSURE_ITERATIONS;
-        iteration++
-      ) {
-        const reading = await this.currentCalibrationExposureReading();
-        const direction = classifyExposureExtreme(reading.selected);
-        if (!direction) return;
-        if (previousDirection && direction !== previousDirection) return;
-        previousDirection = direction;
-        const adjusted = await this.applyExposureAdjustment(
-          reading.selected,
-          direction,
-          false,
-        );
-        if (!adjusted) return;
-        await delay(CAPTURE_SETTLE_MS);
-      }
-    } finally {
-      this.captureInProgress = false;
-    }
-  }
-
   private startMonitor() {
     this.stopMonitor();
     this.monitor = setInterval(() => {
@@ -2341,10 +2347,6 @@ export class CameraImagingController {
       await this.freshFrame(),
       active.length ? active : this.screens(),
     );
-  }
-
-  private async currentCalibrationExposureReading() {
-    return measureCalibrationExposure(await this.freshFrame(), this.screens());
   }
 
   private async applyExposureAdjustment(
