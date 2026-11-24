@@ -30,18 +30,69 @@ export class RobotVisionApiError extends Error {
  */
 const MAX_SCREEN_REQUESTS = 1;
 let activeScreenRequests = 0;
-const screenRequestWaiters: (() => void)[] = [];
+const screenRequestWaiters: Array<{
+  resolve(): void;
+  reject(reason: unknown): void;
+  signal?: AbortSignal;
+  abort?: () => void;
+}> = [];
 
-async function withScreenRequestSlot<T>(work: () => Promise<T>): Promise<T> {
+async function withScreenRequestSlot<T>(
+  work: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
   if (activeScreenRequests >= MAX_SCREEN_REQUESTS)
-    await new Promise<void>((resolve) => screenRequestWaiters.push(resolve));
+    await new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve,
+        reject,
+        signal,
+        abort: undefined as (() => void) | undefined,
+      };
+      waiter.abort = () => {
+        const index = screenRequestWaiters.indexOf(waiter);
+        if (index >= 0) screenRequestWaiters.splice(index, 1);
+        signal?.removeEventListener('abort', waiter.abort!);
+        reject(signal?.reason ?? new Error('Screen request cancelled'));
+      };
+      signal?.addEventListener('abort', waiter.abort, { once: true });
+      screenRequestWaiters.push(waiter);
+    });
   activeScreenRequests += 1;
   try {
+    signal?.throwIfAborted();
     return await work();
   } finally {
     activeScreenRequests -= 1;
-    screenRequestWaiters.shift()?.();
+    const next = screenRequestWaiters.shift();
+    if (next) {
+      next.signal?.removeEventListener('abort', next.abort!);
+      next.resolve();
+    }
   }
+}
+
+async function performMarkerRequest<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  signal?.throwIfAborted();
+  const response = await fetch(path, {
+    signal,
+    method: body === undefined ? 'GET' : 'POST',
+    headers:
+      body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const value = await response.json();
+  if (!response.ok)
+    throw new RobotVisionApiError(
+      t(value.error?.message ?? value.error ?? 'Screen request failed'),
+      value.code,
+      value.details,
+    );
+  return value;
 }
 
 export function markerRequest<T>(
@@ -49,26 +100,22 @@ export function markerRequest<T>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  return withScreenRequestSlot(async () => {
-    signal?.throwIfAborted();
-    // Never leave a screen/marker request holding a connection indefinitely.
-    const timeout = AbortSignal.timeout(15_000);
-    const response = await fetch(path, {
-      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      method: body === undefined ? 'GET' : 'POST',
-      headers:
-        body === undefined ? undefined : { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const value = await response.json();
-    if (!response.ok)
-      throw new RobotVisionApiError(
-        t(value.error?.message ?? value.error ?? 'Screen request failed'),
-        value.code,
-        value.details,
-      );
-    return value;
-  });
+  // Start the timeout before waiting for a request slot so one stuck screen
+  // request cannot queue the rest of the calibration UI indefinitely.
+  const timeout = AbortSignal.timeout(15_000);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  return withScreenRequestSlot(
+    () => performMarkerRequest(path, body, requestSignal),
+    requestSignal,
+  );
+}
+
+function priorityMarkerRequest<T>(
+  path: string,
+  body?: unknown,
+  timeoutMs = 30_000,
+): Promise<T> {
+  return performMarkerRequest(path, body, AbortSignal.timeout(timeoutMs));
 }
 /** Local transport for the original marker-calibration UI. */
 export class RobotVisionClient {
@@ -216,7 +263,11 @@ export class ScreenCalibClient {
     return this.request<void>('delete-perspective', { cameraId, id });
   }
   clearCameraPerspectives(cameraId: string, screenIds?: string[]) {
-    return this.request<void>('clear-perspectives', { cameraId, screenIds });
+    return priorityMarkerRequest<void>('/api/screen-pages', {
+      cameraId,
+      action: 'clear-perspectives',
+      screenIds,
+    });
   }
   renameScreen(cameraId: string, id: string, name: string) {
     return this.request<void>('rename-screen', { cameraId, id, name });

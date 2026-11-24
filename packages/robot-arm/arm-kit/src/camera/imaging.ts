@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import type { CalibrationImagingStatus } from '../assisted-contracts.js';
 import type { CameraCorrection } from '../contracts.js';
 import { RobotArmError } from '../contracts.js';
 import {
+  type FocusReading,
   type ImagingScreen,
   type LumaMetrics,
   type ToneReading,
@@ -37,7 +39,20 @@ interface StoredCameraControl {
   mode: CameraControlMode;
 }
 
-interface StoredCameraImaging {
+interface StoredScreenImaging {
+  screenId: string;
+  fingerprint: string;
+  focus: { value: number; score: number };
+  exposure: { value: number };
+  gain?: { value: number };
+  whiteBalance?: { value: number };
+  brightness?: { value: number };
+  contrast?: { value: number };
+  warnings?: string[];
+  calibratedAt: string;
+}
+
+interface LegacyStoredCameraImaging {
   version: 1 | 2 | 3 | 4 | 5 | 6;
   cameraId: string;
   rois: Array<{ screenId: string; fingerprint: string }>;
@@ -50,6 +65,16 @@ interface StoredCameraImaging {
   original?: Partial<Record<CameraControlProperty, StoredCameraControl>>;
   calibratedAt: string;
 }
+
+interface StoredCameraImaging {
+  version: 7;
+  cameraId: string;
+  screens: StoredScreenImaging[];
+  original?: Partial<Record<CameraControlProperty, StoredCameraControl>>;
+  calibratedAt: string;
+}
+
+type AnyStoredCameraImaging = StoredCameraImaging | LegacyStoredCameraImaging;
 
 const SAMPLE_INTERVAL_MS = 1_500;
 /** Two matching extreme samples trigger after roughly four seconds. */
@@ -140,12 +165,54 @@ function controlStep(control: CameraControlValue) {
 }
 
 function quantizeControl(value: number, control: CameraControlValue) {
-  const step = Math.max(1, Math.abs(control.step || 1));
+  const step = controlStep(control);
   return clamp(
     control.min + Math.round((value - control.min) / step) * step,
     control.min,
     control.max,
   );
+}
+
+function controlCandidates(
+  control: CameraControlValue,
+  count: number,
+  includeValue = true,
+) {
+  const span = control.max - control.min;
+  const values =
+    span > 0
+      ? Array.from({ length: count }, (_, index) =>
+          quantizeControl(
+            control.min + (span * index) / Math.max(1, count - 1),
+            control,
+          ),
+        )
+      : [control.value];
+  if (includeValue)
+    values.push(
+      quantizeControl(clamp(control.value, control.min, control.max), control),
+    );
+  return uniqueCandidates(values);
+}
+
+function localCandidates(
+  control: CameraControlValue,
+  value: number,
+  stepMultiplier = 1,
+) {
+  const step = controlStep(control) * stepMultiplier;
+  return FOCUS_LOCAL_OFFSETS.map((offset) =>
+    quantizeControl(
+      clamp(value + offset * step, control.min, control.max),
+      control,
+    ),
+  );
+}
+
+function medianValue(values: readonly number[]) {
+  if (!values.length) return undefined;
+  const ordered = [...values].sort((left, right) => left - right);
+  return ordered[Math.floor(ordered.length / 2)];
 }
 
 /** Automatic focus supplies the starting point; only inspect a small bracket. */
@@ -210,6 +277,52 @@ export function cameraImagingFile(directory: string, cameraId: string) {
   );
 }
 
+async function writeCameraImagingFile(
+  directory: string,
+  cameraId: string,
+  stored: StoredCameraImaging,
+) {
+  await mkdir(directory, { recursive: true });
+  const file = cameraImagingFile(directory, cameraId);
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(stored, null, 2), {
+    mode: 0o600,
+  });
+  await rename(temporary, file);
+}
+
+export async function removeCameraImagingScreen(
+  directory: string,
+  cameraId: string,
+  screenId: string,
+) {
+  const file = cameraImagingFile(directory, cameraId);
+  let stored: AnyStoredCameraImaging;
+  try {
+    stored = JSON.parse(await readFile(file, 'utf8')) as AnyStoredCameraImaging;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (stored.cameraId !== cameraId) return;
+  if (stored.version !== 7) {
+    await rm(file, { force: true });
+    return;
+  }
+  const screens = stored.screens.filter(
+    (profile) => profile.screenId !== screenId,
+  );
+  if (!screens.length) {
+    await rm(file, { force: true });
+    return;
+  }
+  await writeCameraImagingFile(directory, cameraId, {
+    ...stored,
+    screens,
+    calibratedAt: new Date().toISOString(),
+  });
+}
+
 export class CameraImagingController {
   private readonly registered = new Map<
     string,
@@ -218,6 +331,7 @@ export class CameraImagingController {
   private monitor?: ReturnType<typeof setInterval>;
   private statusValue: CameraImagingStatus = { state: 'idle' };
   private stored?: StoredCameraImaging;
+  private activeScreenId?: string;
   private applied = false;
   private adjusting = false;
   private captureInProgress = false;
@@ -228,6 +342,11 @@ export class CameraImagingController {
   private darkModeUntil = 0;
   private closed = false;
   private imagingOperation = Promise.resolve();
+  private readonly markerImagingScope = new AsyncLocalStorage<true>();
+  private calibratingScreens = new Set<string>();
+  private pendingCalibrations = new Map<string, Set<string>>();
+  private screenErrors = new Map<string, string>();
+  private unsupported = false;
 
   constructor(
     readonly camera: CameraDevice,
@@ -248,14 +367,143 @@ export class CameraImagingController {
 
   async rebindPerspective(screenId: string, correction: CameraCorrection) {
     if (!this.stored) return;
-    const roi = this.stored.rois.find((entry) => entry.screenId === screenId);
-    if (!roi) return;
-    roi.fingerprint = correctionFingerprint({ screenId, correction });
+    const profile = this.stored.screens.find(
+      (entry) => entry.screenId === screenId,
+    );
+    if (!profile) return;
+    profile.fingerprint = correctionFingerprint({ screenId, correction });
     await this.persist(this.stored);
   }
 
-  status(): CameraImagingStatus {
-    return { ...this.statusValue };
+  status(screenId?: string): CameraImagingStatus {
+    const requested = screenId ?? this.activeScreenId;
+    if (
+      requested &&
+      this.calibratingScreens.has(requested) &&
+      !['idle', 'released', 'ready', 'unsupported'].includes(
+        this.statusValue.state,
+      )
+    )
+      return {
+        ...this.statusValue,
+        screenId: requested,
+        active: requested === this.activeScreenId && this.applied,
+      };
+    if (requested && this.hasPendingCalibration(requested))
+      return {
+        state: 'exposure',
+        screenId: requested,
+        active: requested === this.activeScreenId && this.applied,
+        message: 'Preparing the camera imaging pattern',
+        updatedAt: Date.now(),
+      };
+    if (requested) {
+      if (this.unsupported)
+        return {
+          state: 'unsupported',
+          screenId: requested,
+          active: false,
+          message: 'This camera does not expose focus and exposure controls',
+          updatedAt: Date.now(),
+        };
+      const error = this.screenErrors.get(requested);
+      if (error)
+        return {
+          state: 'error',
+          screenId: requested,
+          active: false,
+          message: error,
+          updatedAt: Date.now(),
+        };
+      const correction = this.registered.get(requested)?.();
+      const profile = this.stored?.screens.find(
+        (entry) => entry.screenId === requested,
+      );
+      if (!correction)
+        return {
+          state: 'unconfigured',
+          screenId: requested,
+          active: false,
+          message: 'No camera mapping is available for this screen',
+          updatedAt: Date.now(),
+        };
+      if (
+        !profile ||
+        profile.fingerprint !==
+          correctionFingerprint({ screenId: requested, correction })
+      )
+        return {
+          state: 'unconfigured',
+          screenId: requested,
+          active: false,
+          message: 'Calibrate camera imaging for this screen',
+          updatedAt: Date.now(),
+        };
+      return {
+        state: 'ready',
+        screenId: requested,
+        active: requested === this.activeScreenId && this.applied,
+        focus: profile.focus.value,
+        exposure: profile.exposure.value,
+        ...(profile.gain ? { gain: profile.gain.value } : {}),
+        ...(profile.whiteBalance
+          ? { whiteBalance: profile.whiteBalance.value }
+          : {}),
+        ...(profile.brightness ? { brightness: profile.brightness.value } : {}),
+        ...(profile.contrast ? { contrast: profile.contrast.value } : {}),
+        message: profile.warnings?.length
+          ? profile.warnings.join('; ')
+          : undefined,
+        updatedAt: Date.parse(profile.calibratedAt) || undefined,
+      };
+    }
+    return {
+      ...this.statusValue,
+      ...(this.activeScreenId
+        ? {
+            screenId: this.activeScreenId,
+            active: this.applied,
+          }
+        : {}),
+    };
+  }
+
+  /** Mark background calibration active before waiting for phone patterns. */
+  beginScreensCalibration(screenIds: readonly string[]) {
+    const token = randomUUID();
+    const requested = new Set(screenIds);
+    this.pendingCalibrations.set(token, requested);
+    this.unsupported = false;
+    for (const screenId of requested) this.screenErrors.delete(screenId);
+    this.statusValue = {
+      state: 'exposure',
+      message: 'Preparing the camera imaging pattern',
+      updatedAt: Date.now(),
+    };
+    return token;
+  }
+
+  /** Publish failures that happen before `calibrateScreens()` is entered. */
+  failScreensCalibration(
+    token: string,
+    screenIds: readonly string[],
+    error: unknown,
+  ) {
+    const message = error instanceof Error ? error.message : String(error);
+    this.pendingCalibrations.delete(token);
+    for (const screenId of new Set(screenIds))
+      this.screenErrors.set(screenId, message);
+    this.statusValue = {
+      state: 'error',
+      message,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private hasPendingCalibration(screenId: string) {
+    for (const screens of this.pendingCalibrations.values())
+      if (screens.has(screenId)) return true;
+    return false;
   }
 
   async load(): Promise<void> {
@@ -265,10 +513,33 @@ export class CameraImagingController {
           cameraImagingFile(this.directory, this.camera.id),
           'utf8',
         ),
-      ) as StoredCameraImaging;
+      ) as AnyStoredCameraImaging;
+      if (
+        !value ||
+        typeof value !== 'object' ||
+        value.cameraId !== this.camera.id
+      )
+        return;
+      if (value.version === 7) {
+        if (
+          !Array.isArray(value.screens) ||
+          value.screens.some(
+            (screen) =>
+              !screen ||
+              typeof screen.screenId !== 'string' ||
+              typeof screen.fingerprint !== 'string' ||
+              !Number.isFinite(screen.focus?.value) ||
+              !Number.isFinite(screen.exposure?.value) ||
+              !screen.calibratedAt,
+          )
+        )
+          return;
+        this.stored = value;
+        this.statusValue = { state: 'idle', updatedAt: Date.now() };
+        return;
+      }
       if (
         !([1, 2, 3, 4, 5, 6] as const).includes(value.version) ||
-        value.cameraId !== this.camera.id ||
         !Array.isArray(value.rois) ||
         !Number.isFinite(value.focus?.value) ||
         !Number.isFinite(value.exposure?.value)
@@ -276,19 +547,45 @@ export class CameraImagingController {
         return;
       // Version 5 could persist a clipped white-balance and tone result.
       if (value.version === 5) return;
-      this.stored = value;
-      this.statusValue = {
-        state: 'idle',
-        focus: value.focus.value,
-        exposure: value.exposure.value,
-        ...(value.gain ? { gain: value.gain.value } : {}),
-        ...(value.whiteBalance
-          ? { whiteBalance: value.whiteBalance.value }
-          : {}),
-        ...(value.brightness ? { brightness: value.brightness.value } : {}),
-        ...(value.contrast ? { contrast: value.contrast.value } : {}),
-        updatedAt: Date.parse(value.calibratedAt) || undefined,
-      };
+      const original = value.original;
+      if (value.rois.length === 1) {
+        const roi = value.rois[0]!;
+        this.stored = {
+          version: 7,
+          cameraId: value.cameraId,
+          screens: [
+            {
+              screenId: roi.screenId,
+              fingerprint: roi.fingerprint,
+              focus: { ...value.focus },
+              exposure: { ...value.exposure },
+              ...(value.gain ? { gain: { ...value.gain } } : {}),
+              ...(value.whiteBalance
+                ? { whiteBalance: { ...value.whiteBalance } }
+                : {}),
+              ...(value.brightness
+                ? { brightness: { ...value.brightness } }
+                : {}),
+              ...(value.contrast ? { contrast: { ...value.contrast } } : {}),
+              calibratedAt: value.calibratedAt,
+            },
+          ],
+          ...(original ? { original } : {}),
+          calibratedAt: value.calibratedAt,
+        };
+        await this.persist(this.stored);
+      } else {
+        // A shared multi-screen profile cannot be split into valid per-screen
+        // values. Preserve the original state while requiring recalibration.
+        this.stored = {
+          version: 7,
+          cameraId: value.cameraId,
+          screens: [],
+          ...(original ? { original } : {}),
+          calibratedAt: value.calibratedAt,
+        };
+      }
+      this.statusValue = { state: 'idle', updatedAt: Date.now() };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
         this.statusValue = {
@@ -306,6 +603,13 @@ export class CameraImagingController {
       if (correction) screens.push({ screenId, correction });
     }
     return screens;
+  }
+
+  private screenList(screenIds?: readonly string[]) {
+    const requested = screenIds?.length ? new Set(screenIds) : undefined;
+    return this.screens().filter(
+      (screen) => !requested || requested.has(screen.screenId),
+    );
   }
 
   private async preset(): Promise<{
@@ -359,6 +663,7 @@ export class CameraImagingController {
   }
 
   private setUnsupported(): CameraImagingStatus {
+    this.unsupported = true;
     this.statusValue = {
       state: 'unsupported',
       message: 'This camera does not expose focus and exposure controls',
@@ -393,61 +698,68 @@ export class CameraImagingController {
     return operation;
   }
 
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    return this.runImagingOperation(work);
+  }
+
   /** Tune the painted marker scene before a screen ROI exists. */
   withMarkerImaging<T>(capture: () => Promise<T>): Promise<T> {
-    return this.runImagingOperation(async () => {
-      if (this.closed || this.captureInProgress || this.adjusting)
-        return capture();
-      this.captureInProgress = true;
-      let restore: (() => Promise<void>) | undefined;
-      try {
+    if (this.markerImagingScope.getStore()) return capture();
+    return this.runImagingOperation(() =>
+      this.markerImagingScope.run(true, async () => {
+        if (this.closed || this.captureInProgress || this.adjusting)
+          return capture();
+        this.captureInProgress = true;
+        let restore: (() => Promise<void>) | undefined;
         try {
-          const controls = await this.getControls();
-          if (controls) {
-            const { focus, exposure } = await controls.read();
-            const original: Partial<
-              Record<CameraControlProperty, StoredCameraControl>
-            > = {};
-            restore = async () => {
-              if (await this.restoreControls(controls, original)) return;
-              this.applied = false;
-              this.stopMonitor();
-              this.statusValue = {
-                state: 'error',
-                message:
-                  'Could not restore camera controls after marker capture',
-                updatedAt: Date.now(),
+          try {
+            const controls = await this.getControls();
+            if (controls) {
+              const { focus, exposure } = await controls.read();
+              const original: Partial<
+                Record<CameraControlProperty, StoredCameraControl>
+              > = {};
+              restore = async () => {
+                if (await this.restoreControls(controls, original)) return;
+                this.applied = false;
+                this.stopMonitor();
+                this.statusValue = {
+                  state: 'error',
+                  message:
+                    'Could not restore camera controls after marker capture',
+                  updatedAt: Date.now(),
+                };
               };
-            };
-            let focusStarted = 0;
-            if (focus?.supportsAuto && focus.mode === 'manual') {
-              original.focus = focus;
-              await controls.set('focus', focus.value, 'auto');
-              focusStarted = Date.now();
+              let focusStarted = 0;
+              if (focus?.supportsAuto && focus.mode === 'manual') {
+                original.focus = focus;
+                await controls.set('focus', focus.value, 'auto');
+                focusStarted = Date.now();
+              }
+              if (exposure?.supportsManual)
+                await this.adjustMarkerExposure(controls, exposure, () => {
+                  original.exposure = exposure;
+                });
+              if (focusStarted)
+                await delay(
+                  Math.max(
+                    0,
+                    MARKER_FOCUS_SETTLE_MS - (Date.now() - focusStarted),
+                  ),
+                );
             }
-            if (exposure?.supportsManual)
-              await this.adjustMarkerExposure(controls, exposure, () => {
-                original.exposure = exposure;
-              });
-            if (focusStarted)
-              await delay(
-                Math.max(
-                  0,
-                  MARKER_FOCUS_SETTLE_MS - (Date.now() - focusStarted),
-                ),
-              );
+          } catch {
+            // Unsupported or interrupted controls must still allow a marker scan.
+            await restore?.();
+            restore = undefined;
           }
-        } catch {
-          // Unsupported or interrupted controls must still allow a marker scan.
+          return await capture();
+        } finally {
           await restore?.();
-          restore = undefined;
+          this.captureInProgress = false;
         }
-        return await capture();
-      } finally {
-        await restore?.();
-        this.captureInProgress = false;
-      }
-    });
+      }),
+    );
   }
 
   private async adjustMarkerExposure(
@@ -494,11 +806,20 @@ export class CameraImagingController {
     }
   }
 
-  releaseForCorrection(): Promise<void> {
-    return this.runImagingOperation(() => this.releaseControls());
+  releaseForCorrection(screenId?: string): Promise<void> {
+    if (this.markerImagingScope.getStore())
+      return this.releaseForCorrectionUnlocked(screenId);
+    return this.runImagingOperation(() =>
+      this.releaseForCorrectionUnlocked(screenId),
+    );
   }
 
-  private async releaseControls(): Promise<void> {
+  private async releaseForCorrectionUnlocked(screenId?: string) {
+    const scope = screenId ?? this.activeScreenId;
+    if (scope && this.activeScreenId && scope !== this.activeScreenId) {
+      this.screenErrors.delete(scope);
+      return;
+    }
     this.stopMonitor();
     this.applied = false;
     this.extremeDirection = undefined;
@@ -533,6 +854,7 @@ export class CameraImagingController {
       };
       return;
     }
+    this.activeScreenId = undefined;
     this.statusValue = {
       state: 'released',
       message:
@@ -541,100 +863,156 @@ export class CameraImagingController {
     };
   }
 
-  clearPerspectiveBinding(): Promise<void> {
-    return this.runImagingOperation(() => this.clearStoredProfile());
+  async clearPerspectiveBinding(screenId?: string): Promise<void> {
+    await this.clearScreenBinding(screenId ?? this.camera.id);
   }
 
-  private async clearStoredProfile(): Promise<void> {
-    try {
-      await this.releaseControls();
-    } finally {
+  async clearScreenBinding(screenId: string): Promise<void> {
+    if (this.markerImagingScope.getStore())
+      return this.clearScreenBindingUnlocked(screenId);
+    await this.enqueue(() => this.clearScreenBindingUnlocked(screenId));
+  }
+
+  private async clearScreenBindingUnlocked(screenId: string) {
+    if (!this.stored) return;
+    if (this.activeScreenId === screenId)
+      await this.releaseForCorrectionUnlocked(screenId);
+    this.stored.screens = this.stored.screens.filter(
+      (profile) => profile.screenId !== screenId,
+    );
+    this.screenErrors.delete(screenId);
+    this.calibratingScreens.delete(screenId);
+    if (!this.stored.screens.length) {
       this.stored = undefined;
       await rm(cameraImagingFile(this.directory, this.camera.id), {
         force: true,
       });
+      return;
     }
+    this.stored.calibratedAt = new Date().toISOString();
+    await this.persist(this.stored);
+    if (this.activeScreenId === screenId && this.stored.screens.length === 0)
+      this.activeScreenId = undefined;
   }
 
-  resumeStored(): Promise<void> {
-    return this.runImagingOperation(() => this.restoreStoredProfile());
+  async resumeStored(screenId?: string): Promise<void> {
+    if (!this.stored?.screens.length) return;
+    const profile =
+      this.stored.screens.find((entry) => entry.screenId === screenId) ??
+      this.stored.screens[0];
+    if (profile) await this.activateScreen(profile.screenId);
   }
 
-  private async restoreStoredProfile(): Promise<void> {
-    if (!this.stored) return;
-    const expected = new Map(
-      this.stored.rois.map((roi) => [roi.screenId, roi.fingerprint]),
+  async activateScreen(screenId: string): Promise<CameraImagingStatus> {
+    return this.enqueue(async () => {
+      await this.activateScreenUnlocked(screenId);
+      return this.status(screenId);
+    });
+  }
+
+  private async activateScreenUnlocked(screenId: string) {
+    this.screenErrors.delete(screenId);
+    if (this.activeScreenId === screenId && this.applied) return;
+    if (this.activeScreenId && this.activeScreenId !== screenId) {
+      this.stopMonitor();
+      this.applied = false;
+    }
+    const correction = this.registered.get(screenId)?.();
+    const profile = this.stored?.screens.find(
+      (entry) => entry.screenId === screenId,
     );
-    // Screen sessions reopen one at a time. A screen we have yet to load
-    // provides no evidence that its saved perspective changed.
-    for (const screenId of expected.keys()) {
-      if (!this.registered.has(screenId)) return;
+    const valid =
+      correction &&
+      profile &&
+      profile.fingerprint === correctionFingerprint({ screenId, correction });
+    const controls = await this.getControls();
+    if (!controls) {
+      this.setUnsupported();
+      return;
     }
-    const currentRois = this.screens().map((screen) => ({
-      screenId: screen.screenId,
-      fingerprint: correctionFingerprint(screen),
-    }));
-    if (
-      currentRois.length !== expected.size ||
-      currentRois.some((roi) => expected.get(roi.screenId) !== roi.fingerprint)
-    ) {
-      await this.clearStoredProfile();
+    if (!valid) {
+      this.activeScreenId = screenId;
+      await this.releaseForCorrectionUnlocked(screenId);
+      this.statusValue = {
+        state: 'unconfigured',
+        screenId,
+        active: false,
+        message: 'Calibrate camera imaging for this screen',
+        updatedAt: Date.now(),
+      };
       return;
     }
     try {
-      const controls = await this.getControls();
-      if (!controls) {
-        this.setUnsupported();
-        return;
-      }
-      await controls.set('exposure', this.stored.exposure.value, 'manual');
-      await controls.set('focus', this.stored.focus.value, 'manual');
+      await controls.set('exposure', profile.exposure.value, 'manual');
+      await controls.set('focus', profile.focus.value, 'manual');
       for (const [property, value] of [
-        ['gain', this.stored.gain?.value],
-        ['whiteBalance', this.stored.whiteBalance?.value],
-        ['brightness', this.stored.brightness?.value],
-        ['contrast', this.stored.contrast?.value],
+        ['gain', profile.gain?.value],
+        ['whiteBalance', profile.whiteBalance?.value],
+        ['brightness', profile.brightness?.value],
+        ['contrast', profile.contrast?.value],
       ] as const) {
         if (value === undefined) continue;
         const control = (await controls.read())[property];
         if (control?.supportsManual)
           await controls.set(property, value, 'manual');
       }
+      await delay(FOCUS_SETTLE_MS);
+      this.activeScreenId = screenId;
       this.applied = true;
+      this.extremeDirection = undefined;
+      this.extremeCount = 0;
+      this.darkModeUntil = 0;
       this.statusValue = {
-        state: 'ready',
-        focus: this.stored.focus.value,
-        exposure: this.stored.exposure.value,
-        ...(this.stored.gain ? { gain: this.stored.gain.value } : {}),
-        ...(this.stored.whiteBalance
-          ? { whiteBalance: this.stored.whiteBalance.value }
-          : {}),
-        ...(this.stored.brightness
-          ? { brightness: this.stored.brightness.value }
-          : {}),
-        ...(this.stored.contrast
-          ? { contrast: this.stored.contrast.value }
-          : {}),
+        ...this.status(screenId),
+        active: true,
         updatedAt: Date.now(),
       };
-      // Keep the restored profile while allowing fresh extreme-luma samples to
-      // adjust exposure without fighting the capture-time precheck.
       this.startMonitor();
     } catch (error) {
-      this.statusValue = {
-        state: 'error',
-        message: error instanceof Error ? error.message : String(error),
-        updatedAt: Date.now(),
-      };
+      this.applied = false;
+      this.screenErrors.set(
+        screenId,
+        error instanceof Error ? error.message : String(error),
+      );
     }
   }
 
-  calibrate(): Promise<CameraImagingStatus> {
-    return this.runImagingOperation(() => this.calibrateScreenRegions());
+  async calibrate(screenId?: string): Promise<CameraImagingStatus> {
+    return this.calibrateScreens(screenId ? [screenId] : undefined);
   }
 
-  private async calibrateScreenRegions(): Promise<CameraImagingStatus> {
-    const screens = this.screens();
+  async calibrateScreens(
+    screenIds?: readonly string[],
+    calibrationToken?: string,
+  ): Promise<CameraImagingStatus> {
+    return this.enqueue(async () => {
+      const screens = this.screenList(screenIds);
+      if (!screens.length)
+        throw new RobotArmError(
+          'MAPPING_REQUIRED',
+          'Perspective correction is required before camera imaging calibration',
+          409,
+        );
+      if (calibrationToken) this.pendingCalibrations.delete(calibrationToken);
+      this.calibratingScreens = new Set(
+        screens.map((screen) => screen.screenId),
+      );
+      for (const screenId of this.calibratingScreens)
+        this.screenErrors.delete(screenId);
+      try {
+        return screens.length === 1
+          ? await this.calibrateSingle(screens)
+          : await this.calibrateMany(screens);
+      } finally {
+        this.calibratingScreens.clear();
+        if (calibrationToken) this.pendingCalibrations.delete(calibrationToken);
+      }
+    });
+  }
+
+  private async calibrateSingle(
+    screens: readonly ImagingScreen[],
+  ): Promise<CameraImagingStatus> {
     if (!screens.length)
       throw new RobotArmError(
         'MAPPING_REQUIRED',
@@ -651,6 +1029,7 @@ export class CameraImagingController {
     });
     if (!reading) return this.setUnsupported();
     const { controls } = reading;
+    this.unsupported = false;
 
     this.stopMonitor();
     this.applied = false;
@@ -768,13 +1147,10 @@ export class CameraImagingController {
         warnings.push('The calibrated grayscale bars are not monotonic');
       if (finalTone && finalTone.white > 247)
         warnings.push('The white calibration bar remains clipped');
-      const stored: StoredCameraImaging = {
-        version: 6,
-        cameraId: this.camera.id,
-        rois: screens.map((screen) => ({
-          screenId: screen.screenId,
-          fingerprint: correctionFingerprint(screen),
-        })),
+      const screen = screens[0]!;
+      const profile: StoredScreenImaging = {
+        screenId: screen.screenId,
+        fingerprint: correctionFingerprint(screen),
         focus: { value: focus.value, score: focus.score },
         exposure: { value: finalExposure.value },
         ...(finalControls.gain
@@ -789,19 +1165,37 @@ export class CameraImagingController {
         ...(finalControls.contrast
           ? { contrast: { value: finalControls.contrast.value } }
           : {}),
-        original: Object.fromEntries(
-          Object.entries(original).flatMap(([property, control]) => {
-            const value = storedControl(control);
-            return value ? [[property as CameraControlProperty, value]] : [];
-          }),
-        ),
+        warnings,
+        calibratedAt: new Date().toISOString(),
+      };
+      const stored: StoredCameraImaging = {
+        version: 7,
+        cameraId: this.camera.id,
+        screens: [
+          ...(this.stored?.screens.filter(
+            (entry) => entry.screenId !== screen.screenId,
+          ) ?? []),
+          profile,
+        ],
+        original:
+          this.stored?.original ??
+          Object.fromEntries(
+            Object.entries(original).flatMap(([property, control]) => {
+              const value = storedControl(control);
+              return value ? [[property as CameraControlProperty, value]] : [];
+            }),
+          ),
         calibratedAt: new Date().toISOString(),
       };
       await this.persist(stored);
       this.stored = stored;
+      this.activeScreenId = screen.screenId;
       this.applied = true;
+      this.screenErrors.delete(screen.screenId);
       this.statusValue = {
         state: 'ready',
+        screenId: screen.screenId,
+        active: true,
         focus: focus.value,
         exposure: finalExposure.value,
         ...(finalControls.gain ? { gain: finalControls.gain.value } : {}),
@@ -820,7 +1214,7 @@ export class CameraImagingController {
         updatedAt: Date.now(),
       };
       this.startMonitor();
-      return this.status();
+      return this.status(screen.screenId);
     } catch (error) {
       try {
         await this.restoreControls(controls, original);
@@ -834,6 +1228,579 @@ export class CameraImagingController {
       };
       throw error;
     }
+  }
+
+  private async calibrateMany(
+    screens: readonly ImagingScreen[],
+  ): Promise<CameraImagingStatus> {
+    const reading = await this.readManualControls().catch((error) => {
+      this.statusValue = {
+        state: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        updatedAt: Date.now(),
+      };
+      throw error;
+    });
+    if (!reading) return this.setUnsupported();
+    const { controls } = reading;
+    this.unsupported = false;
+
+    this.stopMonitor();
+    this.applied = false;
+    this.statusValue = {
+      state: 'exposure',
+      message: `Calibrating ${screens.length} screens together`,
+      updatedAt: Date.now(),
+    };
+    const original = await controls.read();
+    try {
+      const preset = await this.preset();
+      await controls.set(
+        'exposure',
+        clamp(preset.exposure.value, preset.exposure.min, preset.exposure.max),
+        'manual',
+      );
+      await controls.set('focus', preset.focus.value, 'auto');
+      if (original.gain?.supportsManual)
+        await controls.set('gain', original.gain.default, 'manual');
+      if (original.brightness?.supportsManual)
+        await controls.set('brightness', original.brightness.default, 'manual');
+      if (original.contrast?.supportsManual)
+        await controls.set('contrast', original.contrast.default, 'manual');
+      await delay(CONTROL_SETTLE_MS);
+
+      const exposure = await this.optimizeExposureForScreens(screens);
+      const exposureValues = screens.flatMap((screen) => {
+        const result = exposure.get(screen.screenId);
+        return result ? [result.exposure] : [];
+      });
+      const commonExposure =
+        medianValue(exposureValues) ?? preset.exposure.value;
+      await controls.set('exposure', commonExposure, 'manual');
+      if (original.gain?.supportsManual)
+        await controls.set('gain', original.gain.default, 'manual');
+
+      this.statusValue = {
+        state: 'tone',
+        exposure: commonExposure,
+        message: 'Scoring brightness and contrast for every screen',
+        updatedAt: Date.now(),
+      };
+      const tone = await this.tuneToneForScreens(screens);
+      const brightnessValues = screens.flatMap((screen) => {
+        const result = tone.get(screen.screenId);
+        return result?.brightness === undefined ? [] : [result.brightness];
+      });
+      const contrastValues = screens.flatMap((screen) => {
+        const result = tone.get(screen.screenId);
+        return result?.contrast === undefined ? [] : [result.contrast];
+      });
+      if (original.brightness?.supportsManual && brightnessValues.length)
+        await controls.set(
+          'brightness',
+          medianValue(brightnessValues)!,
+          'manual',
+        );
+      if (original.contrast?.supportsManual && contrastValues.length)
+        await controls.set('contrast', medianValue(contrastValues)!, 'manual');
+
+      this.statusValue = {
+        state: 'white-balance',
+        exposure: commonExposure,
+        message: 'Scoring white balance for every screen',
+        updatedAt: Date.now(),
+      };
+      const whiteBalance = await this.searchWhiteBalanceForScreens(screens);
+      const whiteBalanceValues = screens.flatMap((screen) => {
+        const value = whiteBalance.get(screen.screenId);
+        return value === undefined ? [] : [value];
+      });
+      if (original.whiteBalance?.supportsManual && whiteBalanceValues.length)
+        await controls.set(
+          'whiteBalance',
+          medianValue(whiteBalanceValues)!,
+          'manual',
+        );
+
+      this.statusValue = {
+        state: 'focus',
+        exposure: commonExposure,
+        message: 'Scoring focus across every screen ROI',
+        updatedAt: Date.now(),
+      };
+      const focus = await this.searchFocusForScreens(screens);
+      const focusValues = screens.flatMap((screen) => {
+        const result = focus.get(screen.screenId);
+        return result ? [result.value] : [];
+      });
+      const commonFocus = medianValue(focusValues);
+      if (commonFocus !== undefined)
+        await controls.set('focus', commonFocus, 'manual');
+
+      const previousOriginal = this.stored?.original;
+      const calibratedAt = new Date().toISOString();
+      const profiles: StoredScreenImaging[] = screens.flatMap((screen) => {
+        const exposureResult = exposure.get(screen.screenId);
+        const focusResult = focus.get(screen.screenId);
+        if (!exposureResult || !focusResult) return [];
+        const toneResult = tone.get(screen.screenId);
+        const whiteBalanceValue = whiteBalance.get(screen.screenId);
+        const warnings: string[] = [];
+        if (
+          focusResult.value === focusResult.min ||
+          focusResult.value === focusResult.max
+        )
+          warnings.push('The best focus lies at the hardware boundary');
+        if (!toneResult)
+          warnings.push('Brightness and contrast could not be measured');
+        else if (!toneResult.monotonic)
+          warnings.push('The calibrated grayscale bars are not monotonic');
+        if (
+          original.whiteBalance?.supportsManual &&
+          whiteBalanceValue === undefined
+        )
+          warnings.push('White balance will use the automatic value');
+        return [
+          {
+            screenId: screen.screenId,
+            fingerprint: correctionFingerprint(screen),
+            focus: {
+              value: focusResult.value,
+              score: focusResult.score,
+            },
+            exposure: { value: exposureResult.exposure },
+            ...(original.gain?.supportsManual
+              ? {
+                  gain: {
+                    value: exposureResult.gain ?? original.gain.default,
+                  },
+                }
+              : {}),
+            ...(whiteBalanceValue !== undefined
+              ? { whiteBalance: { value: whiteBalanceValue } }
+              : {}),
+            ...(toneResult?.brightness !== undefined &&
+            original.brightness?.supportsManual
+              ? { brightness: { value: toneResult.brightness } }
+              : {}),
+            ...(toneResult?.contrast !== undefined &&
+            original.contrast?.supportsManual
+              ? { contrast: { value: toneResult.contrast } }
+              : {}),
+            ...(warnings.length ? { warnings } : {}),
+            calibratedAt,
+          },
+        ];
+      });
+      const calibratedIds = new Set(
+        profiles.map((profile) => profile.screenId),
+      );
+      for (const screen of screens)
+        if (!calibratedIds.has(screen.screenId))
+          this.screenErrors.set(
+            screen.screenId,
+            'Camera imaging did not produce a complete profile for this screen',
+          );
+      const stored: StoredCameraImaging = {
+        version: 7,
+        cameraId: this.camera.id,
+        screens: [
+          ...(this.stored?.screens.filter(
+            (profile) => !calibratedIds.has(profile.screenId),
+          ) ?? []),
+          ...profiles,
+        ],
+        original:
+          previousOriginal ??
+          Object.fromEntries(
+            Object.entries(original).flatMap(([property, control]) => {
+              const value = storedControl(control);
+              return value ? [[property as CameraControlProperty, value]] : [];
+            }),
+          ),
+        calibratedAt,
+      };
+      await this.persist(stored);
+      this.stored = stored;
+
+      const activeId =
+        this.activeScreenId && calibratedIds.has(this.activeScreenId)
+          ? this.activeScreenId
+          : profiles[0]?.screenId;
+      if (!activeId) return this.status();
+      await this.activateScreenUnlocked(activeId);
+      return this.status(activeId);
+    } catch (error) {
+      try {
+        await this.restoreControls(controls, this.stored?.original ?? original);
+      } catch {
+        // Keep the primary calibration error.
+      }
+      this.statusValue = {
+        state: 'error',
+        message: error instanceof Error ? error.message : String(error),
+        updatedAt: Date.now(),
+      };
+      throw error;
+    }
+  }
+
+  private async optimizeExposureForScreens(screens: readonly ImagingScreen[]) {
+    const controls = await this.ensureControls();
+    const values = await controls.read();
+    const exposure = values.exposure;
+    if (!exposure?.supportsManual)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'This camera does not support manual exposure control',
+        409,
+      );
+    const gain = values.gain;
+    if (gain?.supportsManual)
+      await controls.set('gain', gain.default, 'manual');
+    const window = resolveFrameSafeExposureWindow(
+      exposure,
+      this.stream.getInfo().fps,
+    ) ?? { min: exposure.min, max: exposure.max };
+    const seen = new Set<number>();
+    const best = new Map<
+      string,
+      { exposure: number; score: number; metrics: LumaMetrics }
+    >();
+    const evaluate = async (value: number) => {
+      const quantized = quantizeControl(value, exposure);
+      const key = clamp(quantized, window.min, window.max);
+      if (seen.has(key)) return;
+      seen.add(key);
+      await controls.set('exposure', key, 'manual');
+      await delay(CONTROL_SETTLE_MS);
+      const reading = await this.calibrationExposureForScreens(screens);
+      for (const screen of reading.screenReadings) {
+        const score =
+          exposureCalibrationScore(screen.metrics) +
+          distancePenalty(key, exposure.value, window, 0.02);
+        const current = best.get(screen.screenId);
+        if (!current || score < current.score - 1e-9)
+          best.set(screen.screenId, {
+            exposure: key,
+            score,
+            metrics: screen.metrics,
+          });
+      }
+    };
+    for (const value of controlCandidates(exposure, 9))
+      if (value >= window.min && value <= window.max) await evaluate(value);
+
+    const fine = uniqueCandidates(
+      [...best.values()].flatMap((result) =>
+        localCandidates(exposure, result.exposure),
+      ),
+    );
+    for (const value of fine)
+      if (value >= window.min && value <= window.max) await evaluate(value);
+
+    if (gain?.supportsManual) {
+      const dark = screens.filter((screen) => {
+        const result = best.get(screen.screenId);
+        return (
+          result &&
+          result.metrics.mean < 175 &&
+          (result.exposure === window.max ||
+            classifyExposureExtreme(result.metrics) === 'too-dark')
+        );
+      });
+      if (dark.length) {
+        await controls.set('exposure', window.max, 'manual');
+        const gainBest = new Map<string, number>();
+        for (const screen of dark) {
+          const result = best.get(screen.screenId);
+          if (result) gainBest.set(screen.screenId, result.score);
+        }
+        for (const gainValue of uniqueCandidates(gainCandidates(gain))) {
+          await controls.set('gain', gainValue, 'manual');
+          await delay(CONTROL_SETTLE_MS);
+          const reading = await this.calibrationExposureForScreens(dark);
+          for (const screen of reading.screenReadings) {
+            const score =
+              exposureCalibrationScore(screen.metrics) +
+              distancePenalty(gainValue, gain.default, gain, 0.08);
+            const previous = gainBest.get(screen.screenId);
+            if (previous === undefined || score < previous - 1e-9) {
+              gainBest.set(screen.screenId, score);
+              const result = best.get(screen.screenId);
+              if (result) {
+                result.exposure = window.max;
+                result.metrics = screen.metrics;
+                result.score = score;
+                (result as typeof result & { gain?: number }).gain = gainValue;
+              }
+            }
+          }
+        }
+      }
+    }
+    return best as Map<
+      string,
+      {
+        exposure: number;
+        score: number;
+        metrics: LumaMetrics;
+        gain?: number;
+      }
+    >;
+  }
+
+  private calibrationExposureForScreens(screens: readonly ImagingScreen[]) {
+    return this.freshFrame().then((jpeg) =>
+      measureCalibrationExposure(jpeg, screens),
+    );
+  }
+
+  private async tuneToneForScreens(screens: readonly ImagingScreen[]) {
+    const controls = await this.ensureControls();
+    const values = await controls.read();
+    const brightness = values.brightness?.supportsManual
+      ? values.brightness
+      : undefined;
+    const contrast = values.contrast?.supportsManual
+      ? values.contrast
+      : undefined;
+    const result = new Map<
+      string,
+      {
+        brightness?: number;
+        contrast?: number;
+        score: number;
+        monotonic: boolean;
+      }
+    >();
+    if (!brightness && !contrast) {
+      const reading = await measureTone(await this.freshFrame(), screens);
+      for (const screen of reading?.screens ?? [])
+        result.set(screen.screenId, {
+          score: screen.score,
+          monotonic: screen.monotonic,
+        });
+      return result;
+    }
+    const brightnessCandidates = brightness
+      ? uniqueCandidates(
+          BRIGHTNESS_OFFSETS.map((offset) =>
+            quantizeControl(brightness.default + offset, brightness),
+          ),
+        )
+      : [0];
+    const contrastCandidates = contrast
+      ? uniqueCandidates(
+          CONTRAST_OFFSETS.map((offset) =>
+            quantizeControl(contrast.default + offset, contrast),
+          ),
+        )
+      : [0];
+    const seen = new Set<string>();
+    const evaluate = async (brightnessValue: number, contrastValue: number) => {
+      const key = `${brightnessValue}:${contrastValue}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (brightness)
+        await controls.set('brightness', brightnessValue, 'manual');
+      if (contrast) await controls.set('contrast', contrastValue, 'manual');
+      await delay(CONTROL_SETTLE_MS);
+      const reading = await measureTone(await this.freshFrame(), screens);
+      for (const screen of reading?.screens ?? []) {
+        const score =
+          screen.score +
+          (brightness
+            ? distancePenalty(
+                brightnessValue,
+                brightness.default,
+                brightness,
+                0.1,
+              )
+            : 0) +
+          (contrast
+            ? distancePenalty(contrastValue, contrast.default, contrast, 0.12)
+            : 0);
+        const previous = result.get(screen.screenId);
+        if (!previous || score < previous.score - 1e-9)
+          result.set(screen.screenId, {
+            ...(brightness ? { brightness: brightnessValue } : {}),
+            ...(contrast ? { contrast: contrastValue } : {}),
+            score,
+            monotonic: screen.monotonic,
+          });
+      }
+    };
+    for (const brightnessValue of brightnessCandidates)
+      for (const contrastValue of contrastCandidates)
+        await evaluate(brightnessValue, contrastValue);
+
+    const fine = new Map<string, { brightness?: number; contrast?: number }>();
+    for (const entry of result.values()) {
+      for (const brightnessOffset of LOCAL_TONE_OFFSETS) {
+        for (const contrastOffset of LOCAL_TONE_OFFSETS) {
+          const brightnessValue = brightness
+            ? quantizeControl(
+                (entry.brightness ?? brightness.default) + brightnessOffset * 4,
+                brightness,
+              )
+            : 0;
+          const contrastValue = contrast
+            ? quantizeControl(
+                (entry.contrast ?? contrast.default) + contrastOffset * 8,
+                contrast,
+              )
+            : 0;
+          fine.set(`${brightnessValue}:${contrastValue}`, {
+            ...(brightness ? { brightness: brightnessValue } : {}),
+            ...(contrast ? { contrast: contrastValue } : {}),
+          });
+        }
+      }
+    }
+    for (const candidate of fine.values())
+      await evaluate(candidate.brightness ?? 0, candidate.contrast ?? 0);
+    return result;
+  }
+
+  private async searchWhiteBalanceForScreens(
+    screens: readonly ImagingScreen[],
+  ) {
+    const controls = await this.ensureControls();
+    const control = (await controls.read()).whiteBalance;
+    if (!control?.supportsManual) return new Map<string, number>();
+    const span = Math.max(control.step || 1, control.max - control.min);
+    const best = new Map<string, { value: number; score: number }>();
+    const seen = new Set<number>();
+    const evaluate = async (value: number) => {
+      const quantized = clamp(
+        quantizeControl(value, control),
+        control.min,
+        control.max,
+      );
+      if (seen.has(quantized)) return;
+      seen.add(quantized);
+      await controls.set('whiteBalance', quantized, 'manual');
+      const reading = await this.measureSettledWhiteBalance(screens);
+      for (const screen of reading?.screens ?? []) {
+        const score =
+          screen.score +
+          distancePenalty(quantized, control.default, control, 0.03);
+        const previous = best.get(screen.screenId);
+        if (!previous || score < previous.score - 1e-9)
+          best.set(screen.screenId, { value: quantized, score });
+      }
+    };
+    for (const value of controlCandidates(control, 5)) await evaluate(value);
+    const fine = uniqueCandidates(
+      [...best.values()].flatMap((entry) => [
+        quantizeControl(entry.value - span / 8, control),
+        quantizeControl(entry.value - span / 16, control),
+        entry.value,
+        quantizeControl(entry.value + span / 16, control),
+        quantizeControl(entry.value + span / 8, control),
+      ]),
+    );
+    for (const value of fine) await evaluate(value);
+    const result = new Map<string, number>();
+    for (const [screenId, entry] of best)
+      if (entry.score <= WHITE_BALANCE_MAX_SCORE)
+        result.set(screenId, entry.value);
+    return result;
+  }
+
+  private async measureSettledFocusForScreens(
+    screens: readonly ImagingScreen[],
+  ) {
+    await delay(FOCUS_SETTLE_MS);
+    await this.freshFrame();
+    const readings: FocusReading[] = [];
+    for (let index = 0; index < 2; index += 1)
+      readings.push(await measureFocus(await this.freshFrame(), screens));
+    const result = new Map<string, { score: number; anisotropy: number }>();
+    for (const screen of screens) {
+      const entries = readings.flatMap((reading) => {
+        const match = reading.screens.find(
+          (entry) => entry.screenId === screen.screenId,
+        );
+        return match ? [match] : [];
+      });
+      if (!entries.length) continue;
+      result.set(screen.screenId, {
+        score:
+          entries.reduce((sum, entry) => sum + entry.score, 0) / entries.length,
+        anisotropy:
+          entries.reduce((sum, entry) => sum + entry.anisotropy, 0) /
+          entries.length,
+      });
+    }
+    return result;
+  }
+
+  private async searchFocusForScreens(screens: readonly ImagingScreen[]) {
+    const controls = await this.ensureControls();
+    let focus = (await controls.read()).focus;
+    if (!focus?.supportsManual)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'This camera does not support manual focus control',
+        409,
+      );
+    await controls.set('focus', focus.value, 'auto');
+    await delay(FOCUS_SETTLE_MS);
+    focus = (await controls.read()).focus ?? focus;
+    const best = new Map<
+      string,
+      { value: number; score: number; min: number; max: number }
+    >();
+    const seen = new Set<number>();
+    const evaluate = async (value: number) => {
+      const quantized = clamp(
+        quantizeControl(value, focus),
+        focus.min,
+        focus.max,
+      );
+      if (seen.has(quantized)) return;
+      seen.add(quantized);
+      await controls.set('focus', quantized, 'manual');
+      const reading = await this.measureSettledFocusForScreens(screens);
+      for (const [screenId, entry] of reading) {
+        const previous = best.get(screenId);
+        if (!previous || entry.score > previous.score + 1e-9)
+          best.set(screenId, {
+            value: quantized,
+            score: entry.score,
+            min: focus.min,
+            max: focus.max,
+          });
+      }
+    };
+    if (this.camera.backend === 'avfoundation') {
+      // macOS focus is normalized to 0..1 with fractional steps. Reuse the
+      // single-screen auto-focus bracket instead of scanning hardware extremes.
+      for (const value of localFocusCandidates(focus)) await evaluate(value);
+      return best;
+    }
+    for (const value of controlCandidates(focus, 9)) await evaluate(value);
+    const span = Math.max(1, focus.max - focus.min);
+    const fineStep = Math.max(
+      Math.abs(focus.step || 1),
+      Math.ceil(
+        (span * FOCUS_LOCAL_RANGE_FRACTION) / Math.abs(focus.step || 1),
+      ) * Math.abs(focus.step || 1),
+    );
+    const fine = uniqueCandidates(
+      [...best.values()].flatMap((entry) =>
+        FOCUS_LOCAL_OFFSETS.map((offset) =>
+          quantizeControl(
+            clamp(entry.value + offset * fineStep, focus.min, focus.max),
+            focus,
+          ),
+        ),
+      ),
+    );
+    for (const value of fine) await evaluate(value);
+    return best;
   }
 
   private async restoreControls(
@@ -1120,9 +2087,16 @@ export class CameraImagingController {
    * Runs immediately before a requested still frame is read. Preview polling
    * never calls this path, so it cannot continuously disturb the locked camera.
    */
-  async beforeCapture(): Promise<void> {
-    if (!this.applied || !this.controls) return;
-    await this.ensureExposureForCapture();
+  async beforeCapture(screenId?: string): Promise<void> {
+    // Marker capture already adjusted and locked the whole-frame image before
+    // requesting its snapshot. Re-entering the queue here deadlocks the capture.
+    if (this.markerImagingScope.getStore()) return;
+    await this.enqueue(async () => {
+      if (screenId && screenId !== this.activeScreenId)
+        await this.activateScreenUnlocked(screenId);
+      if (!this.applied || !this.controls) return;
+      await this.ensureExposureForCapture();
+    });
   }
 
   /** Shorten a locked exposure for a single image sequence and restore it. */
@@ -1321,6 +2295,8 @@ export class CameraImagingController {
     if (
       this.closed ||
       !this.applied ||
+      !this.activeScreenId ||
+      this.calibratingScreens.size > 0 ||
       this.adjusting ||
       this.captureInProgress
     )
@@ -1358,7 +2334,13 @@ export class CameraImagingController {
   }
 
   private async currentExposureReading() {
-    return measureExposure(await this.freshFrame(), this.screens());
+    const active = this.activeScreenId
+      ? this.screenList([this.activeScreenId])
+      : [];
+    return measureExposure(
+      await this.freshFrame(),
+      active.length ? active : this.screens(),
+    );
   }
 
   private async currentCalibrationExposureReading() {
@@ -1430,13 +2412,7 @@ export class CameraImagingController {
   }
 
   private async persist(stored: StoredCameraImaging) {
-    await mkdir(this.directory, { recursive: true });
-    const file = cameraImagingFile(this.directory, this.camera.id);
-    const temporary = `${file}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(stored, null, 2), {
-      mode: 0o600,
-    });
-    await rename(temporary, file);
+    await writeCameraImagingFile(this.directory, this.camera.id, stored);
   }
 
   async reopenAfterRestart(): Promise<void> {

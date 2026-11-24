@@ -192,6 +192,34 @@ test('code-configured arm connects, reports its own settings, retries and releas
       (await fetch(`${server.url}/api/setup/network-ports`)).status,
       404,
     );
+    const activateImaging = rstest
+      .spyOn(PlaygroundDevices.prototype, 'activateCameraImaging')
+      .mockResolvedValue({
+        state: 'ready',
+        screenId: 'left',
+        active: true,
+      });
+    try {
+      const activation = await fetch(
+        `${server.url}/api/cameras/imaging/activate`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: 'cam', screenId: 'left' }),
+        },
+      );
+      assert.equal(activation.status, 200);
+      assert.deepEqual(await activation.json(), {
+        imaging: {
+          state: 'ready',
+          screenId: 'left',
+          active: true,
+        },
+      });
+      assert.deepEqual(activateImaging.mock.calls[0], ['cam', 'left']);
+    } finally {
+      activateImaging.mockRestore();
+    }
     assert.equal(
       (
         await fetch(`${server.url}/api/arm/stop`, {

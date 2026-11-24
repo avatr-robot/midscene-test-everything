@@ -180,6 +180,167 @@ describe('camera imaging', () => {
     }
   });
 
+  it('reports background imaging initialization and failures without stale ready state', async () => {
+    const controls = new FakeCameraControl();
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      {
+        getInfo: () => ({ state: 'running', fps: 30 }),
+        getFrame: async () => ({ jpeg: await calibrationPattern() }),
+      } as never,
+      tmpdir(),
+      controls,
+    );
+    try {
+      const token = imaging.beginScreensCalibration(['left', 'right']);
+      expect(imaging.status('left')).toMatchObject({
+        state: 'exposure',
+        screenId: 'left',
+        active: false,
+        message: 'Preparing the camera imaging pattern',
+      });
+
+      imaging.failScreensCalibration(
+        token,
+        ['left', 'right'],
+        new Error('Phone left disconnected'),
+      );
+      expect(imaging.status('left')).toMatchObject({
+        state: 'error',
+        screenId: 'left',
+        active: false,
+        message: 'Phone left disconnected',
+      });
+      expect(imaging.status('right')).toMatchObject({
+        state: 'error',
+        screenId: 'right',
+        active: false,
+        message: 'Phone left disconnected',
+      });
+    } finally {
+      await imaging.close();
+    }
+  });
+
+  it('does not let a stale unsupported state hide a later setup failure', async () => {
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'avfoundation' },
+      {
+        getInfo: () => ({ state: 'running', fps: 30 }),
+        getFrame: async () => ({ jpeg: await calibrationPattern() }),
+      } as never,
+      tmpdir(),
+    );
+    imaging.registerScreen('left', () => ({
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 100, y: 0 },
+        bottomRight: { x: 100, y: 100 },
+        bottomLeft: { x: 0, y: 100 },
+      },
+      sourceWidth: 100,
+      sourceHeight: 100,
+      rotation: 0,
+    }));
+    try {
+      await expect(imaging.calibrateScreens(['left'])).resolves.toMatchObject({
+        state: 'unsupported',
+      });
+      const token = imaging.beginScreensCalibration(['left']);
+      imaging.failScreensCalibration(
+        token,
+        ['left'],
+        new Error('Phone left disconnected'),
+      );
+      expect(imaging.status('left')).toMatchObject({
+        state: 'error',
+        message: 'Phone left disconnected',
+      });
+    } finally {
+      await imaging.close();
+    }
+  });
+
+  it('keeps each pending screen calibration independent', async () => {
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      {
+        getInfo: () => ({ state: 'running', fps: 30 }),
+        getFrame: async () => ({ jpeg: await calibrationPattern() }),
+      } as never,
+      tmpdir(),
+    );
+    const correction = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 100, y: 0 },
+        bottomRight: { x: 100, y: 100 },
+        bottomLeft: { x: 0, y: 100 },
+      },
+      sourceWidth: 100,
+      sourceHeight: 100,
+      rotation: 0 as const,
+    };
+    imaging.registerScreen('left', () => correction);
+    imaging.registerScreen('right', () => correction);
+    Object.assign(imaging, {
+      calibrateSingle: async () => ({ state: 'ready' }),
+    });
+    try {
+      const leftToken = imaging.beginScreensCalibration(['left']);
+      const rightToken = imaging.beginScreensCalibration(['right']);
+
+      await imaging.calibrateScreens(['left'], leftToken);
+
+      expect(imaging.status('right')).toMatchObject({
+        state: 'exposure',
+        screenId: 'right',
+        message: 'Preparing the camera imaging pattern',
+      });
+
+      await imaging.calibrateScreens(['right'], rightToken);
+    } finally {
+      await imaging.close();
+    }
+  });
+
+  it('allows marker imaging to nest in one camera operation', async () => {
+    const controls = new FakeCameraControl();
+    controls.values.focus.mode = 'manual';
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      {
+        getInfo: () => ({ state: 'running', fps: 30 }),
+        getFrame: async () => ({
+          jpeg: await calibrationPattern(),
+        }),
+      } as never,
+      tmpdir(),
+      controls,
+    );
+    try {
+      await expect(
+        Promise.race([
+          imaging.withMarkerImaging(async () => {
+            await imaging.withMarkerImaging(async () => undefined);
+            await imaging.beforeCapture();
+            await imaging.releaseForCorrection();
+            await imaging.clearScreenBinding('camera');
+            return 'captured';
+          }),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('nested marker imaging deadlocked')),
+              2_000,
+            ),
+          ),
+        ]),
+      ).resolves.toBe('captured');
+    } finally {
+      await imaging.close();
+    }
+  });
+
   it('rejects neutral patches with a clipped colour channel', async () => {
     const strips = Array.from({ length: 7 }, (_, index) => {
       const offset = index * 2;
@@ -656,6 +817,239 @@ describe('camera imaging', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it('reuses the macOS auto-focus bracket for every shared screen', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const control = new FakeCameraControl();
+    control.values.focus = {
+      ...control.values.focus,
+      value: 0.35,
+      min: 0,
+      max: 1,
+      step: 0.01,
+      default: 0.35,
+    };
+    const controller = new CameraImagingController(
+      { id: control.deviceId, name: 'Mac camera', backend: 'avfoundation' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    const sampled: number[] = [];
+    const search = controller as unknown as {
+      measureSettledFocusForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<Map<string, { score: number; anisotropy: number }>>;
+      searchFocusForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<Map<string, { value: number; score: number }>>;
+    };
+    search.measureSettledFocusForScreens = async () => {
+      const value = control.values.focus.value;
+      sampled.push(value);
+      return new Map([
+        ['left', { score: -Math.abs(value - 0.33), anisotropy: 0.8 }],
+        ['right', { score: -Math.abs(value - 0.39), anisotropy: 0.8 }],
+      ]);
+    };
+    try {
+      const result = await search.searchFocusForScreens([
+        { screenId: 'left', correction },
+        { screenId: 'right', correction },
+      ]);
+      expect(sampled).toHaveLength(5);
+      expect(
+        sampled.every(
+          (value) =>
+            Math.abs(value - 0.35) <= 0.08 + Number.EPSILON &&
+            Number.isFinite(value),
+        ),
+      ).toBe(true);
+      expect(result.get('left')?.value).toBeCloseTo(0.35, 6);
+      expect(result.get('right')?.value).toBeCloseTo(0.39, 6);
+    } finally {
+      await controller.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('selects macOS exposure per shared screen from one candidate sweep', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const control = new FakeCameraControl();
+    control.values.exposure = {
+      ...control.values.exposure,
+      value: -6,
+      min: -12,
+      max: -1,
+      step: 1,
+      default: -6,
+    };
+    control.values.gain = {
+      ...control.values.gain,
+      supportsAuto: false,
+      supportsManual: false,
+    };
+    const controller = new CameraImagingController(
+      { id: control.deviceId, name: 'Mac camera', backend: 'avfoundation' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    const search = controller as unknown as {
+      calibrationExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<{
+        screenReadings: Array<{
+          screenId: string;
+          metrics: Record<string, number>;
+        }>;
+      }>;
+      optimizeExposureForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<Map<string, { exposure: number }>>;
+    };
+    search.calibrationExposureForScreens = async (screens) => {
+      const value = control.values.exposure.value;
+      return {
+        screenReadings: screens.map(({ screenId }) => {
+          const target = screenId === 'left' ? -8 : -5;
+          const mean = Math.max(0, 205 - Math.abs(value - target) * 10);
+          return {
+            screenId,
+            metrics: {
+              mean,
+              stddev: 20,
+              brightRatio: 0.8,
+              darkRatio: mean < 90 ? 0.4 : 0.02,
+              p95: Math.min(235, mean + 20),
+              p99: Math.min(245, mean + 30),
+              overExposedRatio: 0,
+              underExposedRatio: mean < 80 ? 0.4 : 0,
+              hiTileRatio: 0,
+              hiComponentCount: 0,
+              hiComponentLargestShare: 0,
+            },
+          };
+        }),
+      };
+    };
+    try {
+      const result = await search.optimizeExposureForScreens([
+        { screenId: 'left', correction },
+        { screenId: 'right', correction },
+      ]);
+      expect(result.get('left')?.exposure).toBe(-8);
+      expect(result.get('right')?.exposure).toBe(-5);
+    } finally {
+      await controller.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('selects macOS white balance per shared screen', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const control = new FakeCameraControl();
+    control.values.whiteBalance = {
+      ...control.values.whiteBalance,
+      value: 4_000,
+      min: 2_000,
+      max: 6_500,
+      step: 100,
+      default: 4_000,
+    };
+    const controller = new CameraImagingController(
+      { id: control.deviceId, name: 'Mac camera', backend: 'avfoundation' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    const search = controller as unknown as {
+      measureSettledWhiteBalance(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<{
+        score: number;
+        redGreenRatio: number;
+        blueGreenRatio: number;
+        screens: Array<{
+          screenId: string;
+          score: number;
+          redGreenRatio: number;
+          blueGreenRatio: number;
+          samples: number;
+        }>;
+      }>;
+      searchWhiteBalanceForScreens(
+        screens: Array<{ screenId: string; correction: CameraCorrection }>,
+      ): Promise<Map<string, number>>;
+    };
+    search.measureSettledWhiteBalance = async (screens) => {
+      const value = control.values.whiteBalance.value;
+      const readings = screens.map(({ screenId }) => {
+        const target = screenId === 'left' ? 4_300 : 5_000;
+        return {
+          screenId,
+          score: Math.abs(value - target) / 10_000,
+          redGreenRatio: 1,
+          blueGreenRatio: 1,
+          samples: 7,
+        };
+      });
+      return {
+        score: Math.max(...readings.map((reading) => reading.score)),
+        redGreenRatio: 1,
+        blueGreenRatio: 1,
+        screens: readings,
+      };
+    };
+    try {
+      const result = await search.searchWhiteBalanceForScreens([
+        { screenId: 'left', correction },
+        { screenId: 'right', correction },
+      ]);
+      expect(Math.abs((result.get('left') ?? 0) - 4_300)).toBeLessThanOrEqual(
+        100,
+      );
+      expect(Math.abs((result.get('right') ?? 0) - 5_000)).toBeLessThanOrEqual(
+        100,
+      );
+    } finally {
+      await controller.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('ranks a sharp focus chart above a blurred chart', async () => {
     const svg =
       '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="800">' +
@@ -1002,87 +1396,6 @@ describe('camera imaging', () => {
     }
   }, 30_000);
 
-  it('waits for both saved screens before restoring focus and exposure', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
-    const control = new FakeCameraControl();
-    const correction: CameraCorrection = {
-      points: {
-        topLeft: { x: 0, y: 0 },
-        topRight: { x: 399, y: 0 },
-        bottomRight: { x: 399, y: 799 },
-        bottomLeft: { x: 0, y: 799 },
-      },
-      sourceWidth: 400,
-      sourceHeight: 800,
-      rotation: 0,
-    };
-    const screenIds = ['screen', 'second-screen'];
-    const file = cameraImagingFile(directory, control.deviceId);
-    await writeFile(
-      file,
-      JSON.stringify({
-        version: 4,
-        cameraId: control.deviceId,
-        rois: screenIds.map((screenId) => ({
-          screenId,
-          fingerprint: createHash('sha256')
-            .update(JSON.stringify([screenId, correction]))
-            .digest('hex'),
-        })),
-        focus: { value: 45, score: 1 },
-        exposure: { value: -8 },
-        calibratedAt: new Date().toISOString(),
-      }),
-    );
-    const stream = {
-      getInfo: () => ({ state: 'running', fps: 30 }),
-      getFrame: async () => ({ jpeg: Buffer.alloc(0) }),
-    };
-    const imaging = new CameraImagingController(
-      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
-      stream as never,
-      directory,
-      control,
-    );
-    try {
-      await imaging.load();
-      imaging.registerScreen(screenIds[0], () => correction);
-      await imaging.resumeStored();
-      expect(imaging.status().state).toBe('idle');
-      expect(control.setCalls).toHaveLength(0);
-      await expect(readFile(file, 'utf8')).resolves.toContain('second-screen');
-
-      imaging.registerScreen(screenIds[1], () => correction);
-      await imaging.resumeStored();
-
-      expect(imaging.status()).toMatchObject({
-        state: 'ready',
-        focus: 45,
-        exposure: -8,
-      });
-      expect(control.values.focus).toMatchObject({
-        value: 45,
-        mode: 'manual',
-      });
-      expect(control.values.exposure).toMatchObject({
-        value: -8,
-        mode: 'manual',
-      });
-
-      await imaging.clearPerspectiveBinding();
-
-      expect(imaging.status().state).toBe('released');
-      expect(control.values.focus.mode).toBe('auto');
-      expect(control.values.exposure.mode).toBe('auto');
-      await expect(readFile(file, 'utf8')).rejects.toMatchObject({
-        code: 'ENOENT',
-      });
-    } finally {
-      await imaging.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
   it('invalidates a persisted v5 profile with clipped white balance', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
@@ -1155,11 +1468,17 @@ describe('camera imaging', () => {
       control,
     );
     const stored = {
-      version: 6 as const,
+      version: 7 as const,
       cameraId: control.deviceId,
-      rois: [{ screenId, fingerprint: 'old-perspective' }],
-      focus: { value: 45, score: 1 },
-      exposure: { value: -8 },
+      screens: [
+        {
+          screenId,
+          fingerprint: 'old-perspective',
+          focus: { value: 45, score: 1 },
+          exposure: { value: -8 },
+          calibratedAt: new Date().toISOString(),
+        },
+      ],
       calibratedAt: new Date().toISOString(),
     };
     Object.assign(imaging as unknown as Record<string, unknown>, {
@@ -1174,7 +1493,7 @@ describe('camera imaging', () => {
       const persisted = JSON.parse(
         await readFile(cameraImagingFile(directory, control.deviceId), 'utf8'),
       ) as typeof stored;
-      expect(persisted.rois[0]?.fingerprint).toBe(
+      expect(persisted.screens[0]?.fingerprint).toBe(
         createHash('sha256')
           .update(JSON.stringify([screenId, correction]))
           .digest('hex'),
@@ -1824,6 +2143,176 @@ describe('camera imaging', () => {
       expect(control.values.focus.mode).toBe('auto');
       expect(control.values.brightness.value).toBe(128);
       expect(control.values.gain.value).toBe(0);
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('saves independent screen profiles during one shared calibration', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const imaging = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    imaging.registerScreen('left', () => correction);
+    imaging.registerScreen('right', () => correction);
+    Object.assign(imaging as unknown as Record<string, unknown>, {
+      preset: async () => ({
+        exposure: control.values.exposure,
+        focus: control.values.focus,
+      }),
+      optimizeExposureForScreens: async () =>
+        new Map([
+          ['left', { exposure: -8, score: 0.1, gain: 0 }],
+          ['right', { exposure: -4, score: 0.2, gain: 0 }],
+        ]),
+      tuneToneForScreens: async () =>
+        new Map([
+          [
+            'left',
+            {
+              brightness: 124,
+              contrast: 132,
+              score: 0.1,
+              monotonic: true,
+            },
+          ],
+          [
+            'right',
+            {
+              brightness: 136,
+              contrast: 120,
+              score: 0.2,
+              monotonic: true,
+            },
+          ],
+        ]),
+      searchWhiteBalanceForScreens: async () =>
+        new Map([
+          ['left', 4_800],
+          ['right', 5_200],
+        ]),
+      searchFocusForScreens: async () =>
+        new Map([
+          ['left', { value: 40, score: 2, min: 0, max: 250 }],
+          ['right', { value: 180, score: 3, min: 0, max: 250 }],
+        ]),
+    });
+    try {
+      await imaging.calibrateScreens(['left', 'right']);
+      const stored = JSON.parse(
+        await readFile(cameraImagingFile(directory, control.deviceId), 'utf8'),
+      ) as {
+        screens: Array<{
+          screenId: string;
+          focus: { value: number };
+          exposure: { value: number };
+        }>;
+      };
+      expect(stored.screens).toHaveLength(2);
+      expect(
+        stored.screens.find((screen) => screen.screenId === 'left'),
+      ).toMatchObject({
+        focus: { value: 40 },
+        exposure: { value: -8 },
+      });
+      expect(
+        stored.screens.find((screen) => screen.screenId === 'right'),
+      ).toMatchObject({
+        focus: { value: 180 },
+        exposure: { value: -4 },
+      });
+
+      await imaging.activateScreen('right');
+      expect(control.values.focus).toMatchObject({
+        value: 180,
+        mode: 'manual',
+      });
+      expect(control.values.exposure).toMatchObject({
+        value: -4,
+        mode: 'manual',
+      });
+      expect(imaging.status('right')).toMatchObject({
+        state: 'ready',
+        screenId: 'right',
+        active: true,
+      });
+
+      await imaging.clearScreenBinding('right');
+      expect(imaging.status('left').state).toBe('ready');
+      expect(imaging.status('right').state).toBe('unconfigured');
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('requires recalibration for a shared legacy multi-screen profile', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    await writeFile(
+      cameraImagingFile(directory, control.deviceId),
+      JSON.stringify({
+        version: 6,
+        cameraId: control.deviceId,
+        rois: [
+          {
+            screenId: 'left',
+            fingerprint: createHash('sha256')
+              .update(JSON.stringify(['left', correction]))
+              .digest('hex'),
+          },
+          {
+            screenId: 'right',
+            fingerprint: createHash('sha256')
+              .update(JSON.stringify(['right', correction]))
+              .digest('hex'),
+          },
+        ],
+        focus: { value: 100, score: 1 },
+        exposure: { value: -6 },
+        calibratedAt: new Date().toISOString(),
+      }),
+    );
+    const imaging = new CameraImagingController(
+      { id: control.deviceId, name: 'Camera', backend: 'dshow' },
+      { getInfo: () => ({ state: 'running', fps: 30 }) } as never,
+      directory,
+      control,
+    );
+    imaging.registerScreen('left', () => correction);
+    imaging.registerScreen('right', () => correction);
+    try {
+      await imaging.load();
+      expect(imaging.status('left').state).toBe('unconfigured');
+      expect(imaging.status('right').state).toBe('unconfigured');
+      expect(control.setCalls).toEqual([]);
     } finally {
       await imaging.close();
       await rm(directory, { recursive: true, force: true });

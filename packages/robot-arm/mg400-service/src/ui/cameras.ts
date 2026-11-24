@@ -1,4 +1,7 @@
-import type { CalibrationPreviewPositions } from '@midscene/robotics-shared/assisted-contracts';
+import type {
+  CalibrationImagingStatus,
+  CalibrationPreviewPositions,
+} from '@midscene/robotics-shared/assisted-contracts';
 import type { PerspectiveTarget } from '@midscene/robotics-shared/camera/vision-types';
 import type { CameraCorrection } from '@midscene/robotics-shared/contracts';
 import { create } from 'zustand';
@@ -31,6 +34,7 @@ export interface CameraEntry extends CameraScreen {
   previewScreenId?: string;
   screens?: CameraScreen[];
   error?: string;
+  imaging?: CalibrationImagingStatus;
   stream?: {
     state: string;
     width: number;
@@ -205,4 +209,23 @@ async function cameraRequest(action: 'start' | 'stop', id: string) {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Camera request failed');
+}
+
+export async function activateCameraImaging(
+  cameraId: string,
+  screenId: string,
+) {
+  const response = await fetch('/api/cameras/imaging/activate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: cameraId, screenId }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  const data = (await response.json()) as {
+    error?: string;
+    imaging?: CalibrationImagingStatus;
+  };
+  if (!response.ok)
+    throw new Error(data.error || 'Camera imaging switch failed');
+  return data.imaging;
 }

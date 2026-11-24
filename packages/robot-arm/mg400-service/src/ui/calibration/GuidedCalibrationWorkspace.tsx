@@ -37,6 +37,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { activateCameraImaging } from '../cameras';
 import { useArmTheme } from '../theme';
 import {
   CalibrationPowerButton,
@@ -72,6 +73,11 @@ import {
   t,
   useLanguage,
 } from './i18n';
+import {
+  finishCameraImagingForScreen,
+  screenImagingSwitchError,
+  shouldSwitchScreenImaging,
+} from './imaging-completion';
 import {
   RobotVisionApiError,
   RobotVisionClient,
@@ -165,7 +171,7 @@ function GuidedContent({
   initialStep: 0 | 1;
   reviewInstallationOnOpen: boolean;
 }) {
-  useLanguage();
+  const language = useLanguage();
   const { message } = App.useApp();
   const [selectedId, setSelectedId] = useState(id);
   // Keep the displayed device until the requested device and its attempt are ready.
@@ -196,6 +202,7 @@ function GuidedContent({
   const [mappingError, setMappingError] = useState<string>();
   const [singleFailure, setSingleFailure] = useState<SingleStatus>();
   const [loadError, setLoadError] = useState<string>();
+  const [imagingSwitchError, setImagingSwitchError] = useState<string>();
   const [closing, setClosing] = useState(false);
   const [illustrationContainer, setIllustrationContainer] =
     useState<HTMLDivElement | null>(null);
@@ -399,6 +406,7 @@ function GuidedContent({
       setApplying(false);
       setSingleFailure(undefined);
       setMappingError(undefined);
+      setImagingSwitchError(undefined);
       setError(undefined);
     },
     [requestScreen],
@@ -896,20 +904,17 @@ function GuidedContent({
     }
   };
   const waitForImagingCalibration = useCallback(async () => {
-    const deadline = Date.now() + 30_000;
     try {
-      while (currentBase.current === base) {
-        const { imaging } = await client.assistedCalibrationSetup();
-        if (imaging?.state === 'ready' || imaging?.state === 'unsupported')
-          return;
-        if (imaging?.state === 'error')
-          throw new Error(
-            imaging.message ?? 'Could not calibrate the camera image.',
-          );
-        if (Date.now() >= deadline)
-          throw new Error('Timed out while calibrating the camera image.');
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
+      await finishCameraImagingForScreen({
+        screenId: selectedId,
+        load: () => client.assistedCalibrationSetup(),
+        activate: async () => {
+          const imaging = await activateCameraImaging(cameraId, selectedId);
+          if (!imaging) throw new Error('Camera imaging switch failed');
+          return imaging;
+        },
+        shouldContinue: () => currentBase.current === base,
+      });
     } catch (cause) {
       if (currentBase.current === base)
         void message.warning(
@@ -918,7 +923,7 @@ function GuidedContent({
           ),
         );
     }
-  }, [base, client, message]);
+  }, [base, cameraId, client, message, selectedId]);
   const detected = useCallback(
     async (
       _session: unknown,
@@ -1213,6 +1218,48 @@ function GuidedContent({
     selectedId,
   ]);
   const hasCorrection = Boolean(config?.correction);
+  useEffect(() => {
+    if (!config || config.deviceId !== selectedId) return;
+    if (
+      !shouldSwitchScreenImaging({
+        step,
+        hasCorrection,
+        batchActive,
+        singleBusy,
+        controllerBusy: controller.busy,
+        markerOpen: Boolean(markerOpen),
+        perspectiveEditor,
+      })
+    )
+      return;
+    let cancelled = false;
+    setImagingSwitchError(undefined);
+    void activateCameraImaging(cameraId, selectedId)
+      .then((imaging) => {
+        if (!cancelled)
+          setImagingSwitchError(screenImagingSwitchError(imaging, selectedId));
+      })
+      .catch((cause) => {
+        if (!cancelled)
+          setImagingSwitchError(
+            cause instanceof Error ? cause.message : String(cause),
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    batchActive,
+    cameraId,
+    config?.deviceId,
+    controller.busy,
+    hasCorrection,
+    markerOpen,
+    perspectiveEditor,
+    selectedId,
+    singleBusy,
+    step,
+  ]);
   const startSingle = useCallback(async () => {
     if (startingSingle.current || !hasCorrection) return;
     if (!config?.installationTaught) {
@@ -1448,6 +1495,18 @@ function GuidedContent({
               />
             )}
             {loadError && <Alert type="error" showIcon message={loadError} />}
+            {imagingSwitchError && (
+              <Alert
+                type="warning"
+                showIcon
+                message={
+                  language === 'zh'
+                    ? '相机参数未能切换到当前屏幕'
+                    : 'Camera parameters did not switch to this screen'
+                }
+                description={imagingSwitchError}
+              />
+            )}
             {screenListError && (
               <Alert type="warning" showIcon message={t(screenListError)} />
             )}
