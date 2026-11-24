@@ -270,10 +270,20 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
       )
     : streamState === 'running';
   const previewEnabled = standalone ? selected?.id !== pausedCamera : running;
+  const activeScreenMapped = Boolean(
+    activeScreen && !cameraScreenNeedsCalibration(activeScreen),
+  );
   useEffect(() => {
-    if (!running || !selectedId || !activeScreen?.id || activeWizard) return;
-    let cancelled = false;
     setImagingSwitchError(undefined);
+    if (
+      !running ||
+      !selectedId ||
+      !activeScreen?.id ||
+      !activeScreenMapped ||
+      activeWizard
+    )
+      return;
+    let cancelled = false;
     void activateCameraImaging(selectedId, activeScreen.id)
       .then((imaging) => {
         if (
@@ -293,7 +303,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [activeScreen?.id, activeWizard, running, selectedId]);
+  }, [activeScreen?.id, activeScreenMapped, activeWizard, running, selectedId]);
   const starting = !standalone && streamState === 'starting';
   const cameraActionLabel = t(
     starting ? 'cameraStarting' : previewEnabled ? 'stopCamera' : 'startCamera',
@@ -689,6 +699,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
               </div>
               {availableScreens.length > 1 && activeScreen && (
                 <Select
+                  className="camera-screen-select"
                   aria-label={language === 'zh' ? '标定屏幕' : 'Screen'}
                   value={activeScreen.id}
                   loading={switchingScreen}
@@ -703,7 +714,9 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                       disabled: uncalibrated,
                       label: (
                         <span className="camera-screen-option">
-                          <span>{screen.name}</span>
+                          <span className="camera-screen-option-name">
+                            {screen.name}
+                          </span>
                           {uncalibrated && (
                             <span className="camera-screen-option-status">
                               {t('uncalibrated')}
@@ -713,7 +726,6 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                       ),
                     };
                   })}
-                  style={{ width: 180 }}
                 />
               )}
             </div>
