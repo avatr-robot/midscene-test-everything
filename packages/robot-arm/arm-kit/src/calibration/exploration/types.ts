@@ -116,6 +116,12 @@ export interface SlideRecovery {
   targetId: string;
   phase: 'height' | 'grid';
   cause: string;
+  predictedPressZMm: number;
+  predictedSurfaceZMm?: number;
+  measuredContactZMm: number;
+  measuredHeightIntervalMm?: [number, number];
+  measuredPressZMm: number;
+  moves: number;
   switchedToVertical: boolean;
 }
 export interface AutoExplorationOptions {

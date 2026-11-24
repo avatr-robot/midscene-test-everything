@@ -34,6 +34,25 @@ it('picks audit corners that keep the measured plane non-collinear', () => {
   );
 });
 
+it('selects interior audits from both halves using the real first contact', () => {
+  const pair = auditTargets(
+    [
+      corner('a', 0, 0),
+      corner('b', 100, 0),
+      corner('c', 100, 100),
+      corner('d', 0, 100),
+    ],
+    {
+      firstContact: { x: 25, y: 55 },
+      auditPosition: ({ css }) => ({
+        x: 10 + css.x * 0.8,
+        y: 10 + css.y * 0.8,
+      }),
+    },
+  );
+  expect(pair.map(({ id }) => id)).toEqual(['b', 'c']);
+});
+
 it('keeps dev standard holdouts out of the six fitting targets', () => {
   const targets = explorationTargets({ width: 400, height: 800 });
   expect(targets.filter((t) => t.purpose === 'fit')).toHaveLength(6);

@@ -230,6 +230,7 @@ export class StationaryPhoneObservation {
     shortEdgeCssPx: number,
     settleMs = 0,
     allowBriefContactGaps = this.evidence.purpose === 'search',
+    targetAlreadyPainted = false,
   ): Promise<WebPoint | undefined> {
     const deadline =
       this.started + CALIBRATION_PHONE_POLICY.stepAcknowledgementMs;
@@ -331,9 +332,14 @@ export class StationaryPhoneObservation {
      */
     const streamed = async () => {
       const id = this.evidence.sampleId;
-      await read(id, 'prepare');
+      // Repeated coarse probes can reuse the painted target. Results still
+      // carry the new sample ID and must agree after the stationary settle.
+      if (!targetAlreadyPainted || this.evidence.purpose !== 'coarse-search')
+        await read(id, 'prepare');
+      check();
       this.readings.length = 0;
       this.firstReply = undefined;
+      this.sentAt = performance.now();
       this.step = { id, phase: 'result', contactMode: 'current' };
       this.issued.set(`${id}/result`, {});
       publish();

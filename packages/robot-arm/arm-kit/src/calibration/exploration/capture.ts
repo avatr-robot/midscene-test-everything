@@ -376,6 +376,8 @@ export class AutomaticCapture {
                 : purpose;
           snapshot = undefined;
           sampleId = id;
+          const targetAlreadyPainted =
+            this.latest?.visible && this.latest.targetReady === this.target!.id;
           const observation = new StationaryPhoneObservation(
             id,
             this.target!.id,
@@ -397,6 +399,7 @@ export class AutomaticCapture {
               Math.min(this.layout.width, this.layout.height),
               settleMs,
               allowBriefContactGaps,
+              targetAlreadyPainted,
             );
             snapshot = {
               sampleId: id,

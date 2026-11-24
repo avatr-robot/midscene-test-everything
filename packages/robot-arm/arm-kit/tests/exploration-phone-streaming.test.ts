@@ -12,11 +12,14 @@ const layout = {
   markers: [],
 } as unknown as CalibrationPageUpdate['layout'];
 
-function harness(targetId: string) {
+function harness(
+  targetId: string,
+  purpose: 'press' | 'coarse-search' = 'press',
+) {
   const observation = new StationaryPhoneObservation(
     'sample',
     targetId,
-    'press',
+    purpose,
     -1,
     0,
     performance.now(),
@@ -91,6 +94,26 @@ it('accepts a streamed no-touch result only after two frames', async () => {
     await expect(observation.measure(host, () => {}, 400, 100)).resolves.toBe(
       undefined,
     );
+  } finally {
+    clearInterval(timer);
+  }
+});
+
+it('uses a fresh result step directly for an already painted coarse target', async () => {
+  const { observation, reply, host } = harness('target', 'coarse-search');
+  const timer = setInterval(() => reply('no_touch'), 20);
+  const phases: string[] = [];
+  try {
+    const point = await observation.measure(
+      host,
+      () => phases.push(observation.step!.phase),
+      400,
+      30,
+      false,
+      true,
+    );
+    expect(point).toBeUndefined();
+    expect(phases).toEqual(['result']);
   } finally {
     clearInterval(timer);
   }
