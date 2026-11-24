@@ -18,6 +18,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  type ReactNode,
   forwardRef,
   useEffect,
   useImperativeHandle,
@@ -170,9 +171,10 @@ export const CalibrationBatchPanel = forwardRef<
     disabled: boolean;
     onChanged?: () => void | Promise<void>;
     onActiveChange?: (active: boolean) => void;
+    debugDrawing?: ReactNode;
   }
 >(function CalibrationBatchPanel(
-  { api, cameraId, screens, disabled, onChanged, onActiveChange },
+  { api, cameraId, screens, disabled, onChanged, onActiveChange, debugDrawing },
   ref,
 ) {
   const [batch, setBatch] = useState<CalibrationBatchState | null>();
@@ -680,6 +682,7 @@ export const CalibrationBatchPanel = forwardRef<
         )}
       <details>
         <summary>{t('Advanced debugging')}</summary>
+        {debugDrawing}
         {(
           [
             [

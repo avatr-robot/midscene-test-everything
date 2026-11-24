@@ -1,3 +1,4 @@
+import type { DebugLogoDrawingStatus } from '@midscene/robotics-shared/assisted-contracts';
 import type {
   AssistedCalibrationAction,
   AssistedCalibrationInput,
@@ -73,6 +74,14 @@ export class CalibrationClient {
     source.onmessage = (event) => update(JSON.parse(event.data));
     source.onerror = disconnected;
     return () => source.close();
+  }
+  debugLogoStatus() {
+    return this.request<DebugLogoDrawingStatus | null>('/debug-logo');
+  }
+  startDebugLogo() {
+    return this.request<DebugLogoDrawingStatus>('/debug-logo', {
+      confirmed: true,
+    });
   }
   async calibrationPhoneStatus(): Promise<CalibrationPhoneStatus> {
     return this.request('/assisted-calibration/phone');

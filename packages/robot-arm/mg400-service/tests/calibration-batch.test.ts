@@ -347,6 +347,28 @@ it('rejects stale commands, retries only the failed screen and stops its current
   expect(f.stops).toContain('two');
 });
 
+it('reports the drawing error when the active screen stops during Logo drawing', async () => {
+  const f = await setup();
+  const error = 'MG400 fault state is older than 200 ms';
+  f.entries
+    .get('one')
+    .host.service.acceptAutomatically.mockImplementation(async () => {
+      f.complete('one');
+      f.sessions.set('one', {
+        ...f.sessions.get('one')!,
+        logo: { id: 'drawing', expectedStrokes: 6, state: 'failed', error },
+      });
+      await f.runtime.stopCalibrationOperation();
+      return { accepted: true, reasons: [] };
+    });
+  await f.start('automatic');
+  await rstest.waitFor(() =>
+    expect(f.batch.read()).toMatchObject({ status: 'stopped', error }),
+  );
+  expect(f.batch.read()?.items[0]).toMatchObject({ status: 'stopped', error });
+  expect(f.starts).toEqual(['one']);
+});
+
 it('continues boundary review on the same samples when manual acceptance is selected', async () => {
   const f = await setup();
   const service = f.entries.get('one').host.service;

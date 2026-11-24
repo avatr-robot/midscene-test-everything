@@ -1382,9 +1382,23 @@ export class CalibrationBatch {
         signal.aborted || this.runtime.stopRevision !== this.stopRevision;
       const missing =
         error instanceof RobotArmError ? error.details?.screens : undefined;
+      const row = state.items[state.currentIndex];
+      const host = row && this.devices.entries.get(row.deviceId)?.host;
+      await host?.service.stop();
+      let message = error instanceof Error ? error.message : String(error);
+      if (
+        stopped &&
+        !signal.aborted &&
+        error instanceof RobotArmError &&
+        error.code === 'ACTION_STOPPED'
+      ) {
+        const attempt = host?.service.status();
+        if (attempt && attempt.id === row?.runIds.at(-1))
+          message = attempt.logo?.error ?? message;
+      }
       await this.update(() => {
         state.status = stopped ? 'stopped' : 'failed';
-        state.error = error instanceof Error ? error.message : String(error);
+        state.error = message;
         state.sharedParkingFailureVisibility = Array.isArray(missing)
           ? sharedParkingVisibility
           : undefined;
@@ -1398,15 +1412,11 @@ export class CalibrationBatch {
               return [item?.name ?? screen.id];
             })
           : undefined;
-        const row = state.items[state.currentIndex];
         if (row && !terminal(row.status)) {
           row.status = stopped ? 'stopped' : 'failed';
           row.error = state.error;
         }
       });
-      const row = state.items[state.currentIndex];
-      if (row)
-        await this.devices.entries.get(row.deviceId)?.host?.service.stop();
       return undefined;
     } finally {
       this.automaticSharedParking = false;

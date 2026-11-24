@@ -11,6 +11,7 @@ import type {
   AssistedMappingInput,
   AutomaticCaptureHost,
   AutomaticExplorationMode,
+  CalibrationLogoStatus,
   CalibrationPageReply,
   CalibrationPageUpdate,
   CalibrationPhoneStatus,
@@ -24,6 +25,7 @@ import {
   RobotArmError,
   type ScreenVisibilityProbePattern,
   isRobotArmError,
+  sameVisionMapping,
   semanticJson,
 } from '../contracts.js';
 import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
@@ -37,7 +39,11 @@ import {
 import { AutomaticCapture } from './exploration/capture.js';
 import { fitExploration } from './exploration/fit.js';
 import { invertMapping, pointDistance, project } from './phone/geometry.js';
-import { CalibrationPhoneSession, sameLayout } from './phone/session.js';
+import {
+  CalibrationPhoneSession,
+  sameLayout,
+  sameLayoutGeometry,
+} from './phone/session.js';
 import { knownScreenTravelHeight, pageOrderedQuad } from './screen-position.js';
 import { CalibrationSetup, calibrationGeometryKey } from './setup.js';
 import { SAMPLED_SURFACE_LIMIT_MM } from './surface.js';
@@ -115,7 +121,11 @@ export class CalibrationWorkflow {
   };
   phoneHeartbeat() {
     // A keepalive cannot substitute for a fresh observation during motion.
-    if (!this.measuring() && this.state?.logo?.state !== 'drawing')
+    if (
+      !this.measuring() &&
+      this.state?.logo?.state !== 'drawing' &&
+      this.debugLogo?.state !== 'drawing'
+    )
       this.phone.lastSeen = Date.now();
     if (this.state?.calibration) this.changed();
     void this.recoverSamplingSocket();
@@ -147,6 +157,7 @@ export class CalibrationWorkflow {
   }
   private readonly phoneLinks: () => { name: string; url: string }[];
   private state?: SessionState;
+  private debugLogo?: CalibrationLogoStatus;
   private input?: AssistedCalibrationInput;
   private readonly phone: CalibrationPhoneSession;
   private capture?: Promise<void>;
@@ -182,6 +193,7 @@ export class CalibrationWorkflow {
       );
     this.attemptRevision++;
     this.socketRecovery = undefined;
+    this.debugLogo = undefined;
     this.state = undefined;
     this.measurements = undefined;
     this.fittedGeometry = undefined;
@@ -603,6 +615,7 @@ export class CalibrationWorkflow {
   private insetMarkers = false;
 
   requestMarkerDisplay(reposition = false) {
+    this.debugLogo = undefined;
     if (reposition) this.insetMarkers = !this.insetMarkers;
     this.phoneHome = false;
     this.markerRequest = randomUUID();
@@ -633,6 +646,7 @@ export class CalibrationWorkflow {
   private imagingRun?: Promise<void>;
   private imagingGeneration = 0;
   restorePhoneHome() {
+    this.debugLogo = undefined;
     this.phoneHome = true;
     this.changed();
   }
@@ -691,6 +705,8 @@ export class CalibrationWorkflow {
         imagingRequest: this.imagingRequest,
         anchors: [],
       };
+    if (this.debugLogo)
+      return { view: 'completed', logo: this.debugLogo, anchors: [] };
     const s = this.state;
     if (
       !s ||
@@ -1245,6 +1261,7 @@ export class CalibrationWorkflow {
     this.socketRecovery = undefined;
     this.phoneHome = false;
     this.retryVerification = false;
+    this.debugLogo = undefined;
     this.receipt = undefined;
     this.receivingTarget = undefined;
     this.deviceRevision = this.options.deviceId
@@ -1320,16 +1337,64 @@ export class CalibrationWorkflow {
         409,
       );
   }
+  prepareSavedLogoCanvas(): LogoCanvasSession {
+    const id = this.options.deviceId;
+    const store = this.runtime.profileStore;
+    const binding = id && store.deviceBinding(id);
+    const saved = id && store.calibrationMapping(id)?.mapping;
+    const page = this.phone.assertConnected();
+    if (
+      !binding ||
+      !saved ||
+      !sameVisionMapping(saved.vision, binding.vision) ||
+      !sameLayoutGeometry(saved.layout, page.layout)
+    )
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Keep the saved calibration page open in its calibrated orientation',
+        409,
+      );
+    const guard = () => {
+      if (
+        this.phoneHome ||
+        this.markerRequest ||
+        this.imagingRequest ||
+        this.activeAction ||
+        store.deviceBinding(binding.deviceId)?.revision !== binding.revision
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'The saved drawing context changed',
+          409,
+        );
+    };
+    guard();
+    const canvas = this.prepareLogoCanvas(
+      page.layout,
+      (logo) => {
+        this.debugLogo = logo;
+      },
+      guard,
+    );
+    if (!canvas)
+      throw new RobotArmError(
+        'PHONE_PAGE_OUTDATED',
+        'Reload the phone calibration page before drawing',
+        409,
+      );
+    return canvas;
+  }
   private prepareLogoCanvas(
-    session: SessionState,
-    revision: number,
+    layout: CalibrationPageUpdate['layout'],
+    setStatus: (status: CalibrationLogoStatus) => void,
+    guard: () => void,
+    minimumTravelTipZMm?: number,
   ): LogoCanvasSession | undefined {
     const page = this.phone.update;
-    if (page?.logoCanvasSupported !== 2 || !session.mapping) return undefined;
-    const { layout } = session.mapping;
+    if (page?.logoCanvasSupported !== 2) return undefined;
     const id = randomUUID();
     const assertPage = () => {
-      this.assertAttempt(revision);
+      guard();
       const current = this.phone.assertConnected();
       if (
         current.pageId !== page.pageId ||
@@ -1354,21 +1419,28 @@ export class CalibrationWorkflow {
     const drawing = { id, expectedStrokes: CALIBRATION_LOGO_STROKE_COUNT };
     return {
       viewport: layout,
-      minimumTravelTipZMm: this.batchTravelTipZMm,
+      minimumTravelTipZMm,
       prepare: async (signal) => {
         signal.throwIfAborted();
-        session.logo = { ...drawing, state: 'drawing' };
+        assertPage();
+        const started = performance.now();
+        setStatus({ ...drawing, state: 'drawing' });
         this.changed();
         const deadline = Date.now() + 4_000;
         while (assertPage().logoCanvasAck !== id && Date.now() < deadline)
           await delay(50, undefined, { signal });
         check();
+        debug(
+          `Logo canvas ready in ${Math.round(performance.now() - started)} ms`,
+        );
       },
       check,
       finish: (error) => {
-        session.logo = error
-          ? { ...drawing, state: 'failed', error }
-          : { ...drawing, state: 'completed' };
+        setStatus(
+          error
+            ? { ...drawing, state: 'failed', error }
+            : { ...drawing, state: 'completed' },
+        );
         this.changed();
       },
     };
@@ -1869,7 +1941,15 @@ export class CalibrationWorkflow {
               }
             : undefined,
           () => this.assertAttempt(revision),
-          this.prepareLogoCanvas(s, revision),
+          s.mapping &&
+            this.prepareLogoCanvas(
+              s.mapping.layout,
+              (logo) => {
+                s.logo = logo;
+              },
+              () => this.assertAttempt(revision),
+              this.batchTravelTipZMm,
+            ),
         );
         if (this.attemptRevision === revision) s.stage = 'completed';
       } else

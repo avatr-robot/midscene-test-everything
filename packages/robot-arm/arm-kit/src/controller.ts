@@ -1,4 +1,5 @@
 import { ArmActionQueue } from './action-queue.js';
+import type { LogoCanvasSession } from './calibration/draw-logo.js';
 import type {
   ActionRequest,
   ActionResult,
@@ -8,7 +9,12 @@ import type {
 } from './contracts.js';
 import { RobotArmError, isRobotArmError } from './contracts.js';
 import { registerControllerRuntime } from './controller-runtime.js';
-import { RobotArmRuntime, type RobotArmRuntimeOptions } from './runtime.js';
+import {
+  type DeviceMotionRequest,
+  type DeviceMotionTransfer,
+  RobotArmRuntime,
+  type RobotArmRuntimeOptions,
+} from './runtime.js';
 import type {
   PreparedTransferRoute,
   TransferRouteInput,
@@ -100,6 +106,41 @@ export class ArmController {
     signal?: AbortSignal,
   ): Promise<ActionResult> {
     const action = structuredClone(request);
+    return this.runDeviceMotion(
+      ownerId,
+      action,
+      readVision,
+      (vision, transfer) =>
+        this.#runtime.execute(action, undefined, vision, transfer),
+      signal,
+    );
+  }
+
+  /** @internal Draw with the same Device queue, vision and transfer checks as a gesture. */
+  drawLogoForDevice(
+    ownerId: string,
+    request: DeviceMotionRequest,
+    readVision: () => Promise<VisionBinding>,
+    canvas: () => LogoCanvasSession,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.runDeviceMotion(
+      ownerId,
+      request,
+      readVision,
+      (vision, transfer) =>
+        this.#runtime.drawSavedLogo(request, vision, canvas(), transfer),
+      signal,
+    );
+  }
+
+  private runDeviceMotion<T>(
+    ownerId: string,
+    action: DeviceMotionRequest,
+    readVision: () => Promise<VisionBinding>,
+    run: (vision: VisionBinding, transfer?: DeviceMotionTransfer) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
     return this.deviceActions.enqueue(
       ownerId,
       async (abort) => {
@@ -135,9 +176,7 @@ export class ArmController {
         abort.addEventListener('abort', cancel, { once: true });
         try {
           abort.throwIfAborted();
-          const result = await this.#runtime.execute(
-            action,
-            undefined,
+          const result = await run(
             vision,
             fromCalibrationId
               ? {

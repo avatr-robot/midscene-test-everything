@@ -14,6 +14,18 @@ const teachingBoundaryZh: Record<string, string> = {
   'Finish calibration and return': '完成标定并返回',
   'Shared Safe Position pending': '共用安全位待确认',
   'Advanced debugging': '高级调试',
+  'Debug drawing': '调试绘制',
+  'Start drawing': '开始绘制',
+  'Stop drawing': '停止绘制',
+  'Logo drawing stopped': 'Logo 绘制已停止',
+  'A current accepted calibration is required to draw on this screen':
+    '请先完成并保存这块屏幕的标定',
+  'Keep the saved calibration page open in its calibrated orientation':
+    '请打开这块屏幕的标定页面，并保持标定时的显示方向',
+  'Reload the phone calibration page before drawing':
+    '请刷新设备端标定页面后再绘制',
+  'The saved drawing context changed':
+    '已保存的绘制环境发生变化，请检查设备和标定配置',
   'Debug shared Safe Position search': '调试自动寻找共用安全位置',
   'Confirm the motion area is clear. The robot will move.':
     '机械臂将移动，请确认运动区域畅通。',

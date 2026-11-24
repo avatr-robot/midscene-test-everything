@@ -1,3 +1,4 @@
+import { getDebug } from '@midscene/shared/logger';
 import type {
   ApplicationContext,
   MotionTarget,
@@ -10,12 +11,17 @@ import {
   RobotArmError,
 } from '../contracts.js';
 import { distance } from '../domain.js';
+import type {
+  LinearMotionSequence,
+  MotionReceipt,
+} from '../kernel/contracts.js';
 import {
   releaseStageOptions,
   stageOptions,
 } from '../screen-interaction/motion-policy.js';
 import type { ScreenMotionHost } from '../screen-interaction/service.js';
 import { phonePointMm, screenPoseMm } from './geometry.js';
+import { pointDistance } from './phone/geometry.js';
 import { surfaceClearanceMm } from './surface.js';
 import { atTravelHeight } from './verification/travel-height.js';
 
@@ -239,6 +245,151 @@ function logoStrokes({ width, height }: LogoViewport): WebPoint[][] {
   return [...place(midscene.strokes, first), ...place(avatr.strokes, second)];
 }
 
+const debug = getDebug('robot-arm:web-calibration');
+const QUEUED_STROKE_MAX_TARGETS = 40;
+const QUEUED_STROKE_MAX_LENGTH_MM = 250;
+const STROKE_BLEND_PERCENT = 15;
+const DEFAULT_RELEASE_ACCELERATION_FACTOR = 0.4;
+const LOGO_RELEASE_ACCELERATION_FACTOR = 0.5;
+const STROKE_MAX_BLEND_TURN_COSINE = Math.cos((40 * Math.PI) / 180);
+const MIN_BLEND_SEGMENT_MM = 0.5;
+const SHORT_OUTLINE_EDGE_MM = 2;
+const MAX_OUTLINE_DEVIATION_MM = 0.2;
+
+function strokeEdge(from: WebPoint, to: WebPoint) {
+  const x = to.x - from.x;
+  const y = to.y - from.y;
+  return { x, y, length: Math.hypot(x, y) };
+}
+
+function isSharpTurn(
+  incoming: ReturnType<typeof strokeEdge>,
+  outgoing: ReturnType<typeof strokeEdge>,
+) {
+  return (
+    incoming.x * outgoing.x + incoming.y * outgoing.y <
+    STROKE_MAX_BLEND_TURN_COSINE * incoming.length * outgoing.length
+  );
+}
+
+function fitsChord(outline: WebPoint[], from: number, to: number) {
+  const chord = strokeEdge(outline[from], outline[to]);
+  if (!chord.length) return false;
+  let previousAlong = 0;
+  return outline.slice(from + 1, to).every((point) => {
+    const offset = strokeEdge(outline[from], point);
+    const along = offset.x * chord.x + offset.y * chord.y;
+    const perpendicular = Math.abs(offset.x * chord.y - offset.y * chord.x);
+    if (
+      along < previousAlong ||
+      along > chord.length ** 2 ||
+      perpendicular > MAX_OUTLINE_DEVIATION_MM * chord.length
+    )
+      return false;
+    previousAlong = along;
+    return true;
+  });
+}
+
+function simplifyShortEdges(outline: WebPoint[]) {
+  const points = [outline[0]];
+  let anchor = 0;
+  for (let index = 1; index < outline.length - 1; index++) {
+    const incoming = strokeEdge(outline[index - 1], outline[index]);
+    const outgoing = strokeEdge(outline[index], outline[index + 1]);
+    if (
+      Math.min(incoming.length, outgoing.length) <= SHORT_OUTLINE_EDGE_MM &&
+      !isSharpTurn(incoming, outgoing) &&
+      fitsChord(outline, anchor, index + 1)
+    )
+      continue;
+    points.push(outline[index]);
+    anchor = index;
+  }
+  points.push(outline[outline.length - 1]);
+  return points;
+}
+
+function startNearAdjacentStrokes(
+  outline: WebPoint[],
+  previousStart: WebPoint | undefined,
+  nextStart: WebPoint | undefined,
+) {
+  if (!previousStart) return outline;
+  const travel = (point: WebPoint) =>
+    pointDistance(previousStart, point) +
+    (nextStart ? pointDistance(point, nextStart) : 0);
+  let bestIndex = 0;
+  let bestTravel = travel(outline[0]);
+  // A sharp corner would already slow down. It makes a good closure point.
+  for (let index = 1; index < outline.length - 1; index++) {
+    const point = outline[index];
+    const incoming = strokeEdge(outline[index - 1], point);
+    const outgoing = strokeEdge(point, outline[index + 1]);
+    if (
+      Math.min(incoming.length, outgoing.length) < MIN_BLEND_SEGMENT_MM ||
+      !isSharpTurn(incoming, outgoing)
+    )
+      continue;
+    const candidate = travel(point);
+    if (candidate < bestTravel) {
+      bestIndex = index;
+      bestTravel = candidate;
+    }
+  }
+  return bestIndex
+    ? [...outline.slice(bestIndex, -1), ...outline.slice(0, bestIndex + 1)]
+    : outline;
+}
+
+function strokeBlendPercentages(points: readonly WebPoint[]) {
+  const segments = points
+    .slice(1)
+    .map((point, index) => strokeEdge(points[index], point));
+  if (
+    segments.length > QUEUED_STROKE_MAX_TARGETS ||
+    segments.reduce((total, segment) => total + segment.length, 0) >
+      QUEUED_STROKE_MAX_LENGTH_MM
+  )
+    return undefined;
+  return segments.map((segment, index) => {
+    const next = segments[index + 1];
+    if (!next || Math.min(segment.length, next.length) < MIN_BLEND_SEGMENT_MM)
+      return 0;
+    return isSharpTurn(segment, next) ? 0 : STROKE_BLEND_PERCENT;
+  });
+}
+
+async function observeQueuedStroke(
+  sequence: LinearMotionSequence,
+  submit: () => Promise<MotionReceipt>,
+  checkCanvas: () => void,
+) {
+  const check = () => {
+    checkCanvas();
+    sequence.check();
+  };
+  check();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const interrupted = new Promise<never>((_, reject) => {
+    timer = setInterval(() => {
+      try {
+        check();
+      } catch (error) {
+        reject(error);
+      }
+    }, 50);
+  });
+  try {
+    const receipt = await Promise.race([submit(), interrupted]);
+    await Promise.race([sequence.waitForCurrent(), interrupted]);
+    check();
+    return receipt.acceptedAt - receipt.submittedAt;
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 export interface LogoCanvasSession {
   viewport: LogoViewport;
   minimumTravelTipZMm?: number;
@@ -253,7 +404,13 @@ export async function drawCalibrationLogo(
   ctx: ApplicationContext,
   viewport: LogoViewport,
   checkCanvas: () => void,
+  positioning?: {
+    start?: CartesianPose;
+    returnTo: CartesianPose;
+    beforeMotion?: () => Promise<void>;
+  },
 ) {
+  const setupStarted = performance.now();
   const { screen, tool } = ctx;
   const constraints =
     host.adapter.resolver.descriptor('motion.linear')?.constraints;
@@ -267,12 +424,20 @@ export async function drawCalibrationLogo(
   const approach = stageOptions(screen, 'approach', constraints, jointCount);
   const entry = stageOptions(screen, 'entry', constraints, jointCount);
   const traverse = stageOptions(screen, 'traverse', constraints, jointCount);
-  const release = releaseStageOptions(screen, constraints, jointCount);
+  const releaseAccelerationFactor =
+    screen.releaseAccelerationFactor === DEFAULT_RELEASE_ACCELERATION_FACTOR
+      ? LOGO_RELEASE_ACCELERATION_FACTOR
+      : screen.releaseAccelerationFactor;
+  const release = releaseStageOptions(
+    { ...screen, releaseAccelerationFactor },
+    constraints,
+    jointCount,
+  );
   const recovery = stageOptions(screen, 'recovery', constraints, jointCount);
 
   const clearance =
     screen.safeHeightMm + surfaceClearanceMm(calibration.surface);
-  const strokes = logoStrokes(viewport).map((contour, index) => {
+  const outlines = logoStrokes(viewport).map((contour) => {
     const outline = contour.map((point) =>
       phonePointMm(calibration, screen, point),
     );
@@ -291,10 +456,21 @@ export async function drawCalibrationLogo(
         'The logo does not fit inside the calibrated touchscreen',
         409,
       );
+    return outline;
+  });
+  const starts = outlines.map((outline) => outline[0]);
+  const strokes = outlines.map((outline, index) => {
+    const simplified = simplifyShortEdges(outline);
+    const ordered = startNearAdjacentStrokes(
+      simplified,
+      starts[index - 1],
+      starts[index + 1],
+    );
+    starts[index] = ordered[0];
     // Sample long edges too so they follow the fitted surface between corners.
-    const points = outline.flatMap((end, index) => {
+    const points = ordered.flatMap((end, index) => {
       if (!index) return [end];
-      const start = outline[index - 1];
+      const start = ordered[index - 1];
       const dx = end.x - start.x;
       const dy = end.y - start.y;
       const steps = Math.ceil(Math.hypot(dx, dy) / 12);
@@ -327,11 +503,21 @@ export async function drawCalibrationLogo(
       pose: hover,
       options: release,
     });
-    return { hover, number, targets };
+    return {
+      hover,
+      number,
+      targets,
+      outlineVerticesRemoved: outline.length - simplified.length,
+      blendPercentages: strokeBlendPercentages(points),
+    };
   });
-  const initial = await host.adapter.getPose();
+  const initial = positioning?.start ?? (await host.adapter.getPose());
   const parked = host.safeLift(initial, calibration, ctx, false);
-  await host.preflight(
+  const returnPose = positioning
+    ? atTravelHeight(positioning.returnTo, ctx)
+    : parked;
+  const preflightStarted = performance.now();
+  const preflightTiming = await host.preflight(
     [
       { name: 'Logo initial lift', pose: parked, options: recovery },
       ...strokes.flatMap(({ hover, number, targets }) => [
@@ -342,10 +528,11 @@ export async function drawCalibrationLogo(
         },
         ...targets,
       ]),
-      { name: 'Logo return', pose: parked, options: approach },
+      { name: 'Logo return', pose: returnPose, options: approach },
     ],
     ctx,
   );
+  const preflightFinished = performance.now();
 
   const move = (
     pose: CartesianPose,
@@ -361,26 +548,90 @@ export async function drawCalibrationLogo(
       onScreen ? { arrivalSamples: 1, skipStable: true } : undefined,
     );
   };
+  await positioning?.beforeMotion?.();
   if (distance(initial.positionMm, parked.positionMm) > 0.001)
     await move(parked, recovery);
-  for (const { hover, targets } of strokes) {
+  debug(
+    `Logo preparation timing ${JSON.stringify({
+      planningAndPoseMs: Math.round(preflightStarted - setupStarted),
+      preflightMs: Math.round(preflightFinished - preflightStarted),
+      ...(preflightTiming ?? {}),
+      positioningMs: Math.round(performance.now() - preflightFinished),
+    })}`,
+  );
+  for (const [index, stroke] of strokes.entries()) {
+    const { hover, number, targets, blendPercentages } = stroke;
+    const started = performance.now();
     await move(hover, approach);
     checkCanvas();
+    const approached = performance.now();
     const sequence = await host.beginSequence(targets, ctx);
+    const prepared = performance.now();
     const liftIndex = targets.length - 1;
-    for (let index = 0; index < targets.length; index++) {
-      const target = targets[index];
-      if (sequence) {
-        checkCanvas();
-        await sequence.submit(index);
-        if (index < liftIndex) await sequence.waitForHandoff();
-      } else await move(target.pose, target.options, index < liftIndex);
-      if (index === 0) await host.hold(Math.min(100, screen.contactMs));
+    const submitQueued = sequence?.submitQueued?.bind(sequence);
+    let queueAckMs: number | undefined;
+    let closureConfirmed: number | undefined;
+    if (sequence && submitQueued && blendPercentages?.length) {
+      checkCanvas();
+      await sequence.submit(0);
+      await sequence.waitForHandoff();
+      await host.hold(Math.min(100, screen.contactMs));
+      queueAckMs = await observeQueuedStroke(
+        sequence,
+        () => submitQueued(blendPercentages),
+        checkCanvas,
+      );
+      closureConfirmed = performance.now();
+      await sequence.submit(liftIndex);
+    } else {
+      for (let index = 0; index < targets.length; index++) {
+        const target = targets[index];
+        if (sequence) {
+          checkCanvas();
+          await sequence.submit(index);
+          if (index < liftIndex) await sequence.waitForHandoff();
+        } else await move(target.pose, target.options, index < liftIndex);
+        if (index === 0) await host.hold(Math.min(100, screen.contactMs));
+      }
     }
     if (sequence) {
       await sequence.finish();
       sequence.dispose();
     }
+    const finished = performance.now();
+    debug(
+      `Logo stroke timing ${JSON.stringify({
+        stroke: number,
+        mode: queueAckMs !== undefined ? 'queued' : 'per-target',
+        contactTargets: liftIndex,
+        outlineVerticesRemoved: stroke.outlineVerticesRemoved,
+        penUpTravelMm:
+          index > 0
+            ? Math.round(
+                distance(
+                  strokes[index - 1].hover.positionMm,
+                  hover.positionMm,
+                ) * 100,
+              ) / 100
+            : undefined,
+        blendPercent:
+          queueAckMs !== undefined ? STROKE_BLEND_PERCENT : undefined,
+        releaseAccelerationFactor,
+        blendedTargets:
+          queueAckMs !== undefined
+            ? blendPercentages?.filter((percent) => percent > 0).length
+            : undefined,
+        approachAndPreparationMs: Math.round(prepared - started),
+        approachMs: Math.round(approached - started),
+        sequencePreparationMs: Math.round(prepared - approached),
+        entryThroughLiftMs: Math.round(finished - prepared),
+        liftAndConfirmationMs:
+          closureConfirmed === undefined
+            ? undefined
+            : Math.round(finished - closureConfirmed),
+        queueAckMs,
+      })}`,
+    );
   }
-  await move(parked, approach);
+  await move(returnPose, approach);
 }

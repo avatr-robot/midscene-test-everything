@@ -297,6 +297,11 @@ export interface CalibrationLogoStatus {
   state: 'drawing' | 'completed' | 'failed';
   error?: string;
 }
+export interface DebugLogoDrawingStatus {
+  screenId: string;
+  status: 'running' | 'completed' | 'failed';
+  error?: string;
+}
 export interface CalibrationPageReply {
   logo?: CalibrationLogoStatus;
   /** Briefly identify the phone selected in Playground. */

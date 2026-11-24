@@ -1,11 +1,13 @@
 import type { CalibrationPreviewPositions } from '@midscene/robotics-shared/assisted-contracts';
 import type {
   CalibrationBatchState,
+  DebugLogoDrawingStatus,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
 import {
   type CameraCorrection,
   SCREEN_DRIFT_DETECTION_ENABLED,
+  calibrationAccepted,
   isPayloadReadbackPending,
 } from '@midscene/robotics-shared/contracts';
 import { markerCaptureRecommended } from '@midscene/robotics-shared/marker-contracts';
@@ -22,6 +24,7 @@ import {
   ConfigProvider,
   Dropdown,
   Modal,
+  Popconfirm,
   Select,
   Space,
   Spin,
@@ -249,6 +252,12 @@ function GuidedContent({
     lease?.phase === 'queued' ||
     lease?.phase === 'cancelling';
   const singleBusy = singleQueued || lease?.phase === 'running';
+  const [logoDrawing, setLogoDrawing] = useState<DebugLogoDrawingStatus | null>(
+    null,
+  );
+  const [startingLogo, setStartingLogo] = useState(false);
+  const [stoppingLogo, setStoppingLogo] = useState(false);
+  const logoDrawingBusy = startingLogo || logoDrawing?.status === 'running';
   const [checkedScreen, setCheckedScreen] = useState<string>();
   const autoOpened = useRef<string>();
   /** The target created by this wizard's current Add Screen operation. */
@@ -1213,8 +1222,40 @@ function GuidedContent({
     selectedId,
   ]);
   const hasCorrection = Boolean(config?.correction);
+  const hasSavedCalibration = calibrationAccepted(config?.result);
+  const configDeviceId = config?.deviceId;
+  useEffect(() => {
+    if (step !== 3 || configDeviceId !== selectedId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const status = await client.debugLogoStatus();
+        if (disposed) return;
+        setLogoDrawing(status);
+        if (status?.status === 'running') timer = setTimeout(poll, 750);
+        else if (logoDrawingBusy && !startingLogo)
+          void refresh().catch(() => undefined);
+      } catch {
+        if (!disposed && logoDrawingBusy) timer = setTimeout(poll, 1000);
+      }
+    };
+    void poll();
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+    };
+  }, [
+    client,
+    configDeviceId,
+    logoDrawingBusy,
+    refresh,
+    selectedId,
+    startingLogo,
+    step,
+  ]);
   const startSingle = useCallback(async () => {
-    if (startingSingle.current || !hasCorrection) return;
+    if (startingSingle.current || !hasCorrection || logoDrawingBusy) return;
     if (!config?.installationTaught) {
       setStep(2);
       return;
@@ -1234,7 +1275,14 @@ function GuidedContent({
       startingSingle.current = undefined;
     }
     await refresh();
-  }, [base, config?.installationTaught, hasCorrection, refresh, selectedId]);
+  }, [
+    base,
+    config?.installationTaught,
+    hasCorrection,
+    logoDrawingBusy,
+    refresh,
+    selectedId,
+  ]);
   const soleScreen =
     savedScreens.length === 1 && savedScreens[0].id === selectedId;
   useEffect(() => {
@@ -1247,6 +1295,8 @@ function GuidedContent({
       !hasCorrection ||
       !controller.setup.mapping ||
       checkedScreen !== selectedId ||
+      hasSavedCalibration ||
+      logoDrawingBusy ||
       batchActive ||
       closing ||
       !config?.ready ||
@@ -1266,6 +1316,8 @@ function GuidedContent({
     controller.setup.mapping,
     checkedScreen,
     selectedId,
+    hasSavedCalibration,
+    logoDrawingBusy,
     batchActive,
     closing,
     config?.ready,
@@ -1312,6 +1364,7 @@ function GuidedContent({
   const canVisit = (next: number) =>
     !batchActive &&
     !singleBusy &&
+    !logoDrawingBusy &&
     !config?.armState?.state.moving &&
     !config?.armState?.state.dragMode &&
     (next === 0 || Boolean(config?.input)) &&
@@ -1327,6 +1380,83 @@ function GuidedContent({
     soleScreen,
   });
   const multipleScreens = savedScreens.length > 1;
+  const selectedLogoDrawing =
+    logoDrawing?.screenId === selectedId ? logoDrawing : null;
+  const debugDrawing = (
+    <>
+      <Popconfirm
+        title={t('Confirm the motion area is clear. The robot will move.')}
+        okText={t('Start drawing')}
+        cancelText={t('Cancel')}
+        onConfirm={() => {
+          setError(undefined);
+          setStartingLogo(true);
+          void client
+            .startDebugLogo()
+            .then(
+              (status) => setLogoDrawing(status),
+              (cause) =>
+                setError(
+                  cause instanceof Error ? cause.message : String(cause),
+                ),
+            )
+            .finally(() => setStartingLogo(false));
+        }}
+      >
+        <Button
+          size="small"
+          type="link"
+          loading={logoDrawingBusy}
+          disabled={
+            closing ||
+            !config?.ready ||
+            !hasSavedCalibration ||
+            !phoneConnected ||
+            !phoneFullscreen ||
+            !hasCorrection ||
+            outlineBlocked ||
+            Boolean(
+              config?.armState?.state.dragMode ||
+                config?.armState?.state.moving,
+            ) ||
+            batchActive ||
+            singleBusy ||
+            controller.busy ||
+            logoDrawingBusy
+          }
+        >
+          {t('Debug drawing')}
+        </Button>
+      </Popconfirm>
+      {selectedLogoDrawing?.status === 'running' && (
+        <Button
+          danger
+          size="small"
+          loading={stoppingLogo}
+          onClick={() => {
+            setStoppingLogo(true);
+            void markerRequest('/api/arm/stop', {})
+              .catch((cause) => {
+                setError(
+                  cause instanceof Error ? cause.message : String(cause),
+                );
+              })
+              .finally(() => setStoppingLogo(false));
+          }}
+        >
+          {t('Stop drawing')}
+        </Button>
+      )}
+      {selectedLogoDrawing?.status === 'failed' && (
+        <Alert
+          type="error"
+          message={calibrationErrorText(
+            selectedLogoDrawing.error ?? 'Logo drawing stopped',
+          )}
+        />
+      )}
+    </>
+  );
   const batchAction = multipleScreens && (
     <Button
       type="primary"
@@ -1337,7 +1467,8 @@ function GuidedContent({
         !config.installationTaught ||
         outlineBlocked ||
         controller.busy ||
-        singleBusy
+        singleBusy ||
+        logoDrawingBusy
       }
       onClick={() => batchPanel.current?.open()}
     >
@@ -1345,6 +1476,7 @@ function GuidedContent({
     </Button>
   );
   const singleActionDisabled =
+    logoDrawingBusy ||
     !config?.ready ||
     !hasCorrection ||
     !config.installationTaught ||
@@ -1468,6 +1600,7 @@ function GuidedContent({
                 disabled={
                   closing ||
                   singleBusy ||
+                  logoDrawingBusy ||
                   controller.busy ||
                   loadedConfig?.armState?.state.moving ||
                   loadedConfig?.armState?.state.dragMode
@@ -1486,6 +1619,7 @@ function GuidedContent({
                   api={batchClient}
                   cameraId={cameraId}
                   screens={states}
+                  debugDrawing={debugDrawing}
                   disabled={
                     closing ||
                     !config?.ready ||
@@ -1493,11 +1627,18 @@ function GuidedContent({
                     !config.installationTaught ||
                     outlineBlocked ||
                     controller.busy ||
-                    singleBusy
+                    singleBusy ||
+                    logoDrawingBusy
                   }
                   onChanged={refresh}
                 />
               </div>
+            )}
+            {step === 3 && camera && soleScreen && !batchActive && (
+              <details>
+                <summary>{t('Advanced debugging')}</summary>
+                {debugDrawing}
+              </details>
             )}
             {!config ? (
               !loadError && <Spin />
@@ -1815,7 +1956,7 @@ function GuidedContent({
                     {!batchActive && !singleActive && footer && (
                       <WizardFooter container={footer}>
                         <Button
-                          disabled={singleQueued}
+                          disabled={singleQueued || logoDrawingBusy}
                           onClick={() => setStep(2)}
                         >
                           {t('Previous Step')}
@@ -1863,6 +2004,7 @@ function GuidedContent({
                           ) && (
                             <Button
                               loading={closing}
+                              disabled={logoDrawingBusy}
                               onClick={() => void close()}
                             >
                               {t('Finish calibration and return')}
