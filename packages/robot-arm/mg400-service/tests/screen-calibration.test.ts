@@ -426,18 +426,18 @@ it('applies passing multi-screen results after marker display ends', async () =>
   const imagingPending = new Promise<void>((resolve) => {
     finishImaging = resolve;
   });
-  const firstImagingCalibration = rstest
-    .spyOn(phones[0]!.targetHost.service, 'startImagingCalibration')
+  const imagingCalibration = rstest
+    .spyOn(f.devices, 'calibrateCameraImaging')
     .mockReturnValue(imagingPending);
-  const secondImagingCalibration = rstest
-    .spyOn(phones[1]!.targetHost.service, 'startImagingCalibration')
-    .mockResolvedValue();
   const imagingPattern = rstest.spyOn(f.devices, 'setCameraImagingPattern');
   await expect(
     f.service.markerAction({ ...command, action: 'apply' }),
   ).resolves.toBeDefined();
-  expect(firstImagingCalibration).toHaveBeenCalledTimes(1);
-  expect(secondImagingCalibration).not.toHaveBeenCalled();
+  expect(imagingCalibration).toHaveBeenCalledTimes(1);
+  expect(imagingCalibration).toHaveBeenCalledWith('cam', [
+    phones[0]!.targetId,
+    phones[1]!.targetId,
+  ]);
   expect(phones[0]!.targetHost.service.setup().imaging?.state).toBe(
     'unsupported',
   );
@@ -450,6 +450,37 @@ it('applies passing multi-screen results after marker display ends', async () =>
   ).toBeDefined();
   finishImaging();
 }, 20_000);
+
+it('keeps screen listing and perspective clearing available when another page action is stuck', async () => {
+  const f = await fixture();
+  (f.service as unknown as { serial: Promise<unknown> }).serial = new Promise(
+    () => {},
+  );
+
+  await expect(
+    Promise.race([
+      f.service.pageAction({ action: 'list', cameraId: 'cam' }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('screen list remained queued')), 500),
+      ),
+    ]),
+  ).resolves.toMatchObject({
+    devices: expect.any(Array),
+  });
+
+  await expect(
+    Promise.race([
+      f.service.pageAction({
+        action: 'clear-perspectives',
+        cameraId: 'cam',
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('clear remained queued')), 500),
+      ),
+    ]),
+  ).resolves.toEqual({});
+});
+
 it('waits for the iPhone origin before projecting its full display from the markers', async () => {
   const f = await fixture();
   const { page, targetHost, targetId } = await f.connect();

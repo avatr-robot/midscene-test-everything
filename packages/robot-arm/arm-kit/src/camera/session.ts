@@ -26,7 +26,7 @@ import type { CameraStream } from './camera-stream.js';
 import {
   CameraImagingController,
   type CameraImagingStatus,
-  cameraImagingFile,
+  removeCameraImagingScreen,
 } from './imaging.js';
 import { cameraBackend } from './index.js';
 import { jpegSize } from './jpeg-size.js';
@@ -36,6 +36,11 @@ import {
 } from './perspective-monitor.js';
 import { PerspectiveTransformer } from './perspective-transformer.js';
 import { checkPerspectiveValidity } from './perspective-validity.js';
+import { rectifiedPreviewPool } from './rectified-preview-pool.js';
+import {
+  type RectifiedPreviewOptions,
+  transformRectifiedPreview,
+} from './rectified-preview-transform.js';
 import type {
   CameraBackend,
   CameraDevice,
@@ -156,6 +161,9 @@ export class CameraSession implements CalibrationVision {
     private readonly screenId?: string,
     private readonly imaging?: CameraImagingController,
   ) {}
+  private get imagingScopeId() {
+    return this.screenId ?? this.camera.id;
+  }
   private get correctionFile() {
     return cameraPerspectiveFile(this.directory, this.camera.id, this.screenId);
   }
@@ -182,7 +190,6 @@ export class CameraSession implements CalibrationVision {
     );
     await scoped.load();
     this.imaging?.registerScreen(screenId, () => scoped.getCorrection());
-    await this.imaging?.reopenAfterRestart();
     return scoped;
   }
   /**
@@ -206,7 +213,7 @@ export class CameraSession implements CalibrationVision {
           'Clear the applied perspective before deleting it.',
           409,
         );
-      await this.imaging?.clearPerspectiveBinding();
+      await this.imaging?.clearScreenBinding(this.imagingScopeId);
       await rm(this.correctionFile, { force: true });
       this.savedPerspective = false;
     });
@@ -225,7 +232,8 @@ export class CameraSession implements CalibrationVision {
   ): Promise<void> {
     validateCameraCorrection(input);
     const correction = structuredClone(input);
-    if (!options.preserveImaging) await this.imaging?.clearPerspectiveBinding();
+    if (!options.preserveImaging)
+      await this.imaging?.clearScreenBinding(this.imagingScopeId);
     await this.writePerspective(correction, this.target);
     if (options.preserveImaging)
       await this.imaging?.rebindPerspective(
@@ -239,7 +247,7 @@ export class CameraSession implements CalibrationVision {
    * only the framing the camera was applying is dropped.
    */
   async clearCorrection(): Promise<void> {
-    await this.imaging?.clearPerspectiveBinding();
+    await this.imaging?.clearScreenBinding(this.imagingScopeId);
     const operation = this.writeChain.then(async () => {
       if (!this.correction) return;
       await this.persistPerspective(this.correction, this.target, false);
@@ -257,7 +265,8 @@ export class CameraSession implements CalibrationVision {
   ): Promise<void> {
     validateCameraCorrection(input);
     validatePerspectiveTarget(target);
-    if (!options.preserveImaging) await this.imaging?.clearPerspectiveBinding();
+    if (!options.preserveImaging)
+      await this.imaging?.clearScreenBinding(this.imagingScopeId);
     await this.writePerspective(
       structuredClone(input),
       structuredClone(target),
@@ -304,7 +313,7 @@ export class CameraSession implements CalibrationVision {
 
   /** Delete the correction and evidence without waiting for the camera stream. */
   async clearPerspective(): Promise<void> {
-    await this.imaging?.clearPerspectiveBinding();
+    await this.imaging?.clearScreenBinding(this.imagingScopeId);
     const operation = this.writeChain.then(async () => {
       await rm(this.correctionFile, { force: true });
       this.savedPerspective = false;
@@ -331,7 +340,7 @@ export class CameraSession implements CalibrationVision {
 
   /** Entry point for capture workflows that need a fresh exposure precheck. */
   async prepareCaptureExposure(): Promise<void> {
-    await this.imaging?.beforeCapture();
+    await this.imaging?.beforeCapture(this.imagingScopeId);
   }
   async withReducedVisibilityExposure<T>(
     capture: (exposure: { previous: number; reduced: number }) => Promise<T>,
@@ -490,12 +499,22 @@ export class CameraSession implements CalibrationVision {
   /** Rectify the frame received by the live preview without requesting another. */
   async rectifiedFrame(
     jpeg: Buffer,
-    options: {
-      maxSide?: number;
-      maxPixels?: number;
-      sampling?: 'bilinear' | 'nearest';
-    } = {},
+    options: RectifiedPreviewOptions = {},
   ): Promise<Buffer> {
+    const request = this.rectifiedPreviewRequest(options);
+    return transformRectifiedPreview(jpeg, request, this.transformer);
+  }
+  /** Move CPU-bound live preview rectification off the HTTP event-loop thread. */
+  async rectifiedPreviewFrame(
+    jpeg: Buffer,
+    options: RectifiedPreviewOptions = {},
+  ): Promise<Buffer> {
+    return rectifiedPreviewPool.transform(
+      jpeg,
+      this.rectifiedPreviewRequest(options),
+    );
+  }
+  private rectifiedPreviewRequest(options: RectifiedPreviewOptions = {}) {
     const correction = this.correction;
     const target = this.getRectifiedPreviewTarget();
     if (!correction || !target)
@@ -504,40 +523,12 @@ export class CameraSession implements CalibrationVision {
         'Save perspective correction before viewing the corrected preview',
         409,
       );
-    const size = jpegSize(jpeg);
-    if (
-      size.width !== correction.sourceWidth ||
-      size.height !== correction.sourceHeight
-    )
-      throw new RobotArmError(
-        'VISION_BINDING_CHANGED',
-        'Camera image dimensions changed; repeat correction',
-        409,
-      );
-    let width = target.width;
-    let height = target.height;
-    let scale = 1;
-    if (options.maxSide)
-      scale = Math.min(scale, options.maxSide / Math.max(width, height));
-    if (options.maxPixels)
-      scale = Math.min(scale, Math.sqrt(options.maxPixels / (width * height)));
-    if (scale < 1) {
-      width = Math.max(1, Math.round(width * scale));
-      height = Math.max(1, Math.round(height * scale));
-    }
-    return this.transformer.transform(jpeg, {
-      points: correction.points,
-      // The preview target already describes the intended output orientation.
-      rotation: target.rotation,
-      targetWidth: width,
-      targetHeight: height,
-      sampling: options.sampling,
-    });
+    return { correction, target, options };
   }
   async snapshot(options: CalibrationVisionOptions): Promise<VisionSnapshot> {
     // correctedFrame already requests a fresh frame and verifies its dimensions.
     if (SCREEN_DRIFT_DETECTION_ENABLED) await this.assertPerspectiveCurrent();
-    await this.imaging?.beforeCapture();
+    await this.imaging?.beforeCapture(this.imagingScopeId);
     const before = await this.binding(options);
     const correction = this.getCorrection()!;
     const image = await this.correctedFrame(correction, options);
@@ -584,15 +575,52 @@ export class CameraSession implements CalibrationVision {
         'Camera imaging controller is unavailable',
         409,
       );
-    return this.imaging.calibrate();
+    return this.imaging.calibrate(this.imagingScopeId);
+  }
+
+  async calibrateScreens(
+    screenIds: readonly string[],
+    calibrationToken?: string,
+  ): Promise<CameraImagingStatus> {
+    if (!this.imaging)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Camera imaging controller is unavailable',
+        409,
+      );
+    return this.imaging.calibrateScreens(screenIds, calibrationToken);
+  }
+
+  beginScreensImaging(screenIds: readonly string[]) {
+    return this.imaging?.beginScreensCalibration(screenIds);
+  }
+
+  failScreensImaging(
+    token: string | undefined,
+    screenIds: readonly string[],
+    error: unknown,
+  ) {
+    if (token) this.imaging?.failScreensCalibration(token, screenIds, error);
+  }
+
+  async activateImaging(): Promise<CameraImagingStatus> {
+    if (!this.imaging)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Camera imaging controller is unavailable',
+        409,
+      );
+    return this.imaging.activateScreen(this.imagingScopeId);
   }
 
   imagingStatus(): CameraImagingStatus {
-    return this.imaging?.status() ?? { state: 'unsupported' };
+    return (
+      this.imaging?.status(this.imagingScopeId) ?? { state: 'unsupported' }
+    );
   }
 
   async releaseImaging(): Promise<void> {
-    await this.imaging?.clearPerspectiveBinding();
+    await this.imaging?.releaseForCorrection(this.imagingScopeId);
   }
 }
 
@@ -672,8 +700,24 @@ export class CameraSessionManager {
     return Promise.all([
       rm(file, { force: true }),
       rm(`${file}.validity.json`, { force: true }),
-      rm(cameraImagingFile(this.directory, cameraId), { force: true }),
+      removeCameraImagingScreen(this.directory, cameraId, screenId ?? cameraId),
     ]).then(() => undefined);
+  }
+  /** Apply one screen's saved camera parameters without opening a new stream. */
+  activateScreen(
+    cameraId: string,
+    screenId: string,
+  ): Promise<CameraImagingStatus> {
+    return this.serialize(cameraId, async () => {
+      const imaging = this.imaging.get(cameraId);
+      if (!imaging)
+        throw new RobotArmError(
+          'VISION_UNAVAILABLE',
+          'Camera is not running',
+          409,
+        );
+      return imaging.activateScreen(screenId);
+    });
   }
   acquire(
     cameraId: string,
@@ -813,6 +857,7 @@ export class CameraSessionManager {
       this.sessions.clear();
       this.screenSessions.clear();
       this.owners.clear();
+      await rectifiedPreviewPool.close();
     })();
     return this.closing;
   }

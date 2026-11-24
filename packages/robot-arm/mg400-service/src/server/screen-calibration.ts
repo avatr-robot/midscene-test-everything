@@ -309,6 +309,7 @@ export class ScreenCalibration {
     { cameraId: string; code: string; expiresAt: number }
   >();
   private serial: Promise<unknown> = Promise.resolve();
+  private clearSerial: Promise<unknown> = Promise.resolve();
   constructor(private readonly devices: PlaygroundDevices) {}
   addScreen(cameraId: string, name?: string) {
     return this.serialize(() => this.devices.addScreen(cameraId, name));
@@ -319,6 +320,11 @@ export class ScreenCalibration {
   private serialize<T>(work: () => Promise<T>): Promise<T> {
     const task = this.serial.then(work);
     this.serial = task.catch(() => undefined);
+    return task;
+  }
+  private serializeClear<T>(work: () => Promise<T>): Promise<T> {
+    const task = this.clearSerial.then(work);
+    this.clearSerial = task.catch(() => undefined);
     return task;
   }
   private screen(id: string) {
@@ -1407,11 +1413,13 @@ export class ScreenCalibration {
     if (
       targets.every((target) => session.applied.get(target.id) === undefined)
     ) {
-      const imagingHost = this.devices.entries.get(targets[0]!.id)?.host;
       // Imaging can run longer than the marker request budget. The workbench
       // polls setup.imaging until it reaches ready or error.
-      void imagingHost?.service
-        .startImagingCalibration()
+      void this.devices
+        .calibrateCameraImaging(
+          session.cameraId,
+          targets.map((target) => target.id),
+        )
         .catch(() => undefined);
     }
     return response();
@@ -1431,18 +1439,9 @@ export class ScreenCalibration {
     screenIds?: string[];
     targets?: { id: string; token: string }[];
   }) {
-    if (input.action === 'list')
-      return this.serialize(async () => {
-        await this.devices.pruneUnusedScreenTargets(input.cameraId);
-        await this.adoptExistingPages();
-        for (const saved of this.store.list().screenPages ?? [])
-          await this.page(saved);
-        return {
-          ...this.publicInfo(),
-          devices: [...this.pages.values()].map((p) => p.summary()),
-          pairing: input.cameraId ? this.pairing(input.cameraId) : undefined,
-        };
-      });
+    if (input.action === 'list') return this.listPages(input.cameraId);
+    if (input.action === 'clear-perspectives')
+      return this.serializeClear(() => this.updatePage(input));
     if (input.action === 'displays') return [...this.displays.values()];
     if (input.action === 'identify') {
       const screen = this.screen(input.targetId!);
@@ -1462,6 +1461,17 @@ export class ScreenCalibration {
       return {};
     }
     return this.serialize(() => this.updatePage(input));
+  }
+  private async listPages(cameraId?: string) {
+    await this.devices.pruneUnusedScreenTargets(cameraId);
+    await this.adoptExistingPages();
+    for (const saved of this.store.list().screenPages ?? [])
+      await this.page(saved);
+    return {
+      ...this.publicInfo(),
+      devices: [...this.pages.values()].map((page) => page.summary()),
+      pairing: cameraId ? this.pairing(cameraId) : undefined,
+    };
   }
   private async updatePage(
     input: Parameters<ScreenCalibration['pageAction']>[0],

@@ -70,24 +70,26 @@ test('raw preview keeps camera pixels and respects response backpressure', async
   assert.equal(f.stream.listenerCount('frame'), 0);
 });
 
-test('corrected preview uses the camera session and never queues parallel transforms', async () => {
+test('corrected preview uses bounded concurrent transforms and preserves order', async () => {
   const f = fixture();
-  let finish;
+  const finishes = [];
   let calls = 0;
   f.entry.camera.rectifiedFrame = (jpeg) => {
     assert.equal(jpeg.toString(), 'raw');
     calls++;
     return new Promise((resolve) => {
-      finish = resolve;
+      finishes.push(resolve);
     });
   };
   await streamCameraPreview(f.res, f.entry, true);
   f.stream.emit('frame', { jpeg: Buffer.from('raw') });
   f.stream.emit('frame', { jpeg: Buffer.from('raw') });
-  assert.equal(calls, 1);
-  finish(Buffer.from('corrected'));
+  assert.equal(calls, 2);
+  finishes[1](Buffer.from('corrected-2'));
+  finishes[0](Buffer.from('corrected-1'));
   await tick();
-  assert.ok(f.res.frames[0].includes('corrected'));
+  assert.ok(f.res.frames[0].includes('corrected-1'));
+  assert.ok(f.res.frames[1].includes('corrected-2'));
   assert.ok(!f.res.frames[0].includes('raw'));
   f.stream.emit('stopped');
   assert.equal(f.stream.listenerCount('frame'), 0);
@@ -205,7 +207,7 @@ test('camera-only corrected preview rectifies each frame with the saved target',
   assert.deepEqual(rectified, [
     {
       jpeg: 'raw',
-      options: { maxSide: 900, maxPixels: 450000, sampling: 'nearest' },
+      options: { maxSide: 1600, maxPixels: 1440000, sampling: 'bilinear' },
     },
   ]);
   assert.ok(f.res.frames[0].includes('rectified'));
