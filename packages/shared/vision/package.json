@@ -16,6 +16,7 @@
   "files": ["dist", "native", "assets/phone"],
   "scripts": {
     "build": "rslib build",
+    "realsense:smoke": "node scripts/realsense-depth-smoke.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.build.json && tsc --noEmit -p tsconfig.tests.json",
     "test": "rstest run"
   },

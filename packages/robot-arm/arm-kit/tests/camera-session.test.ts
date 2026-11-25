@@ -22,7 +22,16 @@ async function fixture() {
   const closes: ReturnType<typeof rstest.fn>[] = [];
   const backend: CameraBackend = {
     listDevices: async () => [
-      { id: 'camera', name: 'Camera', backend: 'avfoundation' },
+      {
+        id: 'camera',
+        name: 'Camera',
+        backend: 'avfoundation',
+        captureModes: [
+          { width: 1920, height: 1080, fps: 30 },
+          { width: 1280, height: 720, fps: 30 },
+        ],
+        defaultCaptureSettings: { width: 1280, height: 720, fps: 30 },
+      },
     ],
     openStream: rstest.fn(async () => {
       const source = new EventEmitter() as CameraSource;
@@ -35,6 +44,27 @@ async function fixture() {
   cleanup.push(() => manager.close());
   return { manager, backend, closes };
 }
+it('persists and applies a supported camera capture mode', async () => {
+  const { manager } = await fixture();
+  await manager.setCaptureSettings('camera', {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+  });
+  const session = await manager.acquire('camera', 'a');
+  expect(session.stream.getOptions()).toMatchObject({
+    width: 1920,
+    height: 1080,
+    fps: 30,
+  });
+  await expect(
+    manager.setCaptureSettings('camera', {
+      width: 1600,
+      height: 900,
+      fps: 30,
+    }),
+  ).rejects.toThrow('not supported');
+});
 it('shares one source and keeps it alive until the last device releases it', async () => {
   const { manager, backend, closes } = await fixture();
   const [a, b] = await Promise.all([

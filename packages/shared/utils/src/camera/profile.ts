@@ -4,7 +4,7 @@ import type {
   ScreenQuad,
 } from './vision-types.js';
 
-export type CameraBackendName = 'avfoundation' | 'dshow' | 'v4l2';
+export type CameraBackendName = 'avfoundation' | 'dshow' | 'v4l2' | 'realsense';
 
 /**
  * Where a camera is mounted. Deliberately neutral: a camera can also stay

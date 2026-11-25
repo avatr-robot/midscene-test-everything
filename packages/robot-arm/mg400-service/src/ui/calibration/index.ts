@@ -8,7 +8,7 @@ export {
 } from './components/robot-arm/ScreenOutlines';
 export { SetupIllustration } from './components/robot-arm/SetupIllustration';
 export { usePerspectiveValidity } from './hooks/usePerspectiveValidity';
-export { t, useCalibrationLanguage } from './i18n';
+export { hasTranslation, t, useCalibrationLanguage } from './i18n';
 export { identifyScreen } from './marker-client';
 export { VoiceSettings } from './voice/VoiceSettings';
 export { robotVoice, useBrowserVoice } from './voice/browser';

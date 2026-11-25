@@ -35,6 +35,43 @@
 
 ## ⚡ Quick Start
 
+### Intel RealSense depth
+
+RealSense color and aligned depth are captured through one `librealsense`
+pipeline. The depth endpoint appears as `realsense:<serial>` and its paired RGB
+endpoint as `realsense:<serial>:color`.
+
+Install the helper dependencies with the Python interpreter that the service
+will use:
+
+```sh
+python -m pip install -r packages/shared/vision/native/realsense-depth/requirements.txt
+```
+
+Set `ROBOT_VISION_REALSENSE_PYTHON` to select another interpreter or
+`ROBOT_VISION_REALSENSE_HELPER_PATH` to point at a custom helper. If RealSense
+dependencies are unavailable, conventional cameras remain available.
+
+Depth streams emit a pseudo-color MJPEG preview plus a raw, row-major
+little-endian `uint16` depth map aligned to the RGB frame. Use
+`stream.getDepthFrame()` for the raw map, or `stream.getFrame().alignedColorJpeg`
+for the matching RGB image. RealSense capture modes also include the RGB
+intrinsics needed to build a 3D point cloud.
+
+The RealSense RGB endpoint also exposes camera-imaging controls through
+`librealsense`. Exposure, gain, white balance, brightness and contrast are read
+and written through the color sensor options used by the existing camera
+calibration workflow. Focus is only reported when the connected RGB sensor
+exposes a focus option; capture-only color modules continue calibrating
+exposure, white balance and tone without a synthetic focus control.
+
+After installing the dependencies, run the hardware smoke test:
+
+```sh
+pnpm --filter @midscene/robotics-vision build
+pnpm --filter @midscene/robotics-vision realsense:smoke
+```
+
 ### Installation
 
 ```sh

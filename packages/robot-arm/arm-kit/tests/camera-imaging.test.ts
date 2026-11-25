@@ -558,12 +558,10 @@ describe('camera imaging', () => {
     }
   }, 20_000);
 
-  it.each(['no control bridge', 'fixed focus', 'bridge failure'] as const)(
+  it.each(['no control bridge', 'bridge failure'] as const)(
     'distinguishes %s from supported imaging',
     async (scenario) => {
       const control = new FakeCameraControl();
-      if (scenario === 'fixed focus')
-        control.values.focus.supportsManual = false;
       const imaging = new CameraImagingController(
         { id: 'camera', name: 'Camera', backend: 'dshow' },
         {} as never,
@@ -572,7 +570,7 @@ describe('camera imaging', () => {
         async () => {
           if (scenario === 'bridge failure')
             throw new Error('Driver unavailable');
-          return scenario === 'fixed focus' ? control : undefined;
+          return undefined;
         },
       );
       imaging.registerScreen('screen', () => ({
@@ -602,6 +600,102 @@ describe('camera imaging', () => {
       await imaging.close();
     },
   );
+
+  it('releases an exposure-only camera without inventing focus control', async () => {
+    const control = new FakeCameraControl();
+    control.read = async () => {
+      const { focus: _focus, ...values } = structuredClone(control.values);
+      return values;
+    };
+    const imaging = new CameraImagingController(
+      {
+        id: 'realsense:color',
+        name: 'RealSense RGB',
+        backend: 'realsense',
+        kind: 'color',
+      },
+      {} as never,
+      tmpdir(),
+      undefined,
+      async () => control,
+    );
+
+    await imaging.releaseForCorrection();
+
+    expect(imaging.status().state).toBe('released');
+    expect(control.setCalls.map((call) => call.property)).not.toContain(
+      'focus',
+    );
+  });
+
+  it('calibrates an RGB camera that exposes no focus option', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const jpeg = await calibrationPattern();
+    const correction: CameraCorrection = {
+      points: {
+        topLeft: { x: 0, y: 0 },
+        topRight: { x: 399, y: 0 },
+        bottomRight: { x: 399, y: 799 },
+        bottomLeft: { x: 0, y: 799 },
+      },
+      sourceWidth: 400,
+      sourceHeight: 800,
+      rotation: 0,
+    };
+    const stream = {
+      getInfo: () => ({
+        state: 'running',
+        width: 400,
+        height: 800,
+        fps: 30,
+        frameId: 1,
+        hasFrame: true,
+        actualFps: 30,
+      }),
+      getFrame: async () => ({
+        id: 1,
+        capturedAt: Date.now(),
+        jpeg,
+      }),
+    };
+    const control = new FakeCameraControl();
+    control.read = async () => {
+      const { focus: _focus, ...values } = structuredClone(control.values);
+      return values;
+    };
+    const imaging = new CameraImagingController(
+      {
+        id: 'realsense:color',
+        name: 'RealSense RGB',
+        backend: 'realsense',
+        kind: 'color',
+      },
+      stream as never,
+      directory,
+      control,
+    );
+    imaging.registerScreen('screen', () => correction);
+
+    try {
+      const status = await imaging.calibrate();
+      expect(status).toMatchObject({
+        state: 'ready',
+        exposure: expect.any(Number),
+      });
+      expect(status.focus).toBeUndefined();
+      expect(status.message).toContain(
+        'does not expose an adjustable focus control',
+      );
+      expect(control.values.exposure.mode).toBe('manual');
+      expect(control.values.whiteBalance.mode).toBe('manual');
+      expect(control.setCalls.map((call) => call.property)).not.toContain(
+        'focus',
+      );
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('reopens the control bridge after a failed native control query', async () => {
     const failed = new FakeCameraControl();

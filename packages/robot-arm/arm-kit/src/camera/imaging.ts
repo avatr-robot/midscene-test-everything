@@ -43,7 +43,7 @@ interface StoredCameraControl {
 interface StoredScreenImaging {
   screenId: string;
   fingerprint: string;
-  focus: { value: number; score: number };
+  focus?: { value: number; score: number };
   exposure: { value: number };
   exposureReference?: {
     mode: ExposureCalibrationAssessment['mode'];
@@ -63,7 +63,7 @@ interface LegacyStoredCameraImaging {
   version: 1 | 2 | 3 | 4 | 5 | 6;
   cameraId: string;
   rois: Array<{ screenId: string; fingerprint: string }>;
-  focus: { value: number; score: number };
+  focus?: { value: number; score: number };
   exposure: { value: number };
   gain?: { value: number };
   whiteBalance?: { value: number };
@@ -409,7 +409,7 @@ export class CameraImagingController {
           state: 'unsupported',
           screenId: requested,
           active: false,
-          message: 'This camera does not expose focus and exposure controls',
+          message: 'This camera does not expose exposure controls',
           updatedAt: Date.now(),
         };
       const error = this.screenErrors.get(requested);
@@ -449,7 +449,7 @@ export class CameraImagingController {
         state: 'ready',
         screenId: requested,
         active: requested === this.activeScreenId && this.applied,
-        focus: profile.focus.value,
+        ...(profile.focus ? { focus: profile.focus.value } : {}),
         exposure: profile.exposure.value,
         ...(profile.gain ? { gain: profile.gain.value } : {}),
         ...(profile.whiteBalance
@@ -534,7 +534,8 @@ export class CameraImagingController {
               !screen ||
               typeof screen.screenId !== 'string' ||
               typeof screen.fingerprint !== 'string' ||
-              !Number.isFinite(screen.focus?.value) ||
+              (screen.focus !== undefined &&
+                !Number.isFinite(screen.focus?.value)) ||
               !Number.isFinite(screen.exposure?.value) ||
               !screen.calibratedAt,
           )
@@ -605,11 +606,11 @@ export class CameraImagingController {
 
   private async preset(): Promise<{
     exposure: CameraControlValue;
-    focus: CameraControlValue;
+    focus?: CameraControlValue;
   }> {
     const controls = await this.ensureControls();
     const values = await controls.read();
-    if (!values.exposure?.supportsManual || !values.focus?.supportsManual)
+    if (!values.exposure?.supportsManual)
       throw new RobotArmError(
         'VISION_UNAVAILABLE',
         'This camera does not support automatic imaging control',
@@ -617,7 +618,7 @@ export class CameraImagingController {
       );
     return {
       exposure: values.exposure,
-      focus: values.focus,
+      ...(values.focus?.supportsManual ? { focus: values.focus } : {}),
     };
   }
 
@@ -657,7 +658,7 @@ export class CameraImagingController {
     this.unsupported = true;
     this.statusValue = {
       state: 'unsupported',
-      message: 'This camera does not expose focus and exposure controls',
+      message: 'This camera does not expose exposure controls',
       updatedAt: Date.now(),
     };
     return this.status();
@@ -669,9 +670,14 @@ export class CameraImagingController {
       if (!controls) return undefined;
       try {
         const { focus, exposure } = await controls.read();
-        if (!focus?.supportsManual || !exposure?.supportsManual)
-          return undefined;
-        return { controls, values: { focus, exposure } };
+        if (!exposure?.supportsManual) return undefined;
+        return {
+          controls,
+          values: {
+            ...(focus?.supportsManual ? { focus } : {}),
+            exposure,
+          },
+        };
       } catch (error) {
         if (attempt > 0) throw error;
         await this.discardControls(controls);
@@ -935,7 +941,8 @@ export class CameraImagingController {
     }
     try {
       await controls.set('exposure', profile.exposure.value, 'manual');
-      await controls.set('focus', profile.focus.value, 'manual');
+      if (profile.focus)
+        await controls.set('focus', profile.focus.value, 'manual');
       for (const [property, value] of [
         ['gain', profile.gain?.value],
         ['whiteBalance', profile.whiteBalance?.value],
@@ -1038,7 +1045,7 @@ export class CameraImagingController {
         clamp(preset.exposure.value, preset.exposure.min, preset.exposure.max),
         'manual',
       );
-      await controls.set('focus', preset.focus.value, 'auto');
+      if (preset.focus) await controls.set('focus', preset.focus.value, 'auto');
       if (original.gain?.supportsManual)
         await controls.set('gain', original.gain.default, 'manual');
       if (original.brightness?.supportsManual)
@@ -1087,23 +1094,32 @@ export class CameraImagingController {
         updatedAt: Date.now(),
       };
       const autoFocus = (await controls.read()).focus;
-      if (!autoFocus) throw new Error('Focus control is unavailable');
-      const autoFrame = await this.freshFrame();
-      const baseline = await measureFocus(autoFrame, screens);
-      const focus = await this.searchFocus(autoFocus, screens);
-      const focusWarnings: string[] = [];
-      if (focus.value === focus.min || focus.value === focus.max)
-        focusWarnings.push(
-          'The best shared focus lies at the hardware boundary',
+      if (!autoFocus?.supportsManual)
+        warnings.push(
+          'The RGB camera driver does not expose an adjustable focus control',
         );
-      if (baseline.score > 0 && focus.score < baseline.score * 0.9)
-        focusWarnings.push(
-          'The ROI did not improve over the automatic focus baseline',
-        );
-      warnings.push(...focusWarnings);
+      const focus = autoFocus?.supportsManual
+        ? await (async () => {
+            const autoFrame = await this.freshFrame();
+            const baseline = await measureFocus(autoFrame, screens);
+            const result = await this.searchFocus(autoFocus, screens);
+            if (
+              result.max > result.min &&
+              (result.value === result.min || result.value === result.max)
+            )
+              warnings.push(
+                'The best shared focus lies at the hardware boundary',
+              );
+            if (baseline.score > 0 && result.score < baseline.score * 0.9)
+              warnings.push(
+                'The ROI did not improve over the automatic focus baseline',
+              );
+            return result;
+          })()
+        : undefined;
 
       let finalControls = await controls.read();
-      if (finalControls.focus?.mode !== 'manual')
+      if (focus && finalControls.focus?.mode !== 'manual')
         await controls.set('focus', focus.value, 'manual');
       if (finalControls.exposure?.mode !== 'manual')
         await controls.set(
@@ -1126,7 +1142,7 @@ export class CameraImagingController {
       finalControls = await controls.read();
       const finalFocus = finalControls.focus;
       const finalExposure = finalControls.exposure;
-      if (!finalFocus || finalFocus.mode !== 'manual')
+      if (focus && (!finalFocus || finalFocus.mode !== 'manual'))
         throw new RobotArmError(
           'VISION_UNAVAILABLE',
           'The camera did not keep focus in manual mode after calibration',
@@ -1147,7 +1163,7 @@ export class CameraImagingController {
       const profile: StoredScreenImaging = {
         screenId: screen.screenId,
         fingerprint: correctionFingerprint(screen),
-        focus: { value: focus.value, score: focus.score },
+        ...(focus ? { focus: { value: focus.value, score: focus.score } } : {}),
         exposure: { value: finalExposure.value },
         exposureReference: {
           mode: exposure.assessment.mode,
@@ -1198,7 +1214,7 @@ export class CameraImagingController {
         state: 'ready',
         screenId: screen.screenId,
         active: true,
-        focus: focus.value,
+        ...(focus ? { focus: focus.value } : {}),
         exposure: finalExposure.value,
         ...(finalControls.gain ? { gain: finalControls.gain.value } : {}),
         ...(finalControls.whiteBalance
@@ -1212,7 +1228,9 @@ export class CameraImagingController {
           : {}),
         message: warnings.length
           ? `Camera imaging locked with warning: ${warnings.join('; ')}`
-          : 'Focus, exposure, white balance and tone locked',
+          : focus
+            ? 'Focus, exposure, white balance and tone locked'
+            : 'Exposure, white balance and tone locked',
         updatedAt: Date.now(),
       };
       this.startMonitor();
@@ -1262,7 +1280,7 @@ export class CameraImagingController {
         clamp(preset.exposure.value, preset.exposure.min, preset.exposure.max),
         'manual',
       );
-      await controls.set('focus', preset.focus.value, 'auto');
+      if (preset.focus) await controls.set('focus', preset.focus.value, 'auto');
       if (original.gain?.supportsManual)
         await controls.set('gain', original.gain.default, 'manual');
       if (original.brightness?.supportsManual)
@@ -1330,7 +1348,10 @@ export class CameraImagingController {
         message: 'Scoring focus across every screen ROI',
         updatedAt: Date.now(),
       };
-      const focus = await this.searchFocusForScreens(screens);
+      const focusControl = (await controls.read()).focus;
+      const focus = focusControl?.supportsManual
+        ? await this.searchFocusForScreens(screens)
+        : new Map<string, { value: number; score: number }>();
       const focusValues = screens.flatMap((screen) => {
         const result = focus.get(screen.screenId);
         return result ? [result.value] : [];
@@ -1344,7 +1365,7 @@ export class CameraImagingController {
       const profiles: StoredScreenImaging[] = screens.flatMap((screen) => {
         const exposureResult = exposure.get(screen.screenId);
         const focusResult = focus.get(screen.screenId);
-        if (!exposureResult || !focusResult) return [];
+        if (!exposureResult) return [];
         const toneResult = tone.get(screen.screenId);
         const whiteBalanceValue = whiteBalance.get(screen.screenId);
         const warnings = [...exposureResult.assessment.warnings];
@@ -1352,9 +1373,16 @@ export class CameraImagingController {
           warnings.push(
             'Camera exposure used the masked full-screen reference because the grayscale bar was obscured',
           );
+        if (!focusControl?.supportsManual)
+          warnings.push(
+            'The RGB camera driver does not expose an adjustable focus control',
+          );
         if (
-          focusResult.value === focusResult.min ||
-          focusResult.value === focusResult.max
+          focusResult &&
+          focusControl &&
+          focusControl.max > focusControl.min &&
+          (focusResult.value === focusControl.min ||
+            focusResult.value === focusControl.max)
         )
           warnings.push('The best focus lies at the hardware boundary');
         if (!toneResult)
@@ -1370,10 +1398,14 @@ export class CameraImagingController {
           {
             screenId: screen.screenId,
             fingerprint: correctionFingerprint(screen),
-            focus: {
-              value: focusResult.value,
-              score: focusResult.score,
-            },
+            ...(focusResult
+              ? {
+                  focus: {
+                    value: focusResult.value,
+                    score: focusResult.score,
+                  },
+                }
+              : {}),
             exposure: { value: exposureResult.exposure },
             exposureReference: {
               mode: exposureResult.assessment.mode,

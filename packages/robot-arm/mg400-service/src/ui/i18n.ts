@@ -1,5 +1,8 @@
 import { create } from 'zustand';
-import { t as calibrationT } from './calibration';
+import {
+  hasTranslation as calibrationHasTranslation,
+  t as calibrationT,
+} from './calibration';
 
 type Language = 'zh' | 'en';
 function initialLanguage(): Language {
@@ -202,3 +205,7 @@ export function useT() {
 export const useLanguage = () => usePreferences((s) => s.language);
 export const t = (message: string, values?: (string | number)[]) =>
   calibrationT(message, values, usePreferences.getState().language);
+export const hasTranslation = (
+  message: string,
+  language: 'zh' | 'en' = usePreferences.getState().language,
+) => calibrationHasTranslation(message, language);

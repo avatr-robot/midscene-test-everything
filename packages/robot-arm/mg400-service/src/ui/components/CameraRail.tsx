@@ -1,5 +1,5 @@
 import { Tag } from 'antd';
-import { Video, VideoOff } from 'lucide-react';
+import { VideoOff } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { cameraPreviewUrl } from '../camera-preview';
 import { type CameraEntry, cameraStateLabel } from '../cameras';
@@ -12,19 +12,21 @@ function StageThumbnail({ image }: { image: HTMLImageElement }) {
     const canvas = thumbnail.current;
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
+    let animation = 0;
     const draw = () => {
       const { naturalWidth, naturalHeight } = image;
-      if (!image.isConnected || !naturalWidth || !naturalHeight) return;
-      const scale = Math.min(1, 240 / Math.max(naturalWidth, naturalHeight));
-      const width = Math.max(1, Math.round(naturalWidth * scale));
-      const height = Math.max(1, Math.round(naturalHeight * scale));
-      if (canvas.width !== width) canvas.width = width;
-      if (canvas.height !== height) canvas.height = height;
-      context.drawImage(image, 0, 0, width, height);
+      if (image.isConnected && naturalWidth && naturalHeight) {
+        const scale = Math.min(1, 240 / Math.max(naturalWidth, naturalHeight));
+        const width = Math.max(1, Math.round(naturalWidth * scale));
+        const height = Math.max(1, Math.round(naturalHeight * scale));
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
+        context.drawImage(image, 0, 0, width, height);
+      }
+      animation = window.requestAnimationFrame(draw);
     };
-    draw();
-    const timer = window.setInterval(draw, 250);
-    return () => window.clearInterval(timer);
+    animation = window.requestAnimationFrame(draw);
+    return () => window.cancelAnimationFrame(animation);
   }, [image]);
   return <canvas aria-hidden ref={thumbnail} />;
 }
@@ -65,7 +67,10 @@ export function CameraRail({
                 selectedImage ? (
                   <StageThumbnail image={selectedImage} />
                 ) : (
-                  <Video size={18} />
+                  <LiveCameraImage
+                    src={cameraPreviewUrl(camera.id, 'raw', 'rail')}
+                    alt={camera.name}
+                  />
                 )
               ) : (
                 <LiveCameraImage

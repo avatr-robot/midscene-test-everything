@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs, existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { isRealsenseCaptureEndpointName } from './camera-kind.js';
 import { RobotVisionError } from './errors.js';
 import { JpegProcessCameraSource } from './jpeg-process-camera-source.js';
 import type {
@@ -46,6 +47,7 @@ const toCameraDevice = ({
   id,
   name,
   backend,
+  kind: 'color',
   ...(controlIndex !== undefined ? { controlIndex } : {}),
 });
 
@@ -257,7 +259,7 @@ export class FfmpegCameraBackend implements CameraBackend {
     // `/devices` only exposes physical cameras unless explicitly told not to.
     const physicalDevices = filterPhysicalCameras(devices, {
       includeVirtual: this.includeVirtualDevices,
-    });
+    }).filter((device) => !isRealsenseCaptureEndpointName(device.name));
     this.deviceCache = new Map(
       physicalDevices.map((device) => [device.id, device]),
     );

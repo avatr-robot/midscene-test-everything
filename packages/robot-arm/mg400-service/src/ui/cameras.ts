@@ -30,7 +30,163 @@ export interface CameraScreen {
   /** Per-screen readiness for manual camera-view control. */
   control?: CameraScreenControl;
 }
+export type CameraKind = 'color' | 'depth';
+export interface CameraControlChoice {
+  value: number;
+  label: string;
+}
+export interface CameraControlCapability {
+  key: string;
+  label: string;
+  description?: string;
+  type: 'boolean' | 'number' | 'select';
+  choices?: CameraControlChoice[];
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  value: number;
+}
+export interface CameraCaptureMode {
+  width: number;
+  height: number;
+  fps: number;
+}
+export interface CaptureResolution {
+  key: string;
+  width: number;
+  height: number;
+}
+export interface CameraCaptureSettings {
+  width: number;
+  height: number;
+  fps: number;
+}
+export type CameraLabel =
+  | 'front'
+  | 'back'
+  | 'left'
+  | 'right'
+  | 'top'
+  | 'bottom';
+export interface CameraProfileUpdate extends CameraCaptureSettings {
+  name: string;
+  label: CameraLabel | null;
+  verticalFlip: boolean;
+  horizontalFlip: boolean;
+  depthControls?: Record<string, number>;
+}
+export const CAMERA_LABEL_OPTIONS: { value: CameraLabel; label: string }[] = [
+  { value: 'front', label: 'Front' },
+  { value: 'back', label: 'Back' },
+  { value: 'left', label: 'Left' },
+  { value: 'right', label: 'Right' },
+  { value: 'top', label: 'Top' },
+  { value: 'bottom', label: 'Bottom' },
+];
+export type FlipMode = 'none' | 'vertical' | 'horizontal' | 'both';
+export const FLIP_OPTIONS: { value: FlipMode; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'vertical', label: 'Vertical' },
+  { value: 'horizontal', label: 'Horizontal' },
+  { value: 'both', label: 'Both' },
+];
+export const WIDTH_RANGE = { min: 160, max: 7680 };
+export const HEIGHT_RANGE = { min: 120, max: 4320 };
+export const FPS_RANGE = { min: 1, max: 120 };
+
+export function captureResolutionKey(
+  settings: Pick<CameraCaptureSettings, 'width' | 'height'>,
+) {
+  return `${settings.width}x${settings.height}`;
+}
+
+export function captureResolutions(
+  modes: readonly CameraCaptureMode[] | undefined,
+): CaptureResolution[] {
+  const resolutions = new Map<string, CaptureResolution>();
+  for (const mode of modes ?? []) {
+    const key = captureResolutionKey(mode);
+    resolutions.set(key, { key, width: mode.width, height: mode.height });
+  }
+  return [...resolutions.values()].sort(
+    (left, right) => right.width - left.width || right.height - left.height,
+  );
+}
+
+export function captureFrameRates(
+  modes: readonly CameraCaptureMode[] | undefined,
+  settings: Pick<CameraCaptureSettings, 'width' | 'height'>,
+): number[] {
+  const key = captureResolutionKey(settings);
+  return [
+    ...new Set(
+      (modes ?? [])
+        .filter((mode) => captureResolutionKey(mode) === key)
+        .map((mode) => mode.fps),
+    ),
+  ].sort((left, right) => right - left);
+}
+
+export function resolveSupportedCaptureSettings(
+  settings: CameraCaptureSettings,
+  modes: readonly CameraCaptureMode[] | undefined,
+): CameraCaptureSettings {
+  if (!modes?.length) return settings;
+  const resolutions = captureResolutions(modes);
+  const selected =
+    resolutions.find(
+      (candidate) => candidate.key === captureResolutionKey(settings),
+    ) ??
+    resolutions.reduce<CaptureResolution | undefined>((nearest, candidate) => {
+      if (!nearest) return candidate;
+      const distance =
+        Math.abs(candidate.width - settings.width) +
+        Math.abs(candidate.height - settings.height);
+      const nearestDistance =
+        Math.abs(nearest.width - settings.width) +
+        Math.abs(nearest.height - settings.height);
+      return distance < nearestDistance ? candidate : nearest;
+    }, undefined);
+  if (!selected) return settings;
+  const frameRates = captureFrameRates(modes, selected);
+  return {
+    width: selected.width,
+    height: selected.height,
+    fps: frameRates.includes(settings.fps)
+      ? settings.fps
+      : (frameRates[0] ?? settings.fps),
+  };
+}
+
+export function flipModeOf(
+  camera: Pick<CameraEntry, 'verticalFlip' | 'horizontalFlip'>,
+): FlipMode {
+  if (camera.verticalFlip && camera.horizontalFlip) return 'both';
+  if (camera.verticalFlip) return 'vertical';
+  if (camera.horizontalFlip) return 'horizontal';
+  return 'none';
+}
+
+export function flipFlagsOf(mode: FlipMode) {
+  return {
+    verticalFlip: mode === 'vertical' || mode === 'both',
+    horizontalFlip: mode === 'horizontal' || mode === 'both',
+  };
+}
 export interface CameraEntry extends CameraScreen {
+  deviceName?: string;
+  label?: CameraLabel;
+  profileKey?: string;
+  verticalFlip?: boolean;
+  horizontalFlip?: boolean;
+  online?: boolean;
+  kind?: CameraKind;
+  pairedDeviceId?: string;
+  captureModes?: CameraCaptureMode[];
+  captureSettings?: CameraCaptureSettings;
+  controls?: CameraControlCapability[];
+  depthControls?: Record<string, number>;
   previewScreenId?: string;
   screens?: CameraScreen[];
   error?: string;
@@ -39,9 +195,16 @@ export interface CameraEntry extends CameraScreen {
     state: string;
     width: number;
     height: number;
+    fps?: number;
     actualFps?: number;
     hasFrame: boolean;
     error?: string;
+    depth?: {
+      scaleMeters: number;
+      width: number;
+      height: number;
+      alignedTo?: 'color';
+    };
   };
 }
 
@@ -75,6 +238,21 @@ export function cameraStateLabel(camera: CameraEntry) {
     default:
       return camera.error ? 'cameraFailed' : 'stopped';
   }
+}
+
+/** The RGB endpoint is folded into the depth card while fusion is active. */
+export function cameraRailEntries(
+  cameras: CameraEntry[],
+  selected: CameraEntry | undefined,
+  depthFusionEnabled: boolean,
+) {
+  if (
+    !depthFusionEnabled ||
+    selected?.kind !== 'depth' ||
+    !selected.pairedDeviceId
+  )
+    return cameras;
+  return cameras.filter((camera) => camera.id !== selected.pairedDeviceId);
 }
 type CameraStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error';
 // Camera records are discovered by the Node host, never manually created in UI.
@@ -228,4 +406,36 @@ export async function activateCameraImaging(
   if (!response.ok)
     throw new Error(data.error || 'Camera imaging switch failed');
   return data.imaging;
+}
+
+export async function updateCameraCaptureSettings(
+  cameraId: string,
+  settings: CameraProfileUpdate,
+): Promise<{
+  settings: CameraCaptureSettings &
+    Partial<Pick<CameraEntry, 'verticalFlip' | 'horizontalFlip'>> & {
+      name?: string;
+      label?: CameraLabel;
+    };
+  stream?: CameraEntry['stream'];
+}> {
+  const response = await fetch('/api/cameras/capture-settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: cameraId, ...settings }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const data = (await response.json()) as {
+    error?: string;
+    settings?: CameraCaptureSettings & {
+      name?: string;
+      label?: CameraLabel;
+      verticalFlip?: boolean;
+      horizontalFlip?: boolean;
+    };
+    stream?: CameraEntry['stream'];
+  };
+  if (!response.ok || !data.settings)
+    throw new Error(data.error || 'Camera settings update failed');
+  return { settings: data.settings, stream: data.stream };
 }

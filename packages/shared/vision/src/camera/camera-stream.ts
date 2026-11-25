@@ -3,7 +3,9 @@ import { RobotVisionError } from './errors.js';
 import type {
   CameraBackend,
   CameraFrame,
+  CameraSourceFrame,
   CameraStreamInfo,
+  DepthFrame,
   ResolvedCameraStreamOptions,
 } from './types.js';
 
@@ -31,6 +33,7 @@ export class CameraStream extends EventEmitter {
   private closingSource?: Promise<void>;
   private state: CameraStreamInfo['state'] = 'starting';
   private latestFrame?: CameraFrame;
+  private latestDepthFrame?: DepthFrame;
   private error?: string;
   private readonly frameTimes: number[] = [];
   private startupTimer?: NodeJS.Timeout;
@@ -82,6 +85,7 @@ export class CameraStream extends EventEmitter {
     this.state = 'starting';
     this.error = undefined;
     this.latestFrame = undefined;
+    this.latestDepthFrame = undefined;
     try {
       await this.start();
     } catch (error) {
@@ -106,15 +110,32 @@ export class CameraStream extends EventEmitter {
         starting.signal.throwIfAborted();
       }
       this.source = source;
-      source.on('frame', (jpeg: Buffer) => {
+      source.on('frame', (payload: Buffer | CameraSourceFrame) => {
         if (this.source !== source || this.state === 'stopped') return;
+        const id = (this.latestFrame?.id ?? 0) + 1;
+        const capturedAt = Date.now();
+        const jpeg = Buffer.isBuffer(payload) ? payload : payload.jpeg;
+        const depth = Buffer.isBuffer(payload)
+          ? undefined
+          : payload.depth
+            ? {
+                ...payload.depth,
+                id,
+                capturedAt,
+              }
+            : undefined;
         const frame: CameraFrame = {
           capture,
-          id: (this.latestFrame?.id ?? 0) + 1,
-          capturedAt: Date.now(),
+          id,
+          capturedAt,
           jpeg,
+          ...(!Buffer.isBuffer(payload) && payload.alignedColorJpeg
+            ? { alignedColorJpeg: payload.alignedColorJpeg }
+            : {}),
+          ...(depth ? { depth } : {}),
         };
         this.latestFrame = frame;
+        if (depth) this.latestDepthFrame = depth;
         this.state = 'running';
         this.clearStartupTimer();
         this.recordFrameTime(frame.capturedAt);
@@ -163,6 +184,7 @@ export class CameraStream extends EventEmitter {
     return {
       id: this.id,
       ...this.options,
+      kind: this.options.kind ?? 'color',
       state: this.state,
       frameId: latestFrame?.id ?? 0,
       lastFrameAt: latestFrame?.capturedAt,
@@ -170,7 +192,30 @@ export class CameraStream extends EventEmitter {
       hasFrame: Boolean(latestFrame),
       frameAgeMs: latestFrame ? Date.now() - latestFrame.capturedAt : undefined,
       actualFps: this.measureFps(),
+      ...(this.latestDepthFrame
+        ? {
+            depth: {
+              scaleMeters: this.latestDepthFrame.depthScaleMeters,
+              width: this.latestDepthFrame.width,
+              height: this.latestDepthFrame.height,
+              alignedTo: this.latestDepthFrame.alignedTo,
+            },
+          }
+        : {}),
     };
+  }
+
+  /** The latest raw depth map, when this stream was opened as depth. */
+  getDepthFrame(): DepthFrame {
+    if (!this.latestDepthFrame) {
+      throw new RobotVisionError(
+        this.state === 'failed' || this.state === 'stopped'
+          ? 'STREAM_FAILED'
+          : 'NO_FRAME_AVAILABLE',
+        this.error || 'No depth frame is available for this stream',
+      );
+    }
+    return this.latestDepthFrame;
   }
 
   /** The latest frame already received when the phone reports its display. */

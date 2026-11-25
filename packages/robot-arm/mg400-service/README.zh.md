@@ -17,6 +17,22 @@ pnpm dev
 
 用 `pnpm dev --manual` 手动指定控制器 IP 地址。用 `pnpm dev:mock` 启动模拟机械臂，体验管理台。
 
+## Intel RealSense 深度相机
+
+请使用服务实际调用的 Python 解释器安装 RealSense helper 依赖：
+
+```sh
+python -m pip install -r packages/shared/vision/native/realsense-depth/requirements.txt
+```
+
+RealSense 的 RGB 和深度端点会自动出现在相机栏。选中深度相机后，可在画面工具栏切换
+2D 深度预览和 3D 点云；鼠标移到 2D 画面上可读取对齐深度，打开 **深度参数** 可调整
+传感器设置。保存参数会重启当前深度流。
+
+相机映射会通过 RealSense SDK 标定 RGB 成像参数。连接的 RGB 传感器提供对应能力时，
+可校正曝光、增益、白平衡、亮度和对比度；只有彩色传感器实际暴露对焦 option 时才提供
+对焦校正。
+
 ## 标定触摸屏
 
 固定触控笔、屏幕和俯视摄像头，让完整触控区域入镜。确认目标屏幕能通过局域网打开标定页，再在管理台打开 **标定**。
