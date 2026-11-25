@@ -6,6 +6,7 @@ import {
   hasScreenMapping,
 } from '@midscene/arm-kit';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
+import type { DebugLogoDrawingStatus } from '@midscene/robotics-shared/assisted-contracts';
 import type { PlaygroundDevices } from './devices.js';
 
 export type ScreenControlReason =
@@ -33,10 +34,11 @@ export interface ManualScreenControl {
 /** Serializes screen gestures before handing them to the controller queue. */
 export class ScreenControl {
   private manual?: ManualScreenControl;
+  private logoDrawing?: DebugLogoDrawingStatus;
   constructor(private readonly devices: PlaygroundDevices) {}
 
   get busy(): boolean {
-    return Boolean(this.manual);
+    return Boolean(this.manual) || this.logoDrawing?.status === 'running';
   }
 
   get manualAction(): ManualScreenControl | undefined {
@@ -100,19 +102,55 @@ export class ScreenControl {
     };
   }
 
-  async perform(
-    screenId: string,
-    action: ScreenAction,
-    signal?: AbortSignal,
-  ): Promise<ActionResult> {
+  debugLogoStatus(screenId: string): DebugLogoDrawingStatus | null {
+    return this.logoDrawing?.screenId === screenId ? this.logoDrawing : null;
+  }
+
+  startDebugLogo(screenId: string): DebugLogoDrawingStatus {
+    this.assertIdle();
     const entry = this.devices.entries.get(screenId);
-    if (!entry)
+    if (!entry || !this.screens().get(screenId)?.ready)
       throw new RobotArmError(
-        'VISION_UNAVAILABLE',
-        'Start the camera before touching its screen',
+        'CALIBRATION_REQUIRED',
+        'A current accepted calibration is required to draw on this screen',
         409,
       );
-    if (this.manual)
+
+    const runtime = controllerRuntime(this.devices.arm);
+    const stopRevision = runtime.stopRevision;
+    const drawing: DebugLogoDrawingStatus = { screenId, status: 'running' };
+    this.logoDrawing = drawing;
+    void (async () => {
+      const host = await this.devices.ensureHost(screenId, true);
+      await this.devices.markerCalibration.resumeBoundPage(host);
+      runtime.assertStopRevision(stopRevision);
+      if (this.devices.entries.get(screenId) !== entry)
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Device connection changed',
+          409,
+        );
+      await entry.device.drawLogo(() => {
+        runtime.assertStopRevision(stopRevision);
+        return host.service.prepareSavedLogoCanvas();
+      });
+    })().then(
+      () => {
+        this.logoDrawing = { screenId, status: 'completed' };
+      },
+      (error) => {
+        this.logoDrawing = {
+          screenId,
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      },
+    );
+    return drawing;
+  }
+
+  private assertIdle() {
+    if (this.busy)
       throw new RobotArmError(
         'BUSY',
         'A manual screen gesture is already running.',
@@ -130,6 +168,21 @@ export class ScreenControl {
         'Wait for calibration to finish before touching the screen manually.',
         409,
       );
+  }
+
+  async perform(
+    screenId: string,
+    action: ScreenAction,
+    signal?: AbortSignal,
+  ): Promise<ActionResult> {
+    const entry = this.devices.entries.get(screenId);
+    if (!entry)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Start the camera before touching its screen',
+        409,
+      );
+    this.assertIdle();
     if (
       !action ||
       typeof action !== 'object' ||

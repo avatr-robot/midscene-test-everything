@@ -156,10 +156,12 @@ export interface RobotDriver {
   moveLinear?(
     pose: CartesianPose,
     options: MotionOptions,
+    preflight?: LinearPreflightScope,
   ): Promise<MotionHandle>;
   beginLinearSequence?(
     targets: readonly LinearSequenceTarget[],
     options: LinearSequenceOptions,
+    preflight?: LinearPreflightScope,
   ): Promise<LinearMotionSequence>;
   movePtp?(pose: CartesianPose, options: MotionOptions): Promise<MotionHandle>;
   moveJoints?(values: number[], options: MotionOptions): Promise<MotionHandle>;
@@ -178,7 +180,10 @@ export interface RobotDriver {
   resume?(): Promise<void>;
   emergencyStop?(): Promise<void>;
   forwardKinematics?(values: number[]): Promise<CartesianPose>;
-  inverseKinematics?(pose: CartesianPose): Promise<number[]>;
+  inverseKinematics?(
+    pose: CartesianPose,
+    preflight?: LinearPreflightScope,
+  ): Promise<number[]>;
   checkReachability?(pose: CartesianPose): Promise<void>;
 }
 export interface MotionConstraints {
@@ -203,6 +208,10 @@ export interface CapabilityDescriptor {
   implementation: 'native' | 'emulated';
   constraints?: MotionConstraints;
 }
+/** Identity and cancellation for reachability evidence from one linear motion plan. */
+export interface LinearPreflightScope {
+  readonly signal: AbortSignal;
+}
 export interface LinearSequenceTarget {
   readonly pose: CartesianPose;
   readonly options: MotionOptions;
@@ -225,6 +234,8 @@ export interface LinearSequenceOptions {
 export interface LinearMotionSequence {
   /** Indices increase; skipping a prevalidated intermediate target is allowed. */
   submit(index: number, mode?: 'feedback' | 'terminal'): Promise<MotionReceipt>;
+  /** Queue consecutive targets after a confirmed handoff. The last target must have zero blend. */
+  submitQueued?(blendPercentages: readonly number[]): Promise<MotionReceipt>;
   waitForHandoff(): Promise<CartesianHandoff>;
   /** Drain the current command before a conservative release. */
   waitForCurrent(): Promise<MotionResult>;

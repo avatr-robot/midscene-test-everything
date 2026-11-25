@@ -1,7 +1,6 @@
 import type {
   CalibrationBatchCommand,
   CalibrationBatchPlan,
-  CalibrationBatchSamplingMode,
   CalibrationBatchState,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
@@ -11,13 +10,13 @@ import {
   Checkbox,
   Modal,
   Popconfirm,
-  Radio,
   Space,
   Table,
   Tag,
   Typography,
 } from 'antd';
 import {
+  type ReactNode,
   forwardRef,
   useEffect,
   useImperativeHandle,
@@ -31,6 +30,13 @@ import { CalibrationQualityWarnings } from './CalibrationQualityWarnings';
 
 const active = (batch: CalibrationBatchState | null | undefined) =>
   Boolean(batch && ['running', 'waiting', 'stopping'].includes(batch.status));
+const recoveryLabels: Record<string, string> = {
+  'recovering-phone': 'Reconnecting to the calibration page…',
+  'retrying-verification': 'Resuming boundary verification…',
+  'retrying-point': 'Resuming fast sampling at the interrupted point…',
+  'retrying-height': 'Repeating fast height measurement…',
+  'retrying-screen': 'Restarting fast sampling from the reference position…',
+};
 const itemLabels: Record<string, string> = {
   pending: 'Pending',
   preparing: 'Preparing screen',
@@ -157,8 +163,7 @@ export interface CalibrationBatchPanelHandle {
  *
  * The section is informational plus the running queue: the primary action lives
  * in the workspace footer, and the confirmation dialog carries the safety
- * acknowledgements. The server plans the screens, the order and the transfer
- * corridor.
+ * acknowledgements. The server plans the screen order.
  */
 export const CalibrationBatchPanel = forwardRef<
   CalibrationBatchPanelHandle,
@@ -170,9 +175,10 @@ export const CalibrationBatchPanel = forwardRef<
     disabled: boolean;
     onChanged?: () => void | Promise<void>;
     onActiveChange?: (active: boolean) => void;
+    debugDrawing?: ReactNode;
   }
 >(function CalibrationBatchPanel(
-  { api, cameraId, screens, disabled, onChanged, onActiveChange },
+  { api, cameraId, screens, disabled, onChanged, onActiveChange, debugDrawing },
   ref,
 ) {
   const [batch, setBatch] = useState<CalibrationBatchState | null>();
@@ -185,11 +191,8 @@ export const CalibrationBatchPanel = forwardRef<
   const [plan, setPlan] = useState<CalibrationBatchPlan>();
   const [previewPlan, setPreviewPlan] = useState<CalibrationBatchPlan>();
   const [deletedCalibrations, setDeletedCalibrations] = useState<string[]>([]);
-  const [samplingMode, setSamplingMode] =
-    useState<CalibrationBatchSamplingMode>('slide');
   const [horizontalConfirmed, setHorizontalConfirmed] = useState(false);
   const [manualAcceptance, setManualAcceptance] = useState(false);
-  const [corridorConfirmed, setCorridorConfirmed] = useState(false);
   const latest = useRef({ onChanged, onActiveChange });
   latest.current = { onChanged, onActiveChange };
   const signature = useRef('');
@@ -282,11 +285,8 @@ export const CalibrationBatchPanel = forwardRef<
       const next = await api.calibrationBatchPlan(cameraId);
       if (!mounted.current) return;
       setPlan(next);
-      speakCalibration('batchClearance', 2);
       setHorizontalConfirmed(false);
-      setSamplingMode('slide');
       setManualAcceptance(false);
-      setCorridorConfirmed(false);
     });
   useImperativeHandle(
     ref,
@@ -310,10 +310,9 @@ export const CalibrationBatchPanel = forwardRef<
         cameraId,
         auto: true,
         horizontalConfirmed: true,
-        compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
-        samplingMode,
+        compliantSetupConfirmed: true,
+        samplingMode: 'slide',
         ...(manualAcceptance ? { acceptance: 'manual' as const } : {}),
-        ...(plan.transfer ? { corridorConfirmed: true as const } : {}),
       });
       setPlan(undefined);
       setStartedHere(true);
@@ -423,9 +422,6 @@ export const CalibrationBatchPanel = forwardRef<
       })}
     </div>
   );
-  const needsCorridor = Boolean(plan?.transfer);
-  const readyToStart =
-    horizontalConfirmed && (!needsCorridor || corridorConfirmed);
   return (
     <section
       className="robot-calibration-batch"
@@ -487,7 +483,11 @@ export const CalibrationBatchPanel = forwardRef<
                 {index === batch.currentIndex &&
                   item.status === 'exploring' &&
                   item.progress?.message && (
-                    <div>{t(item.progress.message)}</div>
+                    <div>
+                      {recoveryLabels[item.progress.phase] &&
+                        `${t(recoveryLabels[item.progress.phase])} `}
+                      {calibrationErrorText(item.progress.message)}
+                    </div>
                   )}
                 {index === batch.currentIndex &&
                   item.status.startsWith('awaiting-') &&
@@ -680,6 +680,7 @@ export const CalibrationBatchPanel = forwardRef<
         )}
       <details>
         <summary>{t('Advanced debugging')}</summary>
+        {debugDrawing}
         {(
           [
             [
@@ -824,7 +825,7 @@ export const CalibrationBatchPanel = forwardRef<
             <Button onClick={() => setPlan(undefined)}>{t('Cancel')}</Button>
             <Button
               type="primary"
-              disabled={!readyToStart || working}
+              disabled={!horizontalConfirmed || working}
               loading={working}
               onClick={start}
             >
@@ -867,31 +868,12 @@ export const CalibrationBatchPanel = forwardRef<
               );
             })}
           </ol>
-          <details>
-            <summary>
-              {t('Sampling mode')} ·{' '}
-              {t(samplingMode === 'slide' ? 'Fast' : 'Regular')}
-            </summary>
-            <Radio.Group
-              aria-label={t('Sampling mode')}
-              value={samplingMode}
-              onChange={(event) => {
-                setSamplingMode(event.target.value);
-                setHorizontalConfirmed(false);
-              }}
-            >
-              <Radio.Button value="slide">{t('Fast')}</Radio.Button>
-              <Radio.Button value="standard">{t('Regular')}</Radio.Button>
-            </Radio.Group>
-          </details>
           <Checkbox
             checked={horizontalConfirmed}
             onChange={(event) => setHorizontalConfirmed(event.target.checked)}
           >
             {t(
-              samplingMode === 'slide'
-                ? 'All screens are fixed horizontally and the tool has elastic compliance.'
-                : 'All screens are secured; the measured plane allows limited tilt. The tool has elastic compliance.',
+              'All screens are fixed horizontally and the tool has elastic compliance.',
             )}
           </Checkbox>
           <Checkbox
@@ -900,50 +882,6 @@ export const CalibrationBatchPanel = forwardRef<
           >
             {t('Pause for acceptance on each screen')}
           </Checkbox>
-          {plan?.transfer && (
-            <>
-              <Alert
-                showIcon
-                message={t(
-                  'Check clearance for the full arm, cables and fixtures.',
-                )}
-                type="warning"
-              />
-              <ul>
-                <li>
-                  {t('Global travel tip Z (mm)')}: {plan.transfer.travelTipZMm}
-                </li>
-                <li>
-                  {t('Highest obstacle Z (mm)')}:{' '}
-                  {plan.transfer.highestObstacleZMm}
-                </li>
-                <li>
-                  {t('Transfer clearance (mm)')}: {plan.transfer.clearanceMm}
-                </li>
-                <li>
-                  {t('Transfer corridor (mm)')}: X {plan.transfer.corridor.minX}{' '}
-                  … {plan.transfer.corridor.maxX}, Y{' '}
-                  {plan.transfer.corridor.minY} … {plan.transfer.corridor.maxY}
-                </li>
-                {plan.transfer.waypoints.length > 0 && (
-                  <li>
-                    {t('Transfer waypoints')}:{' '}
-                    {plan.transfer.waypoints
-                      .map((point) => `${point.x},${point.y}`)
-                      .join(' · ')}
-                  </li>
-                )}
-              </ul>
-              <Checkbox
-                checked={corridorConfirmed}
-                onChange={(event) => setCorridorConfirmed(event.target.checked)}
-              >
-                {t(
-                  'I have checked the full arm swept corridor and the measured global clearance.',
-                )}
-              </Checkbox>
-            </>
-          )}
         </Space>
       </Modal>
     </section>

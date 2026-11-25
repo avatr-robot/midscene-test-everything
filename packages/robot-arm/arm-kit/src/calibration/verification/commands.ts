@@ -42,6 +42,7 @@ export interface CalibrationHost {
   drag(enter: boolean): Promise<void>;
   target(p: CartesianPose, ctx: ApplicationContext): void;
   preflight(targets: MotionTarget[], ctx: ApplicationContext): Promise<void>;
+  /** Resolves after the target pose has been measured and confirmed stable. */
   move(
     p: CartesianPose,
     ctx: ApplicationContext,
@@ -101,17 +102,42 @@ export async function applyCalibrationCommand(
           s.candidate.quality,
           s.auto.evidence,
         ).length === 0;
-      await runBoundaryVerification(this, s, ctx, 'hover', {
-        allowUnacceptedHover: true,
-        returnPose: s.auto.startPose,
-        fast,
-        continueAtBoundary: fast,
-      });
-      await runBoundaryVerification(this, s, ctx, 'contact', {
-        allowUnacceptedHover: true,
-        returnPose: s.auto.startPose,
-        fast,
-      });
+      const step = command.boundaryStep;
+      if (step !== undefined && !['hover', 'contact', 'parking'].includes(step))
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Unknown boundary verification step',
+        );
+      if (!step || step === 'hover') {
+        await runBoundaryVerification(this, s, ctx, 'hover', {
+          allowUnacceptedHover: true,
+          returnPose: s.auto.startPose,
+          fast,
+          continueAtBoundary: true,
+        });
+        if (step) break;
+      }
+      if (!s.boundary?.hoverCorners || !s.boundary.hoverEdges)
+        throw new RobotArmError(
+          'HOVER_NOT_VERIFIED',
+          'Complete hover boundary verification first',
+          409,
+        );
+      if (!step || step === 'contact') {
+        await runBoundaryVerification(this, s, ctx, 'contact', {
+          allowUnacceptedHover: true,
+          returnPose: s.auto.startPose,
+          fast,
+          continuousContact: true,
+        });
+        if (step) break;
+      }
+      if (!s.boundary.contactCorners || !s.boundary.contactEdges)
+        throw new RobotArmError(
+          'NOT_VERIFIED',
+          'Complete contact boundary verification first',
+          409,
+        );
       if (s.auto.deferParkingBatchId) {
         s.stage = 'verification';
         break;

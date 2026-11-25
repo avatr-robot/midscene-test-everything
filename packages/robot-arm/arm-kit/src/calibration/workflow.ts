@@ -11,12 +11,16 @@ import type {
   AssistedMappingInput,
   AutomaticCaptureHost,
   AutomaticExplorationMode,
+  CalibrationLogoStatus,
   CalibrationPageReply,
   CalibrationPageUpdate,
   CalibrationPhoneStatus,
   WebVerificationResult,
 } from '../assisted-contracts.js';
-import { mappingQualityWarnings } from '../assisted-contracts.js';
+import {
+  CALIBRATION_PHONE_POLICY,
+  mappingQualityWarnings,
+} from '../assisted-contracts.js';
 import {
   type CalibrationCommand,
   type CalibrationProfile,
@@ -24,16 +28,33 @@ import {
   RobotArmError,
   type ScreenVisibilityProbePattern,
   isRobotArmError,
+  sameVisionMapping,
   semanticJson,
 } from '../contracts.js';
-import { add, assertPose, contactPoint, distance, scale } from '../domain.js';
+import {
+  add,
+  assertPose,
+  contactPoint,
+  distance,
+  quaternionDistance,
+  scale,
+} from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
 import { verifyScreenVisibility } from './camera/visibility.js';
 import type { CalibrationVision } from './camera/vision.js';
+import {
+  CALIBRATION_LOGO_STROKE_COUNT,
+  type LogoCanvasSession,
+} from './draw-logo.js';
 import { AutomaticCapture } from './exploration/capture.js';
 import { fitExploration } from './exploration/fit.js';
+import type { FastSamplingCheckpoint } from './exploration/sampler.js';
 import { invertMapping, pointDistance, project } from './phone/geometry.js';
-import { CalibrationPhoneSession, sameLayout } from './phone/session.js';
+import {
+  CalibrationPhoneSession,
+  sameLayout,
+  sameLayoutGeometry,
+} from './phone/session.js';
 import { knownScreenTravelHeight, pageOrderedQuad } from './screen-position.js';
 import { CalibrationSetup, calibrationGeometryKey } from './setup.js';
 import { SAMPLED_SURFACE_LIMIT_MM } from './surface.js';
@@ -58,6 +79,7 @@ const recoverableSamplingErrors = new Set([
   'TOUCH_SAFETY_LIMIT',
   'VISION_UNAVAILABLE',
 ]);
+const SAMPLING_RECOVERY_MS = 15_000;
 
 type Fit = Pick<
   CalibrationProfile,
@@ -81,6 +103,17 @@ type SessionState = Omit<
   AssistedCalibrationState,
   'phoneConnected' | 'layout' | 'samples' | 'anchors' | 'points'
 >;
+type AutomaticRun = {
+  session: SessionState;
+  finish: boolean;
+  retried: boolean;
+  checkpoint: FastSamplingCheckpoint;
+};
+type SamplingRetryEvidence = {
+  error: RobotArmError;
+  pose?: CartesianPose;
+  contactId?: string;
+};
 export interface AssistedCalibrationOptions {
   deviceId?: string;
   vision: CalibrationVision;
@@ -111,7 +144,12 @@ export class CalibrationWorkflow {
   };
   phoneHeartbeat() {
     // A keepalive cannot substitute for a fresh observation during motion.
-    if (!this.measuring()) this.phone.lastSeen = Date.now();
+    if (
+      !this.measuring() &&
+      this.state?.logo?.state !== 'drawing' &&
+      this.debugLogo?.state !== 'drawing'
+    )
+      this.phone.lastSeen = Date.now();
     if (this.state?.calibration) this.changed();
     void this.recoverSamplingSocket();
   }
@@ -128,7 +166,8 @@ export class CalibrationWorkflow {
     this.options.onPhoneObservation?.();
     if (
       this.measuring() ||
-      this.state?.stage === 'safety' ||
+      (this.state?.stage === 'safety' &&
+        (!transportLost || this.boundaryPreflight !== this.state)) ||
       this.state?.stage === 'returning'
     ) {
       this.retryVerification = this.state?.stage !== 'collecting';
@@ -142,6 +181,7 @@ export class CalibrationWorkflow {
   }
   private readonly phoneLinks: () => { name: string; url: string }[];
   private state?: SessionState;
+  private debugLogo?: CalibrationLogoStatus;
   private input?: AssistedCalibrationInput;
   private readonly phone: CalibrationPhoneSession;
   private capture?: Promise<void>;
@@ -177,6 +217,8 @@ export class CalibrationWorkflow {
       );
     this.attemptRevision++;
     this.socketRecovery = undefined;
+    this.automaticSamplingStop = undefined;
+    this.debugLogo = undefined;
     this.state = undefined;
     this.measurements = undefined;
     this.fittedGeometry = undefined;
@@ -468,6 +510,8 @@ export class CalibrationWorkflow {
         this.socketRecovery?.session === s &&
         this.socketRecovery.stopRevision === this.runtime.stopRevision &&
         this.runtime.canRecoverSamplingSocket(this.socketRecovery.operationId),
+      finishingAutomatically:
+        this.automaticRun?.session === s && this.automaticRun.finish,
       phoneConnected: this.phone?.connected() ?? false,
       layout: s.mapping?.layout ?? this.phone?.update?.layout,
     });
@@ -512,9 +556,39 @@ export class CalibrationWorkflow {
     return this.phone.openPage();
   }
   receivePhone(update: CalibrationPageUpdate): CalibrationPageReply {
+    const previous = this.phone.update;
     const reloaded = this.phone.receive(update);
     this.changed();
     const input = this.phone.update!;
+    const logo =
+      this.debugLogo?.state === 'drawing' ? this.debugLogo : this.state?.logo;
+    const canvasAck =
+      logo?.retryFromStroke === undefined
+        ? logo?.id
+        : `${logo.id}:${logo.retryFromStroke}`;
+    if (logo?.state === 'drawing' && input.logoCanvasAck === canvasAck) {
+      const lastEvent =
+        previous?.pageId === input.pageId
+          ? (previous.touchEvents?.at(-1)?.sequence ?? 0)
+          : 0;
+      for (const event of input.touchEvents ?? []) {
+        if (
+          event.sequence <= lastEvent ||
+          event.targetElement !== 'logo-canvas' ||
+          event.targetId !== canvasAck
+        )
+          continue;
+        debug(
+          `Logo phone touch ${JSON.stringify({
+            stroke: Number(event.detail),
+            event: event.kind,
+            phoneElapsedMs: event.elapsedMs,
+            phoneEventMs: event.nativeTimestampMs,
+            receivedAtMs: this.phone.lastUpdateAt,
+          })}`,
+        );
+      }
+    }
     this.options.onPhoneObservation?.(
       this.phone.connected() ? input : undefined,
     );
@@ -525,6 +599,7 @@ export class CalibrationWorkflow {
     }
     if (
       reloaded &&
+      this.boundaryPreflight !== s &&
       [
         'collecting',
         'reprobing',
@@ -558,6 +633,7 @@ export class CalibrationWorkflow {
       );
     if (
       (!input.visible || this.phone.displayRequirement()) &&
+      this.boundaryPreflight !== s &&
       ['collecting', 'reprobing', 'verifying', 'safety', 'returning'].includes(
         s.stage,
       )
@@ -565,6 +641,12 @@ export class CalibrationWorkflow {
       this.retryVerification = s.stage !== 'collecting';
       this.interrupt(
         'Keep the phone page visible during verification. Restart here when ready.',
+        undefined,
+        this.automaticRun?.session === s &&
+          !input.visible &&
+          !this.phone.displayRequirement()
+          ? 'phone-timeout'
+          : undefined,
       );
     }
     if (s.stage === 'collecting') this.measurements?.receive(input);
@@ -598,6 +680,7 @@ export class CalibrationWorkflow {
   private insetMarkers = false;
 
   requestMarkerDisplay(reposition = false) {
+    this.debugLogo = undefined;
     if (reposition) this.insetMarkers = !this.insetMarkers;
     this.phoneHome = false;
     this.markerRequest = randomUUID();
@@ -628,6 +711,7 @@ export class CalibrationWorkflow {
   private imagingRun?: Promise<void>;
   private imagingGeneration = 0;
   restorePhoneHome() {
+    this.debugLogo = undefined;
     this.phoneHome = true;
     this.changed();
   }
@@ -686,6 +770,8 @@ export class CalibrationWorkflow {
         imagingRequest: this.imagingRequest,
         anchors: [],
       };
+    if (this.debugLogo)
+      return { view: 'completed', logo: this.debugLogo, anchors: [] };
     const s = this.state;
     if (
       !s ||
@@ -735,6 +821,7 @@ export class CalibrationWorkflow {
                 : stage === 'verifying'
                   ? 'verify'
                   : stage,
+      logo: s.logo,
       imageTrial: Boolean(s.imageTrial && s.stage === 'verifying'),
       capture:
         s.stage === 'collecting' ||
@@ -849,6 +936,14 @@ export class CalibrationWorkflow {
       detail: structuredClone({
         deviceId: this.options.deviceId,
         stage: s.stage,
+        operationId: this.captureOperationId,
+        samplingTarget: this.automaticRun?.checkpoint.next,
+        samplingAttempt:
+          this.automaticRun?.session === s && s.stage === 'collecting'
+            ? this.automaticRun.retried
+              ? 2
+              : 1
+            : undefined,
         explorationMode: s.explorationMode,
         phoneConnected: this.phone.connected(),
         phoneDiagnostics: this.phoneStatus().diagnostics,
@@ -863,6 +958,9 @@ export class CalibrationWorkflow {
     });
   }
   private captureStopRevision?: number;
+  private boundaryPreflight?: SessionState;
+  private automaticRun?: AutomaticRun;
+  private automaticSamplingStop?: { id: string; before: number; after: number };
   private socketRecovery?: {
     session: SessionState;
     operationId: string;
@@ -871,11 +969,24 @@ export class CalibrationWorkflow {
     waitForPhoneUpdate: boolean;
     awaitingClose: boolean;
     retryAfter: number;
+    stop?: Promise<void>;
+    deadline: number;
   };
+
+  followsAutomaticSamplingStop(id: string, revision: number) {
+    const stop = this.automaticSamplingStop;
+    return (
+      stop?.id === id &&
+      stop.before === revision &&
+      stop.after === this.runtime.stopRevision
+    );
+  }
+
   private async recoverSamplingSocket() {
     const pending = this.socketRecovery;
     if (!pending || !this.phone.update) return;
     const s = pending.session;
+    if (this.automaticRun?.session === s) return;
     const phone = this.phone.update!;
     if (
       (phone.browserInstanceId ?? phone.pageId) !==
@@ -976,20 +1087,25 @@ export class CalibrationWorkflow {
       s.interruptedFrom = this.displayStage(s);
       s.collectionFailed = s.stage === 'collecting';
     }
+    const run = this.automaticRun;
+    const automatic = run?.session === s ? run : undefined;
     const socketOnly =
       s.collectionFailed &&
-      this.batchAttempt !== s.id &&
       lostSocket &&
-      this.captureStopRevision === this.runtime.stopRevision;
+      this.captureStopRevision === this.runtime.stopRevision &&
+      (automatic
+        ? lostSocket !== 'controller' && !automatic.retried && owned
+        : this.batchAttempt !== s.id);
     this.socketRecovery = undefined;
     s.stage = 'interrupted';
     this.changed();
     s.error = message;
     s.target = undefined;
-    if (owned)
-      void this.runtime
-        .stopCalibrationOperation(Boolean(socketOnly))
-        .catch((e) => log('Failed to stop interrupted calibration:', e));
+    const before = this.runtime.stopRevision;
+    const stop = owned
+      ? this.runtime.stopCalibrationOperation(Boolean(socketOnly))
+      : undefined;
+    void stop?.catch((e) => log('Failed to stop interrupted calibration:', e));
     if (socketOnly && this.phone.update && this.captureOperationId) {
       this.socketRecovery = {
         session: s,
@@ -999,7 +1115,21 @@ export class CalibrationWorkflow {
         waitForPhoneUpdate: lostSocket !== 'controller',
         awaitingClose: lostSocket === 'phone-timeout',
         retryAfter: 0,
+        stop,
+        deadline: performance.now() + SAMPLING_RECOVERY_MS,
       };
+      if (automatic) {
+        this.automaticSamplingStop = {
+          id: s.id,
+          before,
+          after: this.runtime.stopRevision,
+        };
+        s.automaticRecovery = {
+          kind: 'phone',
+          reason: 'Phone feedback was lost during automatic collection',
+          attempt: 2,
+        };
+      }
     }
   }
   private markerCapture?: AssistedCalibrationSetup['markerCapture'];
@@ -1237,8 +1367,10 @@ export class CalibrationWorkflow {
     safePosition?: CartesianPose,
   ) {
     this.socketRecovery = undefined;
+    this.automaticSamplingStop = undefined;
     this.phoneHome = false;
     this.retryVerification = false;
+    this.debugLogo = undefined;
     this.receipt = undefined;
     this.receivingTarget = undefined;
     this.deviceRevision = this.options.deviceId
@@ -1314,6 +1446,138 @@ export class CalibrationWorkflow {
         409,
       );
   }
+  prepareSavedLogoCanvas(): LogoCanvasSession {
+    const id = this.options.deviceId;
+    const store = this.runtime.profileStore;
+    const binding = id && store.deviceBinding(id);
+    const saved = id && store.calibrationMapping(id)?.mapping;
+    const page = this.phone.assertConnected();
+    if (
+      !binding ||
+      !saved ||
+      !sameVisionMapping(saved.vision, binding.vision) ||
+      !sameLayoutGeometry(saved.layout, page.layout)
+    )
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Keep the saved calibration page open in its calibrated orientation',
+        409,
+      );
+    const guard = () => {
+      if (
+        this.phoneHome ||
+        this.markerRequest ||
+        this.imagingRequest ||
+        this.activeAction ||
+        store.deviceBinding(binding.deviceId)?.revision !== binding.revision
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'The saved drawing context changed',
+          409,
+        );
+    };
+    guard();
+    const canvas = this.prepareLogoCanvas(
+      page.layout,
+      (logo) => {
+        this.debugLogo = logo;
+      },
+      guard,
+    );
+    if (!canvas)
+      throw new RobotArmError(
+        'PHONE_PAGE_OUTDATED',
+        'Reload the phone calibration page before drawing',
+        409,
+      );
+    return canvas;
+  }
+  private prepareLogoCanvas(
+    layout: CalibrationPageUpdate['layout'],
+    setStatus: (status: CalibrationLogoStatus) => void,
+    guard: () => void,
+    minimumTravelTipZMm?: number,
+  ): LogoCanvasSession | undefined {
+    const page = this.phone.update;
+    if (page?.logoCanvasSupported !== 2 && page?.logoCanvasSupported !== 3)
+      return undefined;
+    const id = randomUUID();
+    let expectedAck = id;
+    const assertPage = () => {
+      guard();
+      const current = this.phone.assertConnected();
+      if (
+        current.pageId !== page.pageId ||
+        !sameLayout(current.layout, layout) ||
+        this.visibilityProbe
+      )
+        throw new RobotArmError(
+          'MAPPING_REQUIRED',
+          'Keep the same calibrated phone page open while drawing the logo',
+          409,
+        );
+      return current;
+    };
+    const check = () => {
+      if (assertPage().logoCanvasAck !== expectedAck)
+        throw new RobotArmError(
+          'PHONE_DISPLAY_NOT_READY',
+          'The phone drawing canvas is no longer ready',
+          409,
+        );
+    };
+    const drawing = { id, expectedStrokes: CALIBRATION_LOGO_STROKE_COUNT };
+    const waitForAck = async (signal: AbortSignal) => {
+      const deadline = Date.now() + 4_000;
+      while (
+        assertPage().logoCanvasAck !== expectedAck &&
+        Date.now() < deadline
+      )
+        await delay(50, undefined, { signal });
+      signal.throwIfAborted();
+      check();
+    };
+    return {
+      viewport: layout,
+      minimumTravelTipZMm,
+      prepare: async (signal) => {
+        signal.throwIfAborted();
+        assertPage();
+        const started = performance.now();
+        setStatus({ ...drawing, state: 'drawing' });
+        this.changed();
+        await waitForAck(signal);
+        debug(
+          `Logo canvas ready in ${Math.round(performance.now() - started)} ms`,
+        );
+      },
+      check,
+      retryStroke:
+        page.logoCanvasSupported === 3
+          ? async (stroke, signal) => {
+              signal.throwIfAborted();
+              check();
+              expectedAck = `${id}:${stroke}`;
+              setStatus({
+                ...drawing,
+                state: 'drawing',
+                retryFromStroke: stroke,
+              });
+              this.changed();
+              await waitForAck(signal);
+            }
+          : undefined,
+      finish: (error) => {
+        setStatus(
+          error
+            ? { ...drawing, state: 'failed', error }
+            : { ...drawing, state: 'completed' },
+        );
+        this.changed();
+      },
+    };
+  }
   async command(
     id: string,
     action: AssistedCalibrationAction,
@@ -1336,6 +1600,17 @@ export class CalibrationWorkflow {
       throw new RobotArmError(
         'BUSY',
         'Another calibration command is running',
+        409,
+      );
+    if (
+      s.automaticRecovery ||
+      (this.automaticRun?.finish &&
+        ['boundary-review', 'review'].includes(s.stage) &&
+        !(action === 'accept' && this.acceptingAutomatically))
+    )
+      throw new RobotArmError(
+        'BUSY',
+        'Automatic calibration is still running',
         409,
       );
     this.beginAction();
@@ -1697,17 +1972,28 @@ export class CalibrationWorkflow {
           );
         this.startSafeReturn();
       } else if (
-        ['start', 'start-automatic', 'start-fast', 'start-slide'].includes(
-          action,
-        )
+        [
+          'start',
+          'start-automatic',
+          'start-fast',
+          'start-slide',
+          'start-unattended-slide',
+        ].includes(action)
       ) {
         const mode =
-          action === 'start-slide'
+          action === 'start-slide' || action === 'start-unattended-slide'
             ? 'slide'
             : action === 'start-fast'
               ? 'fast'
               : 'standard';
-        await this.startCollection(s, mode, action !== 'start', confirmed);
+        const finish = action === 'start-unattended-slide';
+        await this.startCollection(
+          s,
+          mode,
+          action !== 'start',
+          confirmed,
+          finish,
+        );
       } else if (
         action === 'stop-capture' &&
         s.calibration?.auto &&
@@ -1810,8 +2096,17 @@ export class CalibrationWorkflow {
               }
             : undefined,
           () => this.assertAttempt(revision),
+          s.mapping &&
+            this.prepareLogoCanvas(
+              s.mapping.layout,
+              (logo) => {
+                s.logo = logo;
+              },
+              () => this.assertAttempt(revision),
+              this.batchTravelTipZMm,
+            ),
         );
-        s.stage = 'completed';
+        if (this.attemptRevision === revision) s.stage = 'completed';
       } else
         throw new RobotArmError(
           'INVALID_COMMAND',
@@ -1828,6 +2123,7 @@ export class CalibrationWorkflow {
     mode: AutomaticExplorationMode,
     automaticWorkflow: boolean,
     confirmed: boolean,
+    finish = false,
   ) {
     if (this.capture || s.stage !== 'ready')
       throw new RobotArmError(
@@ -1847,7 +2143,11 @@ export class CalibrationWorkflow {
         'Record a calibration reference position before collecting points',
         409,
       );
+    const stopRevision = this.runtime.stopRevision;
+    const revision = this.attemptRevision;
     await this.assertMechanicalFrame(true);
+    this.assertAttempt(revision);
+    this.runtime.assertStopRevision(stopRevision);
     const input = this.input!;
     if (
       this.runtime.profileStore.getTool(input.toolProfileId).contactFrame ===
@@ -1861,14 +2161,33 @@ export class CalibrationWorkflow {
         'Save installation teaching before flange contact calibration',
         409,
       );
-    this.captureStopRevision = this.runtime.stopRevision;
+    this.captureStopRevision = stopRevision;
     s.automaticWorkflow = automaticWorkflow;
     s.explorationMode = mode;
     s.stage = 'collecting';
     s.error = undefined;
     this.measurements = undefined;
     s.requiredReferenceZ = undefined;
-    this.capture = this.capturePoints()
+    const run: AutomaticRun | undefined =
+      mode === 'slide' && (finish || this.batchAttempt === s.id)
+        ? {
+            session: s,
+            finish,
+            retried: false,
+            checkpoint: {
+              direction: [],
+              heights: [],
+              grid: [],
+              samples: [],
+              gridBudgets: new Map(),
+              retriedTargets: new Set(),
+            },
+          }
+        : undefined;
+    this.automaticRun = run;
+    this.capture = (
+      run ? this.runAutomaticCollection(run) : this.capturePoints()
+    )
       .catch((e) => {
         if (['collecting', 'returning', 'safety'].includes(s.stage)) {
           this.interrupt(
@@ -1879,12 +2198,263 @@ export class CalibrationWorkflow {
               : undefined,
           );
           log('Automatic point collection failed:', e);
+        } else if (s.automaticRecovery && s.stage === 'interrupted') {
+          s.error = errorText(e);
+          s.errorDetails = isRobotArmError(e)
+            ? { code: e.code, status: e.status, details: e.details }
+            : undefined;
         }
       })
       .finally(() => {
-        this.changed();
+        if (run) {
+          this.automaticRun = undefined;
+          this.socketRecovery = undefined;
+          s.automaticRecovery = undefined;
+        }
         this.capture = undefined;
+        this.changed();
       });
+  }
+
+  private async runAutomaticCollection(run: AutomaticRun) {
+    const s = run.session;
+    const checkpoint = run.checkpoint;
+    const revision = this.attemptRevision;
+    while (true) {
+      let failure: unknown;
+      const recovery: { evidence?: SamplingRetryEvidence } = {};
+      try {
+        await this.capturePoints(checkpoint, (evidence) => {
+          recovery.evidence = evidence;
+        });
+      } catch (error) {
+        failure = error;
+      }
+      const evidence = recovery.evidence;
+      const pending = this.socketRecovery;
+      const retry =
+        evidence && this.samplingRetryScope(checkpoint, evidence.error);
+      if (run.retried || (!pending && (!retry || s.stage !== 'collecting'))) {
+        if (failure) throw failure;
+        if (run.finish) await this.finishAutomaticCollection(s, revision);
+        return;
+      }
+      const stopRevision = pending?.stopRevision ?? this.captureStopRevision!;
+      const originalPhone = pending?.phone ?? this.phone.update;
+      const guard = () => {
+        this.assertAttempt(revision);
+        this.runtime.assertStopRevision(stopRevision);
+        const current = this.phone.update;
+        if (
+          (current?.browserInstanceId ?? current?.pageId) !==
+            (originalPhone?.browserInstanceId ?? originalPhone?.pageId) ||
+          (current && !sameLayout(s.mapping!.layout, current.layout))
+        )
+          throw new RobotArmError(
+            'STALE_CONTEXT',
+            'Calibration context changed during recovery',
+            409,
+          );
+      };
+      guard();
+      const scope = retry ?? (checkpoint.direction.length ? 'point' : 'screen');
+      const mayReleaseLocally = scope !== 'screen' && Boolean(s.teachingId);
+      const releasableContact = mayReleaseLocally
+        ? (pending?.phone.contact?.id ?? evidence?.contactId)
+        : undefined;
+      if (pending)
+        await this.waitForSamplingReconnect(pending, guard, releasableContact);
+      else {
+        this.auditFailure(evidence!.error.message);
+        s.automaticRecovery = {
+          kind: 'sampling',
+          scope,
+          targetId: checkpoint.next?.targetId,
+          reason: evidence!.error.message,
+          attempt: 2,
+        };
+        this.changed();
+      }
+      run.retried = true;
+      await this.configuration.assertCurrent();
+      await this.assertMechanicalFrame(true);
+      const pose = await this.runtime.assertCalibrationMotionReady(
+        this.input!.toolProfileId,
+      );
+      guard();
+      const phone = this.phone.assertConnected();
+      if (
+        (phone.contact && phone.contact.id !== releasableContact) ||
+        Date.now() - this.phone.lastUpdateAt >=
+          CALIBRATION_PHONE_POLICY.measurementFreshMs
+      )
+        throw new RobotArmError(
+          'TOUCH_NOT_RELEASED',
+          'Fresh feedback confirming that the stylus is released is required before restarting sampling.',
+          409,
+        );
+      const reference = s.referencePosition!;
+      const expected =
+        evidence?.pose ?? (!pending || !s.teachingId ? reference : undefined);
+      if (
+        (expected && distance(pose.positionMm, expected.positionMm) > 0.5) ||
+        quaternionDistance(pose.orientation, reference.orientation) > 0.01
+      )
+        throw new RobotArmError(
+          'REFERENCE_RETURN_FAILED',
+          'The robot is not at the verified calibration reference. Check its position before restarting.',
+          409,
+        );
+      this.socketRecovery = undefined;
+      this.captureStopRevision = stopRevision;
+      this.captureOperationId = undefined;
+      this.measurements = undefined;
+      checkpoint.releaseBeforeResume = Boolean(phone.contact);
+      if (scope === 'screen') checkpoint.direction.length = 0;
+      if (scope !== 'point') {
+        checkpoint.heights.length = 0;
+        checkpoint.grid.length = 0;
+        checkpoint.samples.length = checkpoint.direction.length;
+        checkpoint.next = undefined;
+      }
+      this.fittedGeometry = undefined;
+      this.automaticEvidence = undefined;
+      s.explorationQuality = undefined;
+      s.fitResidualsMm = undefined;
+      s.requiredReferenceZ = undefined;
+      s.error = undefined;
+      s.errorDetails = undefined;
+      s.collectionFailed = undefined;
+      s.interruptedFrom = undefined;
+      if (s.automaticRecovery) {
+        s.automaticRecovery.kind = 'sampling';
+        s.automaticRecovery.scope = scope;
+        s.automaticRecovery.targetId =
+          scope === 'point' ? checkpoint.next?.targetId : undefined;
+      }
+      s.stage = 'collecting';
+      this.changed();
+    }
+  }
+
+  private samplingRetryScope(
+    checkpoint: FastSamplingCheckpoint,
+    error: RobotArmError,
+  ): 'point' | 'height' | 'screen' | undefined {
+    if (
+      error.code === 'CALIBRATION_QUALITY' &&
+      error.details?.recoveryPhase === 'height'
+    )
+      return 'height';
+    if (
+      error.code === 'CALIBRATION_QUALITY' &&
+      error.details?.recoveryPhase === 'reference'
+    )
+      return 'screen';
+    if (
+      error.code === 'PHONE_STEP_TIMEOUT' ||
+      error.code === 'VISION_UNAVAILABLE'
+    )
+      return checkpoint.direction.length ? 'point' : 'screen';
+    const details = error.details;
+    const retryDetails = details?.retryDetails;
+    if (
+      checkpoint.direction.length &&
+      checkpoint.next?.phase === 'grid' &&
+      error.code === 'TOUCH_CONTACT_LOST' &&
+      details &&
+      details.targetId === checkpoint.next.targetId &&
+      details.recovery === 'vertical-probe' &&
+      details.cause === 'TOUCH_CONTACT_LOST' &&
+      details.retryCause === 'PHONE_TOUCH_UNSTABLE' &&
+      retryDetails &&
+      typeof retryDetails === 'object' &&
+      'reason' in retryDetails &&
+      retryDetails.reason === 'intermittent_contact'
+    )
+      return 'point';
+    if (
+      !checkpoint.direction.length &&
+      error.code === 'PHONE_TOUCH_UNSTABLE' &&
+      error.details?.reason === 'intermittent_contact'
+    )
+      return 'screen';
+  }
+
+  private async waitForSamplingReconnect(
+    pending: NonNullable<CalibrationWorkflow['socketRecovery']>,
+    guard: () => void,
+    releasableContact?: string,
+  ) {
+    await pending.stop;
+    const { session: s } = pending;
+    const check = () => {
+      guard();
+      if (
+        this.socketRecovery !== pending ||
+        this.state !== s ||
+        s.stage !== 'interrupted' ||
+        this.currentGeometryKey() !== this.geometryKey
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Calibration context changed during recovery',
+          409,
+        );
+    };
+    while (performance.now() < pending.deadline) {
+      check();
+      const phone = this.phone.update;
+      if (
+        phone &&
+        phone !== pending.phone &&
+        this.phone.connected() &&
+        (!phone.contact || phone.contact.id === releasableContact)
+      ) {
+        try {
+          await this.runtime.recoverSamplingSocket(
+            pending.operationId,
+            pending.stopRevision,
+            check,
+          );
+          check();
+          return;
+        } catch (error) {
+          if (
+            !isRobotArmError(error) ||
+            !['BUSY', 'STATE_STALE'].includes(error.code)
+          )
+            throw error;
+        }
+      }
+      await delay(200);
+    }
+    throw new RobotArmError(
+      'PHONE_DISCONNECTED',
+      'The calibration page did not recover. Keep the original page visible and fullscreen before restarting.',
+      409,
+    );
+  }
+
+  private async finishAutomaticCollection(s: SessionState, revision: number) {
+    this.assertAttempt(revision);
+    this.runtime.assertStopRevision(this.captureStopRevision!);
+    s.automaticRecovery = undefined;
+    if (
+      s.stage === 'boundary-review' &&
+      !s.explorationQuality?.warnings?.some(
+        ({ percent }) => !Number.isFinite(percent) || percent < 0,
+      )
+    )
+      await this.verifyFittedBoundary(s);
+    if (s.stage === 'review') {
+      try {
+        const result = await this.acceptAutomatically();
+        if (!result.accepted) s.error = result.reasons.join(' · ');
+      } catch (error) {
+        if (s.stage === 'review') s.error = errorText(error);
+      }
+    }
   }
   private async recordPosition(
     recordTaskPosition = false,
@@ -1933,7 +2503,10 @@ export class CalibrationWorkflow {
     this.captureOperationId = this.runtime.current()?.requestId;
     await task;
   }
-  private async capturePoints() {
+  private async capturePoints(
+    checkpoint?: FastSamplingCheckpoint,
+    onRetry?: (evidence: SamplingRetryEvidence) => void,
+  ) {
     const s = this.state!;
     const input = this.input!;
     const tool = this.runtime.profileStore.getTool(input.toolProfileId);
@@ -1946,6 +2519,8 @@ export class CalibrationWorkflow {
         s.explorationMode,
       );
     this.measurements = measurements;
+    if (checkpoint && this.phone.connected())
+      measurements.receive(this.phone.update!);
     const collectionInput = {
       ...input,
       onPayloadRecheck: (waiting: boolean) => {
@@ -2003,7 +2578,8 @@ export class CalibrationWorkflow {
           this.changed();
         }
       };
-      if (teaching) await travelToReference('approach');
+      if (teaching && !checkpoint?.direction.length)
+        await travelToReference('approach');
       let lastMoveConfirmed = false;
       const checkCollecting = () => {
         host.check();
@@ -2037,6 +2613,7 @@ export class CalibrationWorkflow {
           reference,
           {
             tool,
+            checkpoint,
             webToImage: s.mapping!.webToImage,
             directTravel: allowDirectTravel
               ? {
@@ -2075,17 +2652,41 @@ export class CalibrationWorkflow {
         this.logSamplingTiming(s.id, samplingTiming);
       } catch (error) {
         this.logSamplingTiming(s.id, samplingTiming);
+        const retryScope =
+          checkpoint &&
+          isRobotArmError(error) &&
+          this.samplingRetryScope(checkpoint, error);
+        if (
+          this.automaticRun?.session === s &&
+          s.stage === 'collecting' &&
+          isRobotArmError(error) &&
+          error.code === 'PHONE_DISCONNECTED'
+        )
+          this.interrupt(error.message, error, 'phone-timeout');
         if (
           !lastMoveConfirmed ||
           !isRobotArmError(error) ||
-          !recoverableSamplingErrors.has(error.code)
+          (checkpoint && error.code === 'TOUCH_SAFETY_LIMIT') ||
+          (!recoverableSamplingErrors.has(error.code) && !retryScope)
         )
           throw error;
         checkCollecting();
         await this.assertMechanicalFrame(true);
         checkCollecting();
+        if (
+          retryScope &&
+          retryScope !== 'screen' &&
+          teaching &&
+          !this.automaticRun?.retried
+        ) {
+          const pose = await host.read();
+          checkCollecting();
+          onRetry?.({ error, pose, contactId: this.phone.update?.contact?.id });
+          throw error;
+        }
         try {
           await travelToReference('return');
+          onRetry?.({ error });
         } catch (returnError) {
           throw new RobotArmError(
             isRobotArmError(returnError)
@@ -2152,6 +2753,7 @@ export class CalibrationWorkflow {
       await outlineCheck;
     }
     if (s.stage !== 'collecting') return;
+    s.automaticRecovery = undefined;
     this.runtime.assertStopRevision(this.captureStopRevision!);
     if (s.explorationQuality?.warnings?.length) {
       s.stage = 'boundary-review';
@@ -2168,25 +2770,96 @@ export class CalibrationWorkflow {
     await this.adopt(this.fittedGeometry!, s.referencePosition!, false);
     if (s.stage !== 'returning') return;
     s.stage = 'safety';
-    s.calibration = await this.runtime.calibrationCommand(
-      s.calibration!.id,
-      {
-        type: 'verify-automatic-boundary',
-        accepted: true,
-        commandId: randomUUID(),
-        expectedRevision: s.calibration!.revision,
-      },
-      () => this.assertMechanicalFrame(true),
-      this.changed,
-      this.visibilityVerifier(),
-    );
+    const phone = this.phone.update;
+    const assertBoundaryFrame = async () => {
+      await this.assertMechanicalFrame(true);
+      const current = this.phone.update;
+      if (
+        s.explorationMode === 'slide' &&
+        (current?.browserInstanceId ?? current?.pageId) !==
+          (phone?.browserInstanceId ?? phone?.pageId)
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Calibration page changed during boundary verification',
+          409,
+        );
+    };
+    const verify = async (
+      boundaryStep?: CalibrationCommand['boundaryStep'],
+    ) => {
+      s.calibration = await this.runtime.calibrationCommand(
+        s.calibration!.id,
+        {
+          type: 'verify-automatic-boundary',
+          ...(boundaryStep && { boundaryStep }),
+          accepted: true,
+          commandId: randomUUID(),
+          expectedRevision: s.calibration!.revision,
+        },
+        assertBoundaryFrame,
+        this.changed,
+        this.visibilityVerifier(),
+      );
+    };
+    if (s.explorationMode === 'slide') {
+      const revision = this.attemptRevision;
+      let recovered = false;
+      for (const step of ['hover', 'contact', 'parking'] as const) {
+        this.assertAttempt(revision);
+        this.runtime.assertStopRevision(this.captureStopRevision!);
+        if (s.stage !== 'safety') return;
+        try {
+          this.boundaryPreflight = s;
+          try {
+            await assertBoundaryFrame();
+          } finally {
+            this.boundaryPreflight = undefined;
+          }
+          await verify(step);
+        } catch (error) {
+          const current = this.runtime.getSession(s.calibration!.id);
+          if (
+            recovered ||
+            s.stage !== 'safety' ||
+            current.status !== 'active' ||
+            !isRobotArmError(error) ||
+            error.details?.recoveryRequired === true ||
+            !['PHONE_DISCONNECTED', 'VISION_UNAVAILABLE'].includes(error.code)
+          )
+            throw error;
+          recovered = true;
+          this.boundaryPreflight = s;
+          s.automaticRecovery = {
+            kind: 'verification',
+            reason: error.message,
+            attempt: 2,
+          };
+          this.changed();
+          try {
+            await this.waitForVerificationPage(s, revision, phone);
+          } finally {
+            this.boundaryPreflight = undefined;
+            s.automaticRecovery = undefined;
+            this.changed();
+          }
+          s.calibration = current;
+          await verify(step);
+        }
+      }
+    } else await verify();
     if (s.stage !== 'safety') return;
-    if (
-      s.calibration.auto?.deferParkingBatchId ||
-      s.calibration.auto?.observationRecorded
-    ) {
-      s.safePosition = s.calibration.auto.observationRecorded
-        ? s.calibration.candidate!.observationPose
+    const calibration = s.calibration;
+    if (!calibration)
+      throw new RobotArmError(
+        'INVALID_SESSION',
+        'Boundary verification session is missing',
+        409,
+      );
+    const auto = calibration.auto;
+    if (auto?.deferParkingBatchId || auto?.observationRecorded) {
+      s.safePosition = auto.observationRecorded
+        ? calibration.candidate!.observationPose
         : undefined;
       s.stage = 'review';
     } else {
@@ -2194,11 +2867,53 @@ export class CalibrationWorkflow {
       s.stage = 'return-ready';
       if (s.teachingId)
         s.error =
-          s.calibration.auto?.cameraVisibility?.clear === false
+          auto?.cameraVisibility?.clear === false
             ? 'The camera could not verify the current screen after automatic parking. Check the live view or record a Safe Position manually.'
             : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }
     this.changed();
+  }
+
+  private async waitForVerificationPage(
+    s: SessionState,
+    revision: number,
+    phone?: CalibrationPageUpdate,
+  ) {
+    const deadline = performance.now() + SAMPLING_RECOVERY_MS;
+    await delay(200);
+    while (true) {
+      this.assertAttempt(revision);
+      this.runtime.assertStopRevision(this.captureStopRevision!);
+      const current = this.phone.update;
+      if (
+        s.stage !== 'safety' ||
+        (current?.browserInstanceId ?? current?.pageId) !==
+          (phone?.browserInstanceId ?? phone?.pageId) ||
+        (current && !sameLayout(s.mapping!.layout, current.layout))
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Calibration context changed during recovery',
+          409,
+        );
+      if (
+        this.phone.connected() &&
+        !current?.contact &&
+        Date.now() - this.phone.lastUpdateAt <
+          CALIBRATION_PHONE_POLICY.measurementFreshMs
+      ) {
+        await this.assertMechanicalFrame(true);
+        this.assertAttempt(revision);
+        return;
+      }
+      if (performance.now() >= deadline)
+        throw new RobotArmError(
+          'PHONE_DISCONNECTED',
+          'The calibration page did not recover. Keep the original page visible and fullscreen before restarting.',
+          409,
+        );
+      await delay(200);
+    }
   }
 
   /**
@@ -2671,14 +3386,73 @@ export class CalibrationWorkflow {
       reasons.push('Complete both boundary verification groups');
     if (!this.setup().teaching) reasons.push('Installation teaching changed');
     if (reasons.length) return { accepted: false, reasons };
-    await this.configuration.assertCurrent();
-    this.acceptingAutomatically = true;
+    const revision = this.attemptRevision;
+    const stopRevision = this.runtime.stopRevision;
+    const phone = this.phone.update;
+    const guard = () => {
+      this.assertAttempt(revision);
+      this.runtime.assertStopRevision(stopRevision);
+      const current = this.phone.update;
+      if (
+        this.state?.id !== state!.id ||
+        this.state.stage !== 'review' ||
+        (phone?.browserInstanceId ?? phone?.pageId) !==
+          (current?.browserInstanceId ?? current?.pageId) ||
+        (current && !sameLayout(state!.mapping!.layout, current.layout))
+      )
+        throw new RobotArmError(
+          'STALE_CONTEXT',
+          'Calibration context changed before saving',
+          409,
+        );
+    };
+    const accept = async () => {
+      guard();
+      await this.configuration.assertCurrent();
+      guard();
+      this.acceptingAutomatically = true;
+      try {
+        await this.command(state!.id, 'accept', true);
+      } finally {
+        this.acceptingAutomatically = false;
+      }
+    };
     try {
-      await this.command(state!.id, 'accept', true);
-      return { accepted: true, reasons: [] };
-    } finally {
-      this.acceptingAutomatically = false;
+      await accept();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      const phoneLost =
+        code === 'PHONE_DISCONNECTED' || code === 'PHONE_UNAVAILABLE';
+      if (
+        !phoneLost &&
+        !['VISION_UNAVAILABLE', 'EBUSY', 'EAGAIN'].includes(code ?? '')
+      )
+        throw error;
+      // The store commits both the candidate and session together. If the
+      // commit completed, preserve that result and avoid repeating acceptance.
+      const saved = this.runtime.getSession(c!.id);
+      if (
+        saved.status === 'completed' &&
+        saved.candidate?.acceptanceStatus === 'accepted'
+      ) {
+        if (this.state?.id === state!.id && this.state.stage === 'review') {
+          this.state.result = saved.candidate;
+          this.state.stage = 'completed';
+          this.changed();
+        }
+        return { accepted: true, reasons: [] };
+      }
+      await delay(200);
+      if (phoneLost) {
+        const deadline = performance.now() + SAMPLING_RECOVERY_MS;
+        while (!this.phone.connected() && performance.now() < deadline) {
+          guard();
+          await delay(200);
+        }
+      }
+      await accept();
     }
+    return { accepted: true, reasons: [] };
   }
   async stop() {
     const pending = this.activeAction;

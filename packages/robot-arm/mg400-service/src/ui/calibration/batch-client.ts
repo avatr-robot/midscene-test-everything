@@ -40,7 +40,6 @@ export class BatchClient {
     compliantSetupConfirmed?: true;
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual';
-    corridorConfirmed?: true;
   }) {
     return this.request<CalibrationBatchState>('start', input);
   }

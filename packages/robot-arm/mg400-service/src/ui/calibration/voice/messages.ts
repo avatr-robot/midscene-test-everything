@@ -49,7 +49,6 @@ export const voiceMessages = {
   autoFailed: ['Interrupted. Wait for standstill.', '标定中断，停稳再靠近。'],
   retryRegular: null,
   autoStopped: ['Wait for standstill.', '停稳再靠近。'],
-  batchClearance: null,
   batchPlacement: null,
   batchNext: ['Changing screens. Stand clear.', '即将跨屏，请让开。'],
   batchCompleted: [

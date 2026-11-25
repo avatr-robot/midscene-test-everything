@@ -17,7 +17,10 @@ import type {
   LinearMotionSequence,
   LinearSequenceTarget,
 } from '../kernel/contracts.js';
-import type { RobotDriverBoundary } from '../kernel/driver-boundary.js';
+import type {
+  LinearPreflightTiming,
+  RobotDriverBoundary,
+} from '../kernel/driver-boundary.js';
 import { executeContactPlan } from './contact-executor.js';
 import {
   releaseStageOptions,
@@ -28,7 +31,10 @@ import { planAction } from './planner.js';
 export interface ScreenMotionHost {
   adapter: RobotDriverBoundary;
   target(p: CartesianPose, ctx: ApplicationContext): void;
-  preflight(targets: MotionTarget[], ctx: ApplicationContext): Promise<void>;
+  preflight(
+    targets: MotionTarget[],
+    ctx: ApplicationContext,
+  ): Promise<LinearPreflightTiming | undefined>;
   move(
     p: CartesianPose,
     ctx: ApplicationContext,

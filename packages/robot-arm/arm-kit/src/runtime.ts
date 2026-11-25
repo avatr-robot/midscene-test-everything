@@ -11,6 +11,10 @@ import type {
   CalibrationBatchState,
 } from './assisted-contracts.js';
 import { assertParkingCorridor } from './calibration/camera-avoidance.js';
+import {
+  type LogoCanvasSession,
+  drawCalibrationLogo,
+} from './calibration/draw-logo.js';
 import { screenContactMm, screenPoseMm } from './calibration/geometry.js';
 import { savedCalibrationReference } from './calibration/reference-position.js';
 import { contactDepthMm, surfaceClearanceMm } from './calibration/surface.js';
@@ -86,10 +90,11 @@ import {
 import type { JogTarget, MotionRequest } from './kernel/contracts.js';
 import type {
   LinearMotionSequence,
+  LinearPreflightScope,
   LinearSequenceTarget,
 } from './kernel/contracts.js';
 import { MotionExecutor } from './kernel/motion-executor.js';
-import { evaluateReadiness } from './kernel/readiness.js';
+import { assertFresh, evaluateReadiness } from './kernel/readiness.js';
 import { checkRecovery } from './kernel/recovery.js';
 import { RobotKernel } from './kernel/robot-kernel.js';
 import { ProfileStore, validateScreen } from './runtime/profile-store.js';
@@ -142,6 +147,12 @@ export interface RobotArmRuntimeOptions {
   auditStore?: RobotActionAuditStore;
 }
 type Context = import('./application/context.js').ApplicationContext;
+export type DeviceMotionRequest = Omit<ActionRequest, 'action'>;
+export interface DeviceMotionTransfer {
+  fromCalibrationId: string;
+  route?: PreparedTransferRoute;
+  phase: (phase: 'moving' | 'arrived') => void;
+}
 /**
  * How long a jog keeps running without a renewal. The UI renews far more often;
  * this only bounds how far the arm can travel if a release never arrives.
@@ -837,6 +848,7 @@ export class RobotArmRuntime extends RobotKernel {
       | { protocol: 'auto-boundary-v1'; automatic?: boolean },
     binding?: DeviceBinding,
     guard?: () => void,
+    logo?: LogoCanvasSession,
   ): Promise<CalibrationProfile> {
     if (
       this.commandBusy ||
@@ -941,7 +953,18 @@ export class RobotArmRuntime extends RobotKernel {
         binding,
       );
       this.session = s;
-      this.release('completed');
+      if (logo) {
+        const failure = await this.drawAcceptedLogo(id, c, logo, signal);
+        if (failure)
+          this.audit(
+            'calibration',
+            id,
+            'failed',
+            { action: 'draw-logo', calibrationProfileId: c.id },
+            failure,
+          );
+      }
+      this.release(signal.aborted ? 'stopped' : 'completed');
       return structuredClone(c);
     } finally {
       this.commandBusy = false;
@@ -1029,14 +1052,310 @@ export class RobotArmRuntime extends RobotKernel {
    */
   private lastStablePose?: CartesianPose;
   private screenSequence?: LinearMotionSequence;
-  private screenMotionHost(): ScreenMotionHost {
+  private async drawAcceptedLogo(
+    requestId: string,
+    calibration: CalibrationProfile,
+    canvas: LogoCanvasSession,
+    signal: AbortSignal,
+    saved?: { ctx: Context; transfer?: DeviceMotionTransfer },
+  ): Promise<RobotArmError | undefined> {
+    this.motionSubmitted = false;
+    const check = () => {
+      this.check();
+      canvas.check();
+    };
+    try {
+      await canvas.prepare(signal);
+      check();
+      const ctx = saved?.ctx ?? this.context(calibration);
+      if (canvas.minimumTravelTipZMm !== undefined)
+        ctx.minimumTravelTipZMm = Math.max(
+          ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+          canvas.minimumTravelTipZMm,
+        );
+      await this.ready(ctx.tool);
+      check();
+      const transfer = saved?.transfer;
+      const retryStroke = canvas.retryStroke?.bind(canvas);
+      const observation =
+        saved && atTravelHeight(calibration.observationPose, ctx);
+      await drawCalibrationLogo(
+        this.screenMotionHost({ reuseSequencePreflight: true }),
+        calibration,
+        ctx,
+        canvas.viewport,
+        check,
+        observation
+          ? {
+              start: transfer ? observation : undefined,
+              returnTo: observation,
+              beforeMotion: transfer
+                ? async () => {
+                    check();
+                    await this.executeTransfer(
+                      transfer.fromCalibrationId,
+                      transfer.route,
+                      calibration,
+                      (phase) => {
+                        if (phase === 'moving') check();
+                        transfer.phase(phase);
+                      },
+                    );
+                    check();
+                  }
+                : undefined,
+            }
+          : undefined,
+        retryStroke
+          ? (stroke, hover, error) =>
+              this.retryLogoStroke(
+                calibration,
+                ctx,
+                hover,
+                requestId,
+                stroke,
+                error,
+                check,
+                () => retryStroke(stroke, signal),
+              )
+          : undefined,
+      );
+      await this.profileStore.clearOperation(requestId, check);
+      canvas.finish();
+    } catch (error) {
+      let cause = error;
+      const retryFailed =
+        isRobotArmError(error) && error.details?.logoRetryFailed === true;
+      if (retryFailed) this.requireOperatorRecovery();
+      if (this.motionSubmitted || signal.aborted) {
+        this.requireRecovery('interruption');
+        if (!signal.aborted) this.stopGeneration++;
+        try {
+          await (this.stopPromise ?? this.controlledStop());
+          this.screenSequence?.dispose();
+          this.screenSequence = undefined;
+        } catch (stopError) {
+          cause = new RobotArmError(
+            'RECOVERY_REQUIRED',
+            'Logo drawing stopped. Robot stop could not be confirmed.',
+            503,
+            { cause: String(stopError), original: String(error) },
+          );
+        }
+      } else {
+        // A sequence may have been prepared but not submitted when the canvas changed.
+        this.screenSequence?.dispose();
+        this.screenSequence = undefined;
+      }
+      if (retryFailed)
+        await this.profileStore
+          .markOperation(requestId, this.operation!.kind, true)
+          .catch((storeError) => {
+            this.audit(
+              'control',
+              requestId,
+              'failed',
+              { control: 'persist-logo-retry-recovery' },
+              storeError,
+            );
+          });
+      const details = isRobotArmError(cause) ? cause.details : undefined;
+      const failure = new RobotArmError(
+        isRobotArmError(cause) ? cause.code : 'SCREEN_ACTION_FAILED',
+        cause instanceof Error ? cause.message : String(cause),
+        isRobotArmError(cause) ? cause.status : 500,
+        {
+          ...details,
+          motionOccurred: this.motionSubmitted,
+          recoveryRequired: this.recoveryRequired,
+        },
+      );
+      canvas.finish(failure.message);
+      return failure;
+    }
+  }
+  private async retryLogoStroke(
+    calibration: CalibrationProfile,
+    ctx: Context,
+    hover: CartesianPose,
+    requestId: string,
+    stroke: number,
+    error: RobotArmError,
+    check: () => void,
+    resetCanvas: () => Promise<void>,
+  ): Promise<void> {
+    check();
+    if (this.recoveryRequired || this.stopInProgress || this.interrupt)
+      throw new RobotArmError(
+        'RECOVERY_REQUIRED',
+        'Another stop or recovery is already in progress',
+        409,
+      );
+    this.requireRecovery('interruption');
+    const revision = this.stopRevision;
+    const recoveryGuard = this.recoveryGuard();
+    const guard = () => {
+      this.assertStopRevision(revision);
+      recoveryGuard();
+      check();
+    };
+    const policy = this.adapter.adapter.readinessPolicy;
+    const maxStateAgeMs = Math.min(200, policy.maxStateAgeMs);
+    const readStoppedPose = async () => {
+      guard();
+      const started = performance.now();
+      const status = await this.adapter.status(true);
+      guard();
+      const { ready, reasons } = evaluateReadiness(status, {
+        ...policy,
+        maxStateAgeMs,
+      });
+      if (!ready || this.softwarePaused)
+        throw new RobotArmError(
+          'UNSAFE_RECOVERY',
+          'A fresh enabled, stationary, fault-free state is required for retry',
+          409,
+          { reasons },
+        );
+      const sample = await this.adapter.readPose();
+      guard();
+      assertFresh(status.quality, maxStateAgeMs);
+      assertFresh(sample, maxStateAgeMs);
+      if (performance.now() - started > maxStateAgeMs)
+        throw new RobotArmError(
+          'STATE_STALE',
+          'Stopped state and position could not be read within the retry window',
+          409,
+        );
+      return sample.pose;
+    };
+    const audit = { control: 'prepare-logo-stroke-retry', requestId, stroke };
+    this.audit('control', requestId, 'dispatched', audit, error);
+    await this.audited(
+      'control',
+      audit,
+      async () => {
+        // Stop the old motion queue while retaining the drawing's lease.
+        await this.controlledStop();
+        const actual = await readStoppedPose();
+        if (quaternionDistance(actual.orientation, hover.orientation) > 0.01)
+          throw new RobotArmError(
+            'UNSAFE_RECOVERY',
+            'Stopped tool orientation differs from the planned stroke',
+            409,
+          );
+        const lift = this.safeLift(actual, calibration, ctx, true);
+        if (distance(actual.positionMm, lift.positionMm) > 0.001) {
+          const options = stageOptions(
+            ctx.screen,
+            'recovery',
+            this.adapter.resolver.descriptor('motion.linear')!.constraints!,
+            this.adapter.capabilities.jointCount,
+          );
+          await this.preflight(
+            [{ name: 'Logo retry lift', pose: lift, options }],
+            ctx,
+          );
+          const verified = await readStoppedPose();
+          if (
+            distance(actual.positionMm, verified.positionMm) > 0.1 ||
+            quaternionDistance(actual.orientation, verified.orientation) > 0.005
+          )
+            throw new RobotArmError(
+              'UNSAFE_RECOVERY',
+              'Stopped pose changed while checking the retry lift',
+              409,
+            );
+          await this.move(
+            lift,
+            ctx,
+            options.speed,
+            options.acceleration,
+            undefined,
+            guard,
+          );
+        }
+        guard();
+        await resetCanvas();
+        const resumed = await readStoppedPose();
+        if (
+          distance(lift.positionMm, resumed.positionMm) > 0.5 ||
+          quaternionDistance(lift.orientation, resumed.orientation) > 0.01
+        )
+          throw new RobotArmError(
+            'UNSAFE_RECOVERY',
+            'The tool is no longer at the verified lift pose',
+            409,
+          );
+        guard();
+        this.recoveryRequired = false;
+      },
+      requestId,
+    );
+  }
+  async drawSavedLogo(
+    request: DeviceMotionRequest,
+    vision: VisionBinding,
+    canvas: LogoCanvasSession,
+    transfer?: DeviceMotionTransfer,
+  ) {
+    if (this.aiTaskRequestId)
+      throw new RobotArmError('BUSY', 'An AI task owns the workstation', 409);
+    const recovery = this.acquireForWork('action', request.requestId);
+    if (recovery) await recovery;
+    const signal = this.abort!.signal;
+    const audit = {
+      action: 'draw-logo',
+      calibrationProfileId: request.calibrationProfileId,
+    };
+    try {
+      const { ctx, calibration } = this.resolveScreenMotion(request, vision);
+      const failure = await this.drawAcceptedLogo(
+        request.requestId,
+        calibration,
+        canvas,
+        signal,
+        { ctx, transfer },
+      );
+      if (failure) throw failure;
+      this.release('completed');
+      this.audit('action', request.requestId, 'completed', audit);
+    } catch (error) {
+      const status = signal.aborted ? 'stopped' : 'failed';
+      this.release(status, error);
+      this.audit('action', request.requestId, status, audit, error);
+      throw error;
+    }
+  }
+  private screenMotionHost(
+    options: { reuseSequencePreflight?: boolean } = {},
+  ): ScreenMotionHost {
+    const preflight =
+      options.reuseSequencePreflight && this.abort
+        ? this.adapter.createLinearPreflightScope(this.abort.signal)
+        : undefined;
     return {
       adapter: this.adapter,
       target: (p, ctx) => this.target(p, ctx),
-      preflight: (targets, ctx) => this.preflight(targets, ctx),
+      preflight: async (targets, ctx) => {
+        await this.preflight(targets, ctx, preflight);
+        return this.adapter.linearPreflightTiming(preflight);
+      },
       move: (p, ctx, speed, acceleration, contact) =>
-        this.move(p, ctx, speed, acceleration, contact),
-      beginSequence: (targets, ctx) => this.beginScreenSequence(targets, ctx),
+        this.move(
+          p,
+          ctx,
+          speed,
+          acceleration,
+          contact,
+          undefined,
+          contact?.reuseStableArrival &&
+            process.env.MIDSCENE_LOGO_TRAVEL_PREFLIGHT !== '0'
+            ? preflight
+            : undefined,
+        ),
+      beginSequence: (targets, ctx) =>
+        this.beginScreenSequence(targets, ctx, preflight),
       stable: (p, ctx) => this.stable(p, ctx),
       hold: (ms) => this.hold(ms),
       safeLift: (p, c, ctx, onScreen) => this.safeLift(p, c, ctx, onScreen),
@@ -1046,6 +1365,7 @@ export class RobotArmRuntime extends RobotKernel {
   private async beginScreenSequence(
     targets: readonly LinearSequenceTarget[],
     ctx: Context,
+    preflight?: LinearPreflightScope,
   ) {
     if (!this.adapter.resolver.descriptor('motion.linear-sequence'))
       return undefined;
@@ -1056,28 +1376,41 @@ export class RobotArmRuntime extends RobotKernel {
       this.operation!.kind,
     );
     this.check();
-    const sequence = await this.adapter.beginLinearSequence(targets, {
-      timeoutMs: ctx.screen.motionTimeoutMs,
-      signal: this.abort?.signal,
-    });
+    const sequence = await this.adapter.beginLinearSequence(
+      targets,
+      {
+        timeoutMs: ctx.screen.motionTimeoutMs,
+        signal: this.abort?.signal,
+      },
+      preflight,
+    );
     if (!sequence) return undefined;
     this.screenSequence = sequence;
+    const submitQueued = sequence.submitQueued?.bind(sequence);
+    const accept = async (
+      submit: () => ReturnType<LinearMotionSequence['submit']>,
+    ) => {
+      this.check();
+      this.assertAppliedPayload(ctx.tool);
+      this.motionSubmitted = true;
+      const accepting = submit();
+      this.accepting = accepting;
+      try {
+        const receipt = await accepting;
+        this.check();
+        return receipt;
+      } finally {
+        this.accepting = undefined;
+      }
+    };
     return {
       ...sequence,
-      submit: async (index: number, mode?: 'feedback' | 'terminal') => {
-        this.check();
-        this.assertAppliedPayload(ctx.tool);
-        this.motionSubmitted = true;
-        const accepting = sequence.submit(index, mode);
-        this.accepting = accepting;
-        try {
-          const receipt = await accepting;
-          this.check();
-          return receipt;
-        } finally {
-          this.accepting = undefined;
-        }
-      },
+      submitQueued: submitQueued
+        ? (blendPercentages: readonly number[]) =>
+            accept(() => submitQueued(blendPercentages))
+        : undefined,
+      submit: (index: number, mode?: 'feedback' | 'terminal') =>
+        accept(() => sequence.submit(index, mode)),
       finish: async () => {
         const result = await sequence.finish();
         this.check();
@@ -1183,6 +1516,8 @@ export class RobotArmRuntime extends RobotKernel {
     const saved = this.profileStore.list();
     this.softwarePaused = saved.softwarePaused === true;
     this.operatorStop ??= saved.operatorStop;
+    if (saved.pendingOperation?.requiresOperatorRecovery)
+      this.requireOperatorRecovery();
     if (
       this.softwarePaused ||
       saved.pendingOperation ||
@@ -1617,31 +1952,37 @@ export class RobotArmRuntime extends RobotKernel {
   private async preflight(
     targets: MotionTarget[],
     ctx: Context,
+    scope?: LinearPreflightScope,
   ): Promise<void> {
     await this.confirmAppliedPayload(ctx.tool);
-    for (const target of targets) {
-      this.check();
-      try {
-        this.target(target.pose, ctx);
-        await this.adapter.preflightCartesian(
-          'linear',
-          target.pose,
-          target.options,
-        );
-      } catch (error) {
-        if (isRobotArmError(error))
-          throw new RobotArmError(
-            error.code,
-            `${target.name}: ${error.message}`,
-            error.status,
-            { ...error.details, target: target.name },
+    const validate = async (
+      preflight: (pose: CartesianPose, options: MotionOptions) => Promise<void>,
+    ) => {
+      for (const target of targets) {
+        this.check();
+        try {
+          this.target(target.pose, ctx);
+          await preflight(target.pose, target.options);
+        } catch (error) {
+          if (isRobotArmError(error))
+            throw new RobotArmError(
+              error.code,
+              `${target.name}: ${error.message}`,
+              error.status,
+              { ...error.details, target: target.name },
+            );
+          throw new Error(
+            `${target.name}: ${error instanceof Error ? error.message : String(error)}`,
           );
-        throw new Error(
-          `${target.name}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        }
+        this.check();
       }
-      this.check();
-    }
+    };
+    if (scope) await this.adapter.preflightLinearTargets(scope, validate);
+    else
+      await validate((pose, options) =>
+        this.adapter.preflightCartesian('linear', pose, options),
+      );
   }
   private async move(
     p: CartesianPose,
@@ -1649,16 +1990,18 @@ export class RobotArmRuntime extends RobotKernel {
     speed = ctx.screen.actionSpeed,
     acceleration = ctx.screen.actionAcceleration,
     contact?: ContactMoveOptions,
+    check = () => this.check(),
+    preflight?: LinearPreflightScope,
   ): Promise<MotionResult> {
     await this.confirmAppliedPayload(ctx.tool);
     await this.ready();
-    this.check();
+    check();
     this.target(p, ctx);
     await this.profileStore.markOperation(
       this.operation!.requestId,
       this.operation!.kind,
     );
-    this.check();
+    check();
     const result = await this.motionExecutor.move(
       p,
       undefined,
@@ -1671,8 +2014,9 @@ export class RobotArmRuntime extends RobotKernel {
       },
       ctx.screen.motionTimeoutMs,
       {
-        check: () => this.check(),
+        check,
         signal: this.abort?.signal,
+        preflight,
         accepting: (promise) => {
           this.accepting = promise;
         },
@@ -1681,10 +2025,13 @@ export class RobotArmRuntime extends RobotKernel {
         },
       },
     );
-    if (contact?.skipStable) {
-      // The driver confirmed arrival from fresh measured samples, and a second
-      // dwell here would be spent with the tool already on the glass. The
-      // driver's own measured pose keeps the trail honest.
+    if (
+      contact?.skipStable ||
+      (contact?.reuseStableArrival &&
+        contact.arrivalSamples !== undefined &&
+        result.pose &&
+        (result.stableArrivalSamples ?? 0) >= contact.arrivalSamples)
+    ) {
       this.lastStablePose = result.pose ?? this.lastStablePose;
       return result;
     }
@@ -2273,15 +2620,52 @@ export class RobotArmRuntime extends RobotKernel {
     this.check();
     phase('arrived');
   }
+  private resolveScreenMotion(
+    request: DeviceMotionRequest,
+    deviceVision?: VisionBinding,
+  ) {
+    const ctx = this.context(request);
+    assertScreenMapping(ctx.screen);
+    const calibration = this.profileStore.getCalibration(
+      request.calibrationProfileId,
+    );
+    this.validateCalibration(calibration, request, ctx);
+    if (
+      this.profileStore.contextKey(request, calibration.id, deviceVision) !==
+      request.contextKey
+    )
+      throw new RobotArmError(
+        'EXECUTION_CONTEXT_CHANGED',
+        'Coordinate or image context changed. Refresh Device; motion settings do not require recalibration.',
+        409,
+      );
+    const mapping = ctx.screen.phoneMapping;
+    const vision = deviceVision ?? this.profileStore.list().workstation?.vision;
+    if (SCREEN_DRIFT_DETECTION_ENABLED && vision?.validity?.state === 'invalid')
+      throw new RobotArmError(
+        'CALIBRATION_MISMATCH',
+        'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
+        409,
+      );
+    if (
+      !mapping ||
+      !vision ||
+      vision.width !== ctx.screen.pixelWidth ||
+      vision.height !== ctx.screen.pixelHeight ||
+      mapping.visionFingerprint !== vision.fingerprint
+    )
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Confirm camera-to-phone mapping before image actions',
+        409,
+      );
+    return { ctx, calibration };
+  }
   async execute(
     request: ActionRequest,
     aiTaskRequestId?: string,
     deviceVision?: VisionBinding,
-    transfer?: {
-      fromCalibrationId: string;
-      route?: PreparedTransferRoute;
-      phase: (phase: 'moving' | 'arrived') => void;
-    },
+    transfer?: DeviceMotionTransfer,
   ): Promise<ActionResult> {
     if (this.aiTaskRequestId && this.aiTaskRequestId !== aiTaskRequestId)
       throw new RobotArmError('BUSY', 'An AI task owns the workstation', 409);
@@ -2312,44 +2696,9 @@ export class RobotArmRuntime extends RobotKernel {
     const started = Date.now();
     try {
       await this.screenActionGuard?.(request);
-      ctx = this.context(request);
-      assertScreenMapping(ctx.screen);
-      c = this.profileStore.getCalibration(request.calibrationProfileId);
-      this.validateCalibration(c, request, ctx);
-      if (
-        this.profileStore.contextKey(request, c.id, deviceVision) !==
-        request.contextKey
-      )
-        throw new RobotArmError(
-          'EXECUTION_CONTEXT_CHANGED',
-          'Coordinate or image context changed. Refresh Device; motion settings do not require recalibration.',
-          409,
-        );
-      {
-        const mapping = ctx.screen.phoneMapping;
-        const vision =
-          deviceVision ?? this.profileStore.list().workstation?.vision;
-        if (
-          SCREEN_DRIFT_DETECTION_ENABLED &&
-          vision?.validity?.state === 'invalid'
-        )
-          throw new RobotArmError(
-            'CALIBRATION_MISMATCH',
-            'The saved screen outline no longer matches the camera view. Recalibrate before moving.',
-            409,
-          );
-        if (
-          !mapping ||
-          !vision ||
-          vision.width !== ctx.screen.pixelWidth ||
-          vision.height !== ctx.screen.pixelHeight ||
-          mapping.visionFingerprint !== vision.fingerprint
-        )
-          throw new RobotArmError(
-            'MAPPING_REQUIRED',
-            'Confirm camera-to-phone mapping before image actions',
-          );
-      }
+      const resolved = this.resolveScreenMotion(request, deviceVision);
+      ctx = resolved.ctx;
+      c = resolved.calibration;
       await this.ready();
       this.check();
       if (transfer) {

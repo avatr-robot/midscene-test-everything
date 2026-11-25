@@ -17,6 +17,7 @@ import {
 import { assertOrientation, assertPose, assertTarget } from '../domain.js';
 import type {
   LinearMotionSequence,
+  LinearPreflightScope,
   LinearSequenceOptions,
   LinearSequenceTarget,
   RobotArmAdapter,
@@ -40,6 +41,19 @@ function poseSignature(pose: CartesianPose): string {
   ]);
 }
 
+function linearTargetSignature(
+  pose: CartesianPose,
+  options: MotionOptions,
+): string {
+  return JSON.stringify([poseSignature(pose), options]);
+}
+
+export interface LinearPreflightTiming {
+  inverseKinematicsMs: number;
+  inverseKinematicsCalls: number;
+  inverseKinematicsReused: number;
+}
+
 /** Vendor-neutral state and motion boundary. No screen geometry or vendor branches. */
 export class RobotDriverBoundary {
   private generation = 0;
@@ -50,6 +64,16 @@ export class RobotDriverBoundary {
    * duplicate query for that target can be consumed once.
    */
   private preflighted?: { signature: string; generation: number };
+  private readonly linearPreflights = new WeakMap<
+    LinearPreflightScope,
+    {
+      generation: number;
+      payloadEpoch: number;
+      targets: Set<string>;
+      inversePoses: Set<string>;
+      timing: LinearPreflightTiming;
+    }
+  >();
   private payloadInvalidationReason?: PayloadInvalidationReason;
   private payloadEnabling = false;
   private readonly payloadSessionId = randomUUID();
@@ -164,9 +188,75 @@ export class RobotDriverBoundary {
     this.invalidatePayload('disconnected');
     return this.adapter.driver.disconnect();
   }
+  createLinearPreflightScope(signal: AbortSignal): LinearPreflightScope {
+    const scope = Object.freeze({ signal });
+    this.linearPreflights.set(scope, {
+      generation: this.generation,
+      payloadEpoch: this.payloadEpoch,
+      targets: new Set(),
+      inversePoses: new Set(),
+      timing: {
+        inverseKinematicsMs: 0,
+        inverseKinematicsCalls: 0,
+        inverseKinematicsReused: 0,
+      },
+    });
+    return scope;
+  }
+  private linearPreflight(scope: LinearPreflightScope | undefined) {
+    if (!scope || scope.signal.aborted) return undefined;
+    const preflight = this.linearPreflights.get(scope);
+    return preflight?.generation === this.generation &&
+      preflight.payloadEpoch === this.payloadEpoch
+      ? preflight
+      : undefined;
+  }
+  linearPreflightTiming(scope: LinearPreflightScope | undefined) {
+    const timing = this.linearPreflight(scope)?.timing;
+    return (
+      timing && {
+        ...timing,
+        inverseKinematicsMs: Math.round(timing.inverseKinematicsMs),
+      }
+    );
+  }
+  async preflightLinearTargets(
+    scope: LinearPreflightScope,
+    validate: (
+      target: (pose: CartesianPose, options: MotionOptions) => Promise<void>,
+    ) => Promise<void>,
+  ): Promise<void> {
+    const evidence = this.linearPreflight(scope);
+    const check = () => {
+      if (!evidence || this.linearPreflight(scope) !== evidence)
+        throw new RobotArmError(
+          'ACTION_STOPPED',
+          'Linear path preflight is no longer valid',
+          409,
+        );
+    };
+    try {
+      check();
+      await this.assertReady();
+      check();
+      // Path planning sends no motion. Check readiness around the batch and
+      // keep checking each target and the operation's generation within it.
+      await validate(async (pose, options) => {
+        check();
+        await this.preflightTarget('linear', pose, options, undefined, scope);
+      });
+      check();
+      await this.assertReady();
+      check();
+    } catch (error) {
+      this.linearPreflights.delete(scope);
+      throw error;
+    }
+  }
   async beginLinearSequence(
     input: readonly LinearSequenceTarget[],
     options: LinearSequenceOptions,
+    preflight?: LinearPreflightScope,
   ): Promise<LinearMotionSequence | undefined> {
     const implementation = this.resolver.method('beginLinearSequence');
     if (!implementation) return undefined;
@@ -180,8 +270,21 @@ export class RobotDriverBoundary {
           409,
         );
     };
+    const scoped = preflight?.signal === options.signal ? preflight : undefined;
+    if (this.linearPreflight(scoped)) await this.assertReady();
+    const reused: LinearSequenceTarget[] = [];
     for (const target of targets) {
-      await this.preflightCartesian('linear', target.pose, target.options);
+      if (
+        this.linearPreflight(scoped)?.targets.has(
+          linearTargetSignature(target.pose, target.options),
+        )
+      ) {
+        this.validateCartesian('linear', target.pose, target.options);
+        await this.assertCartesianFreedom(target.pose);
+        reused.push(target);
+      } else {
+        await this.preflightCartesian('linear', target.pose, target.options);
+      }
       validateMotionOptions(
         target.options,
         this.resolver.descriptor('motion.linear-sequence')!.constraints!,
@@ -189,14 +292,30 @@ export class RobotDriverBoundary {
       );
       check();
     }
-    const sequence = await implementation(targets, options);
+    if (reused.length && !this.linearPreflight(scoped)) {
+      for (const target of reused) {
+        await this.preflightCartesian('linear', target.pose, target.options);
+        check();
+      }
+    }
+    const sequence =
+      reused.length === targets.length && this.linearPreflight(scoped)
+        ? await implementation(targets, options, scoped)
+        : await implementation(targets, options);
     try {
       check();
     } catch (error) {
       sequence.dispose();
       throw error;
     }
+    const submitQueued = sequence.submitQueued?.bind(sequence);
     return {
+      submitQueued: submitQueued
+        ? (blendPercentages) => {
+            check();
+            return submitQueued(blendPercentages);
+          }
+        : undefined,
       submit: (index, mode) => {
         check();
         return sequence.submit(index, mode);
@@ -591,22 +710,40 @@ export class RobotDriverBoundary {
     );
     return implementation;
   }
-  async preflightCartesian(
+  preflightCartesian(
     kind: 'linear' | 'ptp',
     pose: CartesianPose,
     options: MotionOptions,
     workspace?: Workspace,
   ): Promise<void> {
+    return this.preflightTarget(kind, pose, options, workspace);
+  }
+  private async preflightTarget(
+    kind: 'linear' | 'ptp',
+    pose: CartesianPose,
+    options: MotionOptions,
+    workspace?: Workspace,
+    scope?: LinearPreflightScope,
+  ): Promise<void> {
     const generation = this.generation;
+    const preflight = this.linearPreflight(scope);
     this.validateCartesian(kind, pose, options, workspace);
-    await this.assertReady();
+    if (!scope) await this.assertReady();
     await this.assertCartesianFreedom(pose);
+    const signature = poseSignature(pose);
     const inverse = this.resolver.method('inverseKinematics');
+    const reusedInverse = inverse && preflight?.inversePoses.has(signature);
+    let inverseMs = 0;
     if (inverse) {
-      validateJoints(
-        await inverse(structuredClone(pose)),
-        this.adapter.kinematics,
-      );
+      if (!reusedInverse) {
+        const started = performance.now();
+        const target = structuredClone(pose);
+        const joints = scope
+          ? await inverse(target, scope)
+          : await inverse(target);
+        validateJoints(joints, this.adapter.kinematics);
+        inverseMs = performance.now() - started;
+      }
     } else {
       const reachability = this.resolver.method('checkReachability');
       if (!reachability)
@@ -617,17 +754,29 @@ export class RobotDriverBoundary {
         );
       await reachability(structuredClone(pose));
     }
-    if (generation !== this.generation)
+    if (!scope) await this.assertReady();
+    if (
+      generation !== this.generation ||
+      (scope && (!preflight || this.linearPreflight(scope) !== preflight))
+    )
       throw new RobotArmError(
         'ACTION_STOPPED',
         'Motion interrupted during target preflight',
         409,
       );
-    await this.assertReady();
-    this.preflighted = {
-      signature: poseSignature(pose),
-      generation: this.generation,
-    };
+    if (!scope) this.preflighted = { signature, generation };
+    if (preflight) {
+      preflight.targets.add(linearTargetSignature(pose, options));
+      if (inverse) {
+        preflight.inversePoses.add(signature);
+        if (reusedInverse) {
+          preflight.timing.inverseKinematicsReused++;
+        } else {
+          preflight.timing.inverseKinematicsCalls++;
+          preflight.timing.inverseKinematicsMs += inverseMs;
+        }
+      }
+    }
   }
   private async assertCartesianFreedom(pose: CartesianPose): Promise<void> {
     const lockedAxes = (['x', 'y', 'z'] as const).filter(
@@ -667,6 +816,7 @@ export class RobotDriverBoundary {
     pose: CartesianPose,
     options: MotionOptions,
     workspace?: Workspace,
+    scope?: LinearPreflightScope,
   ): Promise<MotionHandle> {
     pose = structuredClone(pose);
     options = structuredClone(options);
@@ -678,17 +828,21 @@ export class RobotDriverBoundary {
       options,
       workspace,
     );
-    // Explicit SDK bounds retain their existing semantics. Workstation moves
-    // have no user bounds and must recheck reachability before every submission.
+    const signature = poseSignature(pose);
+    const evidence =
+      kind === 'linear' && !workspace ? this.linearPreflight(scope) : undefined;
+    const planned = evidence?.inversePoses.has(signature)
+      ? evidence
+      : undefined;
     try {
       const preflighted =
         !workspace &&
         this.preflighted?.generation === this.generation &&
-        this.preflighted.signature === poseSignature(pose);
+        this.preflighted.signature === signature;
       // Spend any ticket up front: this move owns it, and a failed preflight
       // must not leave a stale target for the next move to skip.
       this.preflighted = undefined;
-      if (!workspace && !preflighted)
+      if (!workspace && !preflighted && !planned)
         await this.preflightCartesian(kind, pose, options);
       await this.assertCartesianFreedom(pose);
       await this.assertReady();
@@ -699,20 +853,26 @@ export class RobotDriverBoundary {
         beforeMotionSubmission: true,
       });
     }
-    if (generation !== this.generation)
+    if (
+      generation !== this.generation ||
+      (planned && this.linearPreflight(scope) !== planned)
+    )
       throw new RobotArmError(
         'ACTION_STOPPED',
         'Motion interrupted before submission',
         409,
       );
-    return implementation(pose, options);
+    return planned
+      ? this.resolver.require('moveLinear')(pose, options, scope)
+      : implementation(pose, options);
   }
   moveLinear(
     pose: CartesianPose,
     options: MotionOptions = {},
     workspace?: Workspace,
+    preflight?: LinearPreflightScope,
   ) {
-    return this.move('linear', pose, options, workspace);
+    return this.move('linear', pose, options, workspace, preflight);
   }
   movePtp(
     pose: CartesianPose,

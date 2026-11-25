@@ -24,6 +24,7 @@ import {
   pageOrderedQuad,
   quadCenter,
 } from '@midscene/arm-kit/internal/calibration/screen-position';
+import { verificationContextKey } from '@midscene/arm-kit/internal/calibration/verification/session-state';
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import { contactPoint, flangePose } from '@midscene/arm-kit/internal/domain';
 import type {
@@ -55,7 +56,7 @@ export class CalibrationBatch {
   private choice?: 'retry' | 'skip';
   private writes: Promise<unknown> = Promise.resolve();
   private stopRevision?: number;
-  private transfer?: CalibrationBatchPlan['transfer'];
+  private activeAttempt?: { host: CalibrationHost; id: string };
   constructor(private readonly devices: PlaygroundDevices) {}
   get active() {
     return Boolean(this.task || this.starting || this.stopping || this.busy);
@@ -68,7 +69,6 @@ export class CalibrationBatch {
       const saved = this.runtime.profileStore.list().calibrationBatch;
       if (!saved) return null;
       this.state = structuredClone(saved);
-      this.transfer = this.state.transfer;
       if (['running', 'waiting', 'stopping'].includes(this.state.status)) {
         this.state.status = 'stopped';
         this.state.revision++;
@@ -78,12 +78,89 @@ export class CalibrationBatch {
         if (row && !terminal(row.status)) row.status = 'stopped';
       }
     }
+    if (!this.active) this.restorePendingParking(this.state);
     const snapshot = structuredClone(this.state);
     if (this.sharedParkingDebug)
       snapshot.sharedParkingDebug = structuredClone(this.sharedParkingDebug);
     if (snapshot.status === 'running' && this.automaticSharedParking)
       snapshot.automaticSharedParking = true;
     return snapshot;
+  }
+  private restorePendingParking(state: CalibrationBatchState) {
+    const { cameraId } = state;
+    const row = state.items[state.currentIndex];
+    if (
+      state.status !== 'stopped' ||
+      !state.usesSharedSafePosition ||
+      state.sharedSafePositionVerified ||
+      state.transfer ||
+      !cameraId ||
+      row?.status !== 'stopped' ||
+      row.calibrationProfileId ||
+      !row.runIds.length ||
+      !state.items.every(
+        (item) => item === row || item.status === 'completed',
+      ) ||
+      !this.cameraSetups(cameraId).length
+    )
+      return;
+
+    const selection = this.selection(cameraId);
+    if (
+      selection.robotProfileId !== state.robotProfileId ||
+      selection.toolProfileId !== state.toolProfileId
+    )
+      return;
+    const store = this.runtime.profileStore;
+    const teaching = store.installationTeaching(selection);
+    if (!teaching) return;
+    const tool = store.getTool(selection.toolProfileId);
+    const robot = store.getRobot(selection.robotProfileId);
+    const minimumTravelTipZMm = contactPoint(
+      teaching.referencePose,
+      tool.offsetMm,
+    ).z;
+    const { sessions } = store.list();
+    const entries = this.entries(cameraId);
+    if (entries.length !== state.items.length) return;
+    const byDevice = new Map(entries.map((entry) => [entry.target.id, entry]));
+    const profilesCurrent = state.items.every((item) => {
+      const entry = byDevice.get(item.deviceId);
+      const calibration = entry?.calibration;
+      const screen = entry?.screen;
+      if (
+        !calibration ||
+        !screen ||
+        calibration.pendingParkingBatchId !== state.id ||
+        (item !== row && item.calibrationProfileId !== calibration.id)
+      )
+        return false;
+      const key = verificationContextKey({
+        installationTeaching: teaching,
+        minimumTravelTipZMm,
+        robot,
+        tool,
+        screen,
+      });
+      return sessions?.some(
+        (session) =>
+          session.status === 'completed' &&
+          session.auto?.deferParkingBatchId === state.id &&
+          session.candidate?.id === calibration.id &&
+          session.context?.connectionIdentity === robot.connectionIdentity &&
+          session.context.verificationKey === key,
+      );
+    });
+    if (!profilesCurrent) return;
+
+    // Acceptance can reach disk before the queue sees the result. Rebuild only
+    // the parking checkpoint; the normal command still validates and moves it.
+    state.contextVersion = this.contextVersion(cameraId);
+    state.revision++;
+    row.status = 'completed';
+    row.calibrationProfileId = byDevice.get(row.deviceId)!.calibration!.id;
+    row.note = row.error;
+    row.error = undefined;
   }
   private update(work: () => void) {
     work();
@@ -204,7 +281,6 @@ export class CalibrationBatch {
           409,
         );
     }
-    this.transfer = state.transfer;
   }
   private async assertPerspectives(cameraId: string) {
     for (const target of this.devices
@@ -669,69 +745,6 @@ export class CalibrationBatch {
     );
     const first = current >= 0 ? current : reference;
     if (first > 0) entries.unshift(...entries.splice(first, 1));
-    let transfer: CalibrationBatchPlan['transfer'];
-    if (entries.length > 1 && entries.every((e) => e.calibration && e.screen)) {
-      const points = entries.flatMap((e) =>
-        [
-          [0, 0],
-          [e.screen!.physicalWidthMm, 0],
-          [e.screen!.physicalWidthMm, e.screen!.physicalHeightMm],
-          [0, e.screen!.physicalHeightMm],
-        ].map(([x, y]) => ({
-          x:
-            e.calibration!.origin.x +
-            e.calibration!.xAxis.x * x +
-            e.calibration!.yAxis.x * y,
-          y:
-            e.calibration!.origin.y +
-            e.calibration!.xAxis.y * x +
-            e.calibration!.yAxis.y * y,
-          z:
-            e.calibration!.origin.z +
-            e.calibration!.xAxis.z * x +
-            e.calibration!.yAxis.z * y,
-        })),
-      );
-      const highest = Math.max(...points.map((p) => p.z));
-      const parking = this.savedSharedPosition(cameraId);
-      const corridorPoints = parking
-        ? [
-            ...points,
-            contactPoint(
-              parking,
-              this.runtime.profileStore.getTool(input.toolProfileId).offsetMm,
-            ),
-          ]
-        : points;
-      transfer = {
-        travelTipZMm: Math.max(
-          Math.ceil(highest + 60),
-          Math.ceil(tip.z),
-          contactPoint(
-            teaching.referencePose,
-            this.runtime.profileStore.getTool(input.toolProfileId).offsetMm,
-          ).z,
-        ),
-        highestObstacleZMm: Math.ceil(highest + 40),
-        clearanceMm: 20,
-        corridor: {
-          minX: Math.floor(
-            Math.min(tip.x, ...corridorPoints.map((p) => p.x)) - 40,
-          ),
-          maxX: Math.ceil(
-            Math.max(tip.x, ...corridorPoints.map((p) => p.x)) + 40,
-          ),
-          minY: Math.floor(
-            Math.min(tip.y, ...corridorPoints.map((p) => p.y)) - 40,
-          ),
-          maxY: Math.ceil(
-            Math.max(tip.y, ...corridorPoints.map((p) => p.y)) + 40,
-          ),
-        },
-        waypoints: [],
-        corridorConfirmed: true,
-      };
-    }
     const version = createHash('sha256')
       .update(
         semanticJson([
@@ -744,7 +757,6 @@ export class CalibrationBatch {
             this.devices.entries.get(e.target.id)?.camera.getCorrection(),
           ]),
           input,
-          transfer,
           this.runtime.stopRevision,
         ]),
       )
@@ -752,7 +764,6 @@ export class CalibrationBatch {
     return {
       cameraId,
       version,
-      transfer,
       screens: entries.map((e, index) => {
         const quad =
           e.calibration && e.screen && calibrationQuad(e.calibration, e.screen);
@@ -780,7 +791,6 @@ export class CalibrationBatch {
     planVersion: string;
     horizontalConfirmed: boolean;
     compliantSetupConfirmed?: boolean;
-    corridorConfirmed?: boolean;
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual' | 'automatic';
   }) {
@@ -806,12 +816,11 @@ export class CalibrationBatch {
         );
       if (
         input.horizontalConfirmed !== true ||
-        (samplingMode === 'slide' && input.compliantSetupConfirmed !== true) ||
-        (plan.transfer && input.corridorConfirmed !== true)
+        (samplingMode === 'slide' && input.compliantSetupConfirmed !== true)
       )
         throw new RobotArmError(
           'CONFIRMATION_REQUIRED',
-          'Confirm fixed screens, a compliant tip for Fast, and the full arm corridor before starting',
+          'Confirm fixed screens and a compliant tip for Fast before starting',
           409,
         );
       const selected = this.selection(input.cameraId);
@@ -820,7 +829,6 @@ export class CalibrationBatch {
       const sharedSafePosition = this.savedSharedPosition(input.cameraId);
       this.assertLaunchCurrent(launchRevision);
       this.stopRevision = this.runtime.stopRevision;
-      this.transfer = plan.transfer;
       this.state = {
         id: randomUUID(),
         revision: 0,
@@ -836,7 +844,6 @@ export class CalibrationBatch {
         acceptance: input.acceptance ?? 'automatic',
         planVersion: plan.version,
         contextVersion,
-        transfer: plan.transfer,
         items: plan.screens.map((s) => ({
           deviceId: s.screenId,
           screenId: s.screenId,
@@ -941,6 +948,15 @@ export class CalibrationBatch {
   }
   private check(signal: AbortSignal) {
     signal.throwIfAborted();
+    const attempt = this.activeAttempt;
+    if (
+      this.runtime.stopRevision !== this.stopRevision &&
+      attempt?.host.service.followsAutomaticSamplingStop?.(
+        attempt.id,
+        this.stopRevision!,
+      )
+    )
+      this.stopRevision = this.runtime.stopRevision;
     this.runtime.assertStopRevision(this.stopRevision!);
   }
   private async wait(signal: AbortSignal) {
@@ -1111,21 +1127,51 @@ export class CalibrationBatch {
                 'Check camera mapping before starting calibration',
                 409,
               );
-            const imaging = host.service.setup().imaging?.state;
+            let imaging = host.service.setup().imaging?.state;
             if (imaging !== 'ready' && imaging !== 'unsupported') {
               await this.ensureBatchImaging(state.cameraId!, [row.deviceId]);
               this.check(signal);
-              const prepared = host.service.setup().imaging?.state;
-              if (prepared !== 'ready' && prepared !== 'unsupported')
+              imaging = host.service.setup().imaging?.state;
+              if (imaging !== 'ready' && imaging !== 'unsupported')
                 throw new RobotArmError(
                   'VISION_UNAVAILABLE',
                   'Camera imaging is not ready for this screen.',
                   409,
                 );
             }
+            if (imaging === 'ready') {
+              const applied = await this.devices.activateCameraImaging(
+                state.cameraId!,
+                row.deviceId,
+              );
+              const active =
+                applied.state === 'ready' &&
+                applied.screenId === row.deviceId &&
+                applied.active === true;
+              void this.runtime.auditStore?.record({
+                kind: 'calibration',
+                id: state.id,
+                outcome: active ? 'completed' : 'failed',
+                detail: {
+                  stage: 'camera-imaging-activation',
+                  deviceId: row.deviceId,
+                  attempt: row.attempts,
+                  imaging: applied,
+                },
+              });
+              if (!active)
+                throw new RobotArmError(
+                  'VISION_UNAVAILABLE',
+                  applied.state === 'error' && applied.message
+                    ? applied.message
+                    : 'Could not activate camera imaging for this screen.',
+                  409,
+                );
+            }
             this.check(signal);
             let session = await host.service.create({ batch: true });
             attemptId = session.id;
+            this.activeAttempt = { host, id: attemptId };
             const readAttempt = () => {
               const status = host.service.status();
               if (!status || status.id !== attemptId)
@@ -1136,7 +1182,7 @@ export class CalibrationBatch {
                 );
               return status;
             };
-            host.service.setBatchTravelHeight(this.transfer?.travelTipZMm);
+            host.service.setBatchTravelHeight(state.transfer?.travelTipZMm);
             if (state.usesSharedSafePosition)
               host.service.setBatchParking(state.id);
             const selection = this.selection(state.cameraId!);
@@ -1156,7 +1202,7 @@ export class CalibrationBatch {
                 const z = Math.max(
                   contactPoint(teaching.referencePose, tool.offsetMm).z,
                   source.origin.z + 30,
-                  this.transfer?.travelTipZMm ?? Number.NEGATIVE_INFINITY,
+                  state.transfer?.travelTipZMm ?? Number.NEGATIVE_INFINITY,
                 );
                 host.service.setBatchReference(
                   flangePose(
@@ -1215,10 +1261,38 @@ export class CalibrationBatch {
                   row.status = 'completed';
                   row.calibrationProfileId = current.result!.id;
                   state.contextVersion = this.contextVersion(state.cameraId!);
-                  row.note = undefined;
+                  row.note = current.logo?.error;
                   row.error = undefined;
                 });
                 break;
+              }
+              if (current.automaticRecovery) {
+                const recovery = current.automaticRecovery;
+                const progress = {
+                  phase:
+                    recovery.kind === 'phone'
+                      ? 'recovering-phone'
+                      : recovery.kind === 'verification'
+                        ? 'retrying-verification'
+                        : `retrying-${recovery.scope ?? 'screen'}`,
+                  message: recovery.reason,
+                  index: recovery.attempt,
+                  total: 2,
+                };
+                if (semanticJson(row.progress) !== semanticJson(progress))
+                  await this.update(() => {
+                    state.status = 'running';
+                    row.status = 'exploring';
+                    row.progress = progress;
+                  });
+                if (Date.now() > deadline)
+                  throw new RobotArmError(
+                    'AUTO_MOVE_TIMEOUT',
+                    'Screen exploration exceeded the batch time limit',
+                    409,
+                  );
+                await this.wait(signal);
+                continue;
               }
               if (
                 ['cancelled', 'interrupted', 'capture-failed'].includes(
@@ -1339,7 +1413,6 @@ export class CalibrationBatch {
                 row.status = 'failed';
                 row.error =
                   error instanceof Error ? error.message : String(error);
-                state.status = 'waiting';
               });
               // A controller fault or a failed submitted move stops all screens.
               const runtime = await this.runtime.state();
@@ -1349,11 +1422,29 @@ export class CalibrationBatch {
                 !runtime.state.connected
               )
                 throw error;
-              await this.update(() => {
-                state.status = 'failed';
-              });
-              return undefined;
+              if (
+                !attemptId &&
+                state.acceptance === 'automatic' &&
+                state.transfer?.corridorConfirmed &&
+                error instanceof RobotArmError &&
+                error.code === 'PHONE_UNAVAILABLE' &&
+                state.items
+                  .slice(state.currentIndex + 1)
+                  .some((item) => !terminal(item.status))
+              ) {
+                await this.assertResumeContext();
+                this.check(signal);
+                if (!this.choice) break;
+              }
+              if (!this.choice) {
+                await this.update(() => {
+                  state.status = 'failed';
+                });
+                return undefined;
+              }
             }
+          } finally {
+            this.activeAttempt = undefined;
           }
           if (this.choice === 'retry') retry = true;
           else if (this.choice === 'skip')
@@ -1391,13 +1482,14 @@ export class CalibrationBatch {
       }
       this.check(signal);
       await this.update(() => {
-        state.status = state.items.some((r) => r.status === 'failed')
-          ? 'failed'
-          : 'completed';
-        state.currentIndex = Math.min(
-          state.currentIndex,
-          state.items.length - 1,
+        const failed = state.items.findIndex(
+          (item) => item.status === 'failed',
         );
+        state.status = failed >= 0 ? 'failed' : 'completed';
+        state.currentIndex =
+          failed >= 0
+            ? failed
+            : Math.min(state.currentIndex, state.items.length - 1);
       });
       return last;
     } catch (error) {
@@ -1405,9 +1497,31 @@ export class CalibrationBatch {
         signal.aborted || this.runtime.stopRevision !== this.stopRevision;
       const missing =
         error instanceof RobotArmError ? error.details?.screens : undefined;
+      const row = state.items[state.currentIndex];
+      const host = row && this.devices.entries.get(row.deviceId)?.host;
+      await host?.service.stop();
+      let message = error instanceof Error ? error.message : String(error);
+      let savedCalibration: CalibrationProfile | undefined;
+      if (
+        stopped &&
+        !signal.aborted &&
+        error instanceof RobotArmError &&
+        error.code === 'ACTION_STOPPED'
+      ) {
+        const attempt = host?.service.status();
+        if (
+          attempt &&
+          attempt.id === row?.runIds.at(-1) &&
+          attempt.logo?.error
+        ) {
+          message = attempt.logo.error;
+          if (attempt.result && calibrationAccepted(attempt.result, state.id))
+            savedCalibration = attempt.result;
+        }
+      }
       await this.update(() => {
         state.status = stopped ? 'stopped' : 'failed';
-        state.error = error instanceof Error ? error.message : String(error);
+        state.error = message;
         state.sharedParkingFailureVisibility = Array.isArray(missing)
           ? sharedParkingVisibility
           : undefined;
@@ -1421,15 +1535,30 @@ export class CalibrationBatch {
               return [item?.name ?? screen.id];
             })
           : undefined;
-        const row = state.items[state.currentIndex];
         if (row && !terminal(row.status)) {
-          row.status = stopped ? 'stopped' : 'failed';
-          row.error = state.error;
+          if (savedCalibration) {
+            row.status = 'completed';
+            row.calibrationProfileId = savedCalibration.id;
+            row.note = message;
+            row.error = undefined;
+            state.contextVersion = this.contextVersion(state.cameraId!);
+            const next = state.items.findIndex(
+              (item, index) =>
+                index > state.currentIndex && !terminal(item.status),
+            );
+            if (next >= 0) state.currentIndex = next;
+          } else {
+            row.status = stopped ? 'stopped' : 'failed';
+            row.error = state.error;
+          }
+        }
+        if (!row) {
+          const failed = state.items.findIndex(
+            (item) => item.status === 'failed',
+          );
+          if (failed >= 0) state.currentIndex = failed;
         }
       });
-      const row = state.items[state.currentIndex];
-      if (row)
-        await this.devices.entries.get(row.deviceId)?.host?.service.stop();
       return undefined;
     } finally {
       this.automaticSharedParking = false;

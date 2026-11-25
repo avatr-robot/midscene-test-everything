@@ -38,8 +38,26 @@ export const assistedCalibrationZh: Record<string, string> = {
   'Preparing to lift and return to the reference. Keep the path clear.':
     '机械臂准备抬起并返回参考位，请让开运动路径。',
   'Continue to boundary verification': '继续边界验证',
-  'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.':
-    '采样拟合后自动执行悬停与接触边界验证，再记录安全位置、检查并保存。',
+  'Calibration automatically retries eligible interruptions, verifies the boundaries, finds a Safe Position, and saves the result when all checks pass.':
+    '标定会自动恢复可重试的中断，并完成边界验证和安全位检查。全部检查通过后自动保存。',
+  'Reconnecting to the calibration page…': '正在重新连接标定页…',
+  'Resuming fast sampling at the interrupted point…':
+    '正在从中断的采样点继续快标…',
+  'Repeating fast height measurement…': '正在重新测量屏幕高度…',
+  'Restarting fast sampling from the reference position…':
+    '正在从参考位重新开始快标…',
+  'Resuming boundary verification…': '正在继续边界验证…',
+  'Fast calibration could not establish stable sliding contact. Check the screen and stylus.':
+    '快标未能建立稳定的滑动接触。请检查屏幕固定情况和笔尖。',
+  'The stylus did not release before resuming fast calibration.':
+    '恢复快标前未确认笔尖释放。',
+  'Saving the verified calibration…': '正在保存通过验证的标定结果…',
+  'The calibration page did not recover. Keep the original page visible and fullscreen before restarting.':
+    '标定页未恢复。请让原页面保持可见和全屏，再重新开始。',
+  'Fresh feedback confirming that the stylus is released is required before restarting sampling.':
+    '重新采样前需要收到笔尖已释放的最新反馈。',
+  'The robot is not at the verified calibration reference. Check its position before restarting.':
+    '机械臂不在已确认的标定参考位。请检查当前位置后重新开始。',
   'I confirm the screen is horizontal and securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.':
     '我已确认屏幕水平固定、触控笔尖有弹性缓冲且工作区净空，可以开始采样和自动边界验证。',
   'The screen is horizontal and securely fixed.': '屏幕已水平放置并固定。',

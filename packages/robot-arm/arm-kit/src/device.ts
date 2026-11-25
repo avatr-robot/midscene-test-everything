@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { LogoCanvasSession } from './calibration/draw-logo.js';
 import { type CameraSession, CameraSessionManager } from './camera/session.js';
 import {
   type ActionResult,
@@ -319,6 +320,35 @@ export class RobotArmDevice {
       .catch(() => undefined);
     return pending;
   }
+  /** @internal Preview the saved calibration with the real touch canvas. */
+  async drawLogo(canvas: () => LogoCanvasSession): Promise<void> {
+    this.assertAlive();
+    const operation = (async () => {
+      const { calibration, key } = await this.resolveContext();
+      this.assertAlive();
+      return this.options.arm.drawLogoForDevice(
+        this.ownerId,
+        {
+          robotProfileId: calibration.robotProfileId,
+          toolProfileId: calibration.toolProfileId,
+          screenProfileId: calibration.screenProfileId,
+          calibrationProfileId: calibration.id,
+          requestId: randomUUID(),
+          contextKey: key,
+        },
+        async () => (await this.snapshot()).binding,
+        canvas,
+        this.lifetime.signal,
+      );
+    })();
+    this.pending.add(operation);
+    try {
+      await operation;
+    } finally {
+      this.pending.delete(operation);
+    }
+  }
+
   /** Run the manager's calibration interaction under this screen's queue ownership. */
   async withCalibration(
     interaction: (signal: AbortSignal) => Promise<CalibrationProfile>,

@@ -41,6 +41,8 @@ export async function runBoundaryVerification(
     fast?: boolean;
     /** Automatic hover verification hands off at corner 1 to the contact group. */
     continueAtBoundary?: boolean;
+    /** Trace one closed inner contour without lifting between its edges. */
+    continuousContact?: boolean;
   } = {},
 ) {
   if (s.stage !== 'verification' || !s.candidate || s.dragMode)
@@ -183,7 +185,7 @@ export async function runBoundaryVerification(
     });
   const initialPose = await host.adapter.getPose();
   add('Initial lift', host.safeLift(initialPose, s.candidate, ctx, false));
-  if (group === 'contact') {
+  if (group === 'contact' && !settings.continuousContact) {
     for (let i = 0; i < 4; i++) {
       add(
         `Corner ${i + 1} hover`,
@@ -206,6 +208,12 @@ export async function runBoundaryVerification(
     add('Boundary start hover', hover[0], undefined, 'edges', 0);
     for (let i = 1; i <= 4; i++)
       add(`Boundary edge ${i}`, hover[i % 4], hoverHoldMs, 'edges', i);
+  } else if (settings.continuousContact) {
+    add('Boundary start hover', contourHover[0]);
+    add('Boundary start contact', contourContact[0], ctx.screen.contactMs);
+    for (let i = 1; i <= 4; i++)
+      add(`Boundary edge ${i}`, contourContact[i % 4], undefined, 'edges', i);
+    add('Boundary end lift', contourHover[0], undefined, 'edges', 4);
   } else {
     // Demonstrate each inner edge separately. Lift between segments so a lost
     // contact cannot become a new gesture that continues around the next turn.
@@ -241,7 +249,6 @@ export async function runBoundaryVerification(
   // Move at safe height to above the observation pose, then settle.
   if (
     !(
-      settings.fast &&
       settings.allowUnacceptedHover &&
       settings.continueAtBoundary &&
       group === 'hover'
@@ -281,17 +288,19 @@ export async function runBoundaryVerification(
     a.orientation.y === b.orientation.y &&
     a.orientation.z === b.orientation.z &&
     a.orientation.w === b.orientation.w;
-  let reached = initialPose;
+  let reached: CartesianPose | undefined;
   try {
     for (const step of steps) {
       host.check();
       s.progress = step.progress;
       host.progress?.(s);
-      if (!settings.fast || !samePose(reached, step.pose))
-        await host.move(step.pose, ctx, options.speed, options.acceleration);
-      // Retain arrival checks and dwell even when no motion command is needed.
-      await host.stable(step.pose, ctx);
-      reached = step.pose;
+      if (!reached || !samePose(reached, step.pose)) {
+        if (!reached && samePose(initialPose, step.pose))
+          await host.stable(step.pose, ctx);
+        else
+          await host.move(step.pose, ctx, options.speed, options.acceleration);
+        reached = step.pose;
+      }
       if (step.holdMs) await host.hold(step.holdMs);
     }
     record.outcome = 'completed';

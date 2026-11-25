@@ -8,6 +8,7 @@ import {
 } from '@rstest/core';
 import { RobotArmError } from '../src/contracts.js';
 import {
+  type LinearSequencePort,
   type SequenceFeedback,
   createLinearMotionSequence,
   isSequenceObservationError,
@@ -50,6 +51,16 @@ function fixture() {
     };
   });
   const release = rstest.fn(() => clearInterval(timer));
+  const submitQueued = rstest.fn<
+    NonNullable<LinearSequencePort['submitQueued']>
+  >(async (targets) => {
+    actual = targets.at(-1)!.pose;
+    return {
+      id: 'queued',
+      acceptedAt: Date.now(),
+      submittedAt: Date.now(),
+    };
+  });
   const sequence = createLinearMotionSequence(
     [
       { pose: pose(), options: { speed: { kind: 'ratio', value: 0.1 } } },
@@ -57,6 +68,8 @@ function fixture() {
         pose: pose(0, 0, 50),
         options: { speed: { kind: 'ratio', value: 0.1 } },
       },
+      { pose: pose(10, 0, 50), options: {} },
+      { pose: pose(10, 0, 60), options: {} },
     ],
     { timeoutMs: 1000 },
     {
@@ -72,6 +85,7 @@ function fixture() {
           submittedAt: Date.now(),
         };
       }),
+      submitQueued,
       terminal,
       release,
       stopped: () => stopped,
@@ -79,6 +93,7 @@ function fixture() {
   );
   return {
     sequence,
+    submitQueued,
     terminal,
     release,
     repeat: () => {
@@ -116,6 +131,38 @@ describe('ordered linear sequence', () => {
     expect(f.terminal).toHaveBeenCalledTimes(1);
     expect(f.release).toHaveBeenCalledTimes(1);
   });
+  it('queues intermediate targets after arrival and confirms the tail before the lift', async () => {
+    const f = fixture();
+    await f.sequence.submit(0);
+    await expect(f.sequence.submitQueued!([10, 0])).rejects.toMatchObject({
+      code: 'INVALID_SEQUENCE',
+    });
+    const landed = f.sequence.waitForHandoff();
+    await rstest.advanceTimersByTimeAsync(40);
+    await landed;
+    await expect(f.sequence.submitQueued!([10, 10])).rejects.toMatchObject({
+      code: 'INVALID_SEQUENCE',
+    });
+    await f.sequence.submitQueued!([10, 0]);
+    expect(f.submitQueued).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ pose: pose(0, 0, 50) }),
+        expect.objectContaining({ pose: pose(10, 0, 50) }),
+      ],
+      [10, 0],
+    );
+    await expect(f.sequence.submit(3)).rejects.toMatchObject({
+      code: 'INVALID_SEQUENCE',
+    });
+    const closed = f.sequence.waitForCurrent();
+    await rstest.advanceTimersByTimeAsync(500);
+    await expect(closed).resolves.toMatchObject({ pose: pose(10, 0, 50) });
+    await f.sequence.submit(3);
+    const lifted = f.sequence.finish();
+    await rstest.advanceTimersByTimeAsync(500);
+    await expect(lifted).resolves.toMatchObject({ pose: pose(10, 0, 60) });
+  });
+
   it('does not count repeated frames as three arrival samples', async () => {
     const f = fixture();
     f.repeat();

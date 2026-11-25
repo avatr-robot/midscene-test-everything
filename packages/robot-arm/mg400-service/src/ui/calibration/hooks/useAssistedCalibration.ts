@@ -140,7 +140,7 @@ export function useAssistedCalibration(
           case 'start-fast':
           case 'start-slide':
           case 'start-automatic':
-          case 'retry-standard':
+          case 'start-unattended-slide':
             speakCalibration('autoStarted', 2);
             break;
           case 'verify-boundary':

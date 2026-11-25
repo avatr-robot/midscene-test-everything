@@ -240,6 +240,9 @@ export interface CalibrationPageUpdate {
   markersPainted?: boolean;
   markerRequest?: string;
   imagingPatternSupported?: true;
+  /** Version 3 also supports discarding an interrupted stroke. */
+  logoCanvasSupported?: 2 | 3;
+  logoCanvasAck?: string;
   visibilityProbeAck?: string;
   imagingPatternAck?: string;
   /** Painted height in CSS pixels when iOS sizes the first row around system overlays. */
@@ -288,7 +291,20 @@ export interface CalibrationPageUpdate {
     travelPx: number;
   }>;
 }
+export interface CalibrationLogoStatus {
+  id: string;
+  expectedStrokes: number;
+  state: 'drawing' | 'completed' | 'failed';
+  retryFromStroke?: number;
+  error?: string;
+}
+export interface DebugLogoDrawingStatus {
+  screenId: string;
+  status: 'running' | 'completed' | 'failed';
+  error?: string;
+}
 export interface CalibrationPageReply {
+  logo?: CalibrationLogoStatus;
   /** Briefly identify the phone selected in Playground. */
   selectionHint?: true;
   visibilityProbe?: {
@@ -429,6 +445,7 @@ export interface WebVerificationEvidence {
 }
 export interface AssistedCalibrationState {
   id: string;
+  logo?: CalibrationLogoStatus;
   cameraBoundaryPosition?: CartesianPose;
   cameraBoundaryEndPosition?: CartesianPose;
   teachingId?: string;
@@ -476,6 +493,14 @@ export interface AssistedCalibrationState {
   /** Stage at which this attempt was interrupted. */
   interruptedFrom?: AssistedCalibrationState['stage'];
   awaitingSocketRecovery?: boolean;
+  finishingAutomatically?: boolean;
+  automaticRecovery?: {
+    kind: 'phone' | 'sampling' | 'verification';
+    scope?: 'point' | 'height' | 'screen';
+    targetId?: string;
+    reason: string;
+    attempt: number;
+  };
   anchors: WebPoint[];
   points: CapturedCalibrationPoint[];
   /** Diagnostic 3D residuals, never a substitute for click verification. */
@@ -597,6 +622,7 @@ export type AssistedCalibrationAction =
   | 'return-safe'
   | 'start'
   | 'start-automatic'
+  | 'start-unattended-slide'
   | 'start-fast'
   | 'start-slide'
   | 'verify-boundary'
@@ -664,7 +690,15 @@ export interface CalibrationBatchState {
   sharedParkingFailureVisibility?: ScreenVisibilityEvidence;
   planVersion?: string;
   contextVersion?: string;
-  transfer?: CalibrationBatchPlan['transfer'];
+  /** Confirmed corridor recorded by an earlier version of batch calibration. */
+  transfer?: {
+    travelTipZMm: number;
+    highestObstacleZMm: number;
+    clearanceMm: number;
+    corridor: { minX: number; maxX: number; minY: number; maxY: number };
+    waypoints: WebPoint[];
+    corridorConfirmed: true;
+  };
   currentIndex: number;
   items: Array<{
     deviceId: string;
@@ -713,14 +747,6 @@ export interface CalibrationBatchPlan {
     expectedCenterMm?: WebPoint;
     expectedSource?: 'calibration' | 'estimate';
   }[];
-  transfer?: {
-    travelTipZMm: number;
-    highestObstacleZMm: number;
-    clearanceMm: number;
-    corridor: { minX: number; maxX: number; minY: number; maxY: number };
-    waypoints: WebPoint[];
-    corridorConfirmed: true;
-  };
 }
 export interface WorkstationScreenState {
   cameraId: string;

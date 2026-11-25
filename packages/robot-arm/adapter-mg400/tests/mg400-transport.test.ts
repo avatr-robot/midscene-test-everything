@@ -3,6 +3,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { type Server, type Socket, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { RobotKernel } from '@midscene/arm-kit/internal/kernel';
 import { RobotDriverBoundary } from '@midscene/arm-kit/internal/kernel/driver-boundary';
 import { RobotArmRuntime } from '@midscene/arm-kit/internal/runtime';
@@ -67,6 +68,8 @@ async function controller(
     keyedPose?: boolean;
     /** Prefix a successful motion ACK with something other than a code. */
     motionReplyNamedPrefix?: boolean;
+    /** Drop the reply to this numbered MovL command, counting from one. */
+    dropLinearReplyAt?: number;
     holdResetReply?: boolean;
     /** Drop the first mode query after a jog release to exercise retry. */
     failJogStopConfirmationOnce?: boolean;
@@ -102,6 +105,10 @@ async function controller(
   let blockMode = false;
   let delayModeMs = 0;
   let blockedMode = false;
+  let heldDashboardReply:
+    | { name: string; hold: (reply: () => void) => void }
+    | undefined;
+  let linearReplies = 0;
   let failJogConfirmation = false;
   let jogConfirmationFailed = false;
   const connections = { motion: 0, dashboard: 0 };
@@ -126,7 +133,20 @@ async function controller(
           commands.push(command);
           const name = command.slice(0, command.indexOf('('));
           const reply = (payload = '') => {
-            if (!socket.destroyed) socket.write(`0,{${payload}},${command};`);
+            if (
+              motion &&
+              name === 'MovL' &&
+              ++linearReplies === options.dropLinearReplyAt
+            )
+              return;
+            const write = () => {
+              if (!socket.destroyed) socket.write(`0,{${payload}},${command};`);
+            };
+            if (!motion && heldDashboardReply?.name === name) {
+              const { hold } = heldDashboardReply;
+              heldDashboardReply = undefined;
+              hold(write);
+            } else write();
           };
           if (
             (name === 'SetPayLoad' && (!enabled || options.rejectPayload)) ||
@@ -433,6 +453,19 @@ async function controller(
     },
     delayNextMode(ms: number) {
       delayModeMs = ms;
+    },
+    holdNextDashboardReply(name: 'GetPose' | 'GetErrorID') {
+      let release: (() => void) | undefined;
+      const requested = new Promise<void>((resolve) => {
+        heldDashboardReply = {
+          name,
+          hold(reply) {
+            release = reply;
+            resolve();
+          },
+        };
+      });
+      return { requested, release: () => release?.() };
     },
     /** Make the controller faulty without going through the Adapter. */
     injectFault(code = -2) {
@@ -1925,6 +1958,35 @@ describe('MG400 authoritative Cartesian motion', () => {
       await c.cleanup();
     }
   });
+  it('times out when an acknowledged motion batch is missing a later reply', async () => {
+    const c = await controller({
+      arrivalDelayMs: 15,
+      dropLinearReplyAt: 3,
+      adapter: { commandTimeoutMs: 250 },
+    });
+    try {
+      await c.adapter.connect();
+      await c.adapter.enable();
+      const sequence = await c.adapter.driver.beginLinearSequence!(
+        [...targets, { ...targets[1], pose: pose(10, 20, 40) }],
+        { timeoutMs: 1000 },
+      );
+      await sequence.submit(0);
+      await sequence.waitForHandoff();
+
+      await expect(
+        Promise.race([
+          sequence.submitQueued!([15, 0]),
+          delay(1500, undefined, { ref: false }),
+        ]),
+      ).rejects.toMatchObject({ code: 'COMMAND_TIMEOUT' });
+      expect(
+        c.commands.filter((command) => command.startsWith('MovL(')),
+      ).toHaveLength(3);
+    } finally {
+      await c.cleanup();
+    }
+  });
   it('runs a 30 ms tap through the shared executor before final Sync confirmation', async () => {
     const c = await controller({ arrivalDelayMs: 15, syncDelayMs: 600 });
     const f = await fixture();
@@ -2008,6 +2070,50 @@ describe('MG400 authoritative Cartesian motion', () => {
       await c.cleanup();
     }
   });
+  it('dispatches sequence fault monitoring ahead of waiting pose telemetry', async () => {
+    const c = await controller({ adapter: { statePollIntervalMs: 0 } });
+    try {
+      await c.adapter.connect();
+      await c.adapter.enable();
+      const sequence = await c.adapter.driver.beginLinearSequence!(targets, {
+        timeoutMs: 1000,
+      });
+      const held = c.holdNextDashboardReply('GetPose');
+      await held.requested;
+      const backlog = [c.adapter.getPose(), c.adapter.getPose()];
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      const firstWaitingRequest = c.commands.length;
+      held.release();
+      await Promise.all(backlog);
+      expect(
+        c.commands.slice(firstWaitingRequest, firstWaitingRequest + 2),
+      ).toEqual(['RobotMode()', 'GetErrorID()']);
+      sequence.dispose();
+    } finally {
+      await c.cleanup();
+    }
+  });
+  it('queues sequence pose monitoring while a fault reply is pending', async () => {
+    const c = await controller({ adapter: { statePollIntervalMs: 0 } });
+    try {
+      await c.adapter.connect();
+      await c.adapter.enable();
+      const sequence = await c.adapter.driver.beginLinearSequence!(targets, {
+        timeoutMs: 1000,
+      });
+      const held = c.holdNextDashboardReply('GetErrorID');
+      await held.requested;
+      const stateRead = c.adapter.getState();
+      await new Promise((resolve) => setTimeout(resolve, 65));
+      const firstWaitingRequest = c.commands.length;
+      held.release();
+      await stateRead;
+      expect(c.commands[firstWaitingRequest]).toMatch(/^GetPose\(/);
+      sequence.dispose();
+    } finally {
+      await c.cleanup();
+    }
+  });
   it('refuses another submission when fresh monitoring reports a controller fault', async () => {
     const c = await controller({ arrivalDelayMs: 5 });
     try {
@@ -2019,7 +2125,7 @@ describe('MG400 authoritative Cartesian motion', () => {
       await sequence.submit(0);
       await sequence.waitForHandoff();
       c.injectFault();
-      // Allow the independent 100 ms fault monitor to observe the change.
+      // Allow the independent fault monitor to observe the change.
       await new Promise((resolve) => setTimeout(resolve, 130));
       await expect(sequence.submit(1)).rejects.toMatchObject({
         code: 'ROBOT_FAULT',

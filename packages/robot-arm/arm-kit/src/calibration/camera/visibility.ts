@@ -96,6 +96,7 @@ export async function verifyScreenVisibility(
         );
     }
   };
+  let frameRetried = false;
   const capture = async (
     pattern: ScreenVisibilityProbePattern,
     exposure?: { previous: number; reduced: number },
@@ -128,7 +129,19 @@ export async function verifyScreenVisibility(
       // Allow phone compositing, camera exposure and buffered capture to settle.
       await delay(300, undefined, { signal });
       assertCurrent();
-      frames.push(await frame());
+      let current: Buffer;
+      try {
+        current = await frame();
+      } catch (error) {
+        if (frameRetried) throw error;
+        frameRetried = true;
+        await delay(200, undefined, { signal });
+        assertCurrent();
+        await options?.assertStationary?.();
+        assertCurrent();
+        current = await frame();
+      }
+      frames.push(current);
       assertCurrent();
     }
     const result = await measureScreenVisibility(

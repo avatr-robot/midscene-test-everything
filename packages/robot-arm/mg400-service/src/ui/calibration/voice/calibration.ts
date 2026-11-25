@@ -16,7 +16,9 @@ function sessionPrompt(
   previous: AssistedCalibrationState | undefined,
   mode: 'single' | 'batch',
 ): Prompt | undefined {
-  const entered = s.stage !== previous?.stage;
+  if (s.automaticRecovery) return;
+  const entered =
+    s.stage !== previous?.stage || Boolean(previous?.automaticRecovery);
   if (s.stage === 'collecting') {
     if (s.referenceTravel) {
       if (entered || s.referenceTravel !== previous?.referenceTravel)
@@ -35,7 +37,8 @@ function sessionPrompt(
   if (mode === 'batch') return;
   switch (s.stage) {
     case 'review':
-      return ['autoReview'];
+      if (!s.finishingAutomatically) return ['autoReview'];
+      return;
     case 'interrupted':
     case 'capture-failed':
     case 'verification-failed':

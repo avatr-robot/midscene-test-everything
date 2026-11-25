@@ -917,6 +917,32 @@ export async function startPlaygroundHost({
         if (!devices) return send(409, { error: 'Connect the arm first' });
         const id = decodeURIComponent(calibrationRoute[1]);
         const action = calibrationRoute[2];
+        if (action === 'debug-logo') {
+          const control = screenControl;
+          const registry = devices;
+          if (!control || connecting)
+            return send(409, { error: 'Connect the arm first' });
+          if (req.method === 'GET')
+            return send(200, control.debugLogoStatus(id));
+          if (req.method !== 'POST')
+            return send(405, { error: 'Method not allowed' });
+          const input = await readBody(req, 1024);
+          if (input.confirmed !== true)
+            return send(400, {
+              error: 'Confirm the motion area is clear. The robot will move.',
+            });
+          if (
+            control !== screenControl ||
+            registry !== devices ||
+            connecting ||
+            setup.busy
+          )
+            return send(409, {
+              error: 'Wait for configuration changes to finish',
+            });
+          registry.assertBatchIdle();
+          return send(202, control.startDebugLogo(id));
+        }
         if (screenControl?.busy && req.method === 'POST' && action !== 'cancel')
           throw new RobotArmError(
             'BUSY',

@@ -9,6 +9,7 @@ import {
 
 import { markerSvg } from '../../camera/calibration-markers.js';
 import { mountCalibrationPhonePage } from './client.js';
+import { mountLogoCanvas } from './logo-canvas.js';
 
 // Inline the small phone assets so LAN, standalone and packaged SDK links serve the same page.
 const asset = (name: string) =>
@@ -49,13 +50,23 @@ body[data-verification=true] #instructions,body[data-stage=collect] #target,body
 #fullscreen-controls{position:fixed;z-index:5;top:39%;left:50%;transform:translate(-50%,-50%);width:min(80vw,340px);text-align:center}#fullscreen-controls button{padding:8px 16px}#fullscreen-help:not([hidden]){display:block;background:white}#wake-gesture{display:none}body[data-wake-blocked=true] #wake-gesture{display:inline-block}body[data-display-ready=false] .mapping-marker,body[data-display-ready=false] #target{visibility:hidden}body:is([data-stage=collect],[data-stage=safety],[data-stage=verify],[data-stage=returning],[data-stage=completed]) #wake-gesture{display:none}#fullscreen-controls{pointer-events:none}#fullscreen-controls button{pointer-events:auto}
 body[data-stage=waiting] #page-label{font-size:clamp(28px,9vmin,54px);font-weight:700;color:#1f2329;letter-spacing:.08em}body[data-stage=waiting] #fullscreen-controls{top:auto;bottom:max(20px,env(safe-area-inset-bottom));transform:translateX(-50%)}body[data-stage=waiting] :is(#mapping-trail,#mapping-hit,#touch-status,#target,#capture-grid){display:none!important}
 ${pageStyles}
+#logo-canvas{position:absolute;inset:0;z-index:20;width:100%;height:100%;background:radial-gradient(ellipse at 50% 43%,#26374d,transparent 76%),#17202e;touch-action:none}
+#logo-signature{position:absolute;inset:0;z-index:21;color:#f8fafc;pointer-events:none;opacity:0}
+#logo-signature[aria-hidden=false]{opacity:1;transition:opacity 400ms ease}
+#logo-powered,#logo-brands{position:absolute;left:6%;right:6%;display:flex;align-items:center;justify-content:center;gap:clamp(8px,2vw,16px);text-align:center}
+#logo-powered{top:11%;font-size:clamp(11px,2vmin,15px);font-weight:500;letter-spacing:.23em;text-transform:uppercase;color:#afbac9}
+#logo-powered::before,#logo-powered::after{content:"";width:clamp(20px,6vw,48px);height:1px;background:#596e88}
+#logo-brands{bottom:12%;font-size:clamp(14px,3.3vmin,24px);font-weight:500;letter-spacing:.015em}
+#logo-brands span[aria-hidden]{color:#a9c0db;font-weight:400}
+#logo-error{position:absolute;z-index:21;top:max(18px,env(safe-area-inset-top));left:12%;right:12%;color:#f8fafc;text-align:center;pointer-events:none}
+@media (prefers-reduced-motion:reduce){#logo-signature[aria-hidden=false]{transition:none}}
 </style></head><body${cameraPreview ? ' data-camera-preview="true"' : ''} data-display-ready="false" data-wake-video="${awakeVideo}" data-stage="markers"${markerCodes ? ' data-preview data-connection-error="true"' : ''}><main id="surface"><div id="page-brand"><span>${midscenePhoneLogo}Midscene · Screen Calibration</span><span id="screen-id">${screenId}</span></div><div id="selection-hint" hidden><span id="selection-label" role="status"></span></div><div id="instructions"><header id="page-title">Connecting to your computer</header><div id="page-label">${screenId}</div><div id="message"></div><div id="connection"></div><div id="error-detail"></div><div id="touch-status" role="status"></div></div>${markers}<div id="approach-guides" aria-hidden="true">
           <span class="approach-reference" data-corner="1">1</span>
           <span class="approach-reference" data-corner="2">2</span>
           <span class="approach-reference" data-corner="3">3</span>
           <span class="approach-reference" data-corner="4">4</span>
           <div class="approach-target"><span>+</span></div>
-        </div><div id="verification-guide" aria-hidden="true" hidden></div><div id="capture-grid" aria-hidden="true" hidden><svg width="100%" height="100%"><polyline id="capture-route" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 6"/></svg><div id="capture-points"></div></div><div id="target"><span id="target-number"></span></div><div id="mapping-trail" aria-hidden="true"></div><div id="mapping-hit" aria-hidden="true"></div></main><div id="fullscreen-controls"><button id="marker-fullscreen" data-fullscreen-control type="button"></button><small id="wake-gesture" role="status"></small><small id="fullscreen-help"></small></div><script>${awakeScript}
-;(${mountCalibrationPhonePage.toString()})(${JSON.stringify({ ...CALIBRATION_POINT_POLICY, ...CALIBRATION_PHONE_POLICY, verificationRadiusPx: CALIBRATION_CLICK_RADIUS_PX })}, ${JSON.stringify(pageId)}, globalThis.RobotScreenCalibAwake);
+        </div><div id="verification-guide" aria-hidden="true" hidden></div><div id="capture-grid" aria-hidden="true" hidden><svg width="100%" height="100%"><polyline id="capture-route" fill="none" stroke="#94a3b8" stroke-width="2" stroke-dasharray="5 6"/></svg><div id="capture-points"></div></div><div id="target"><span id="target-number"></span></div><div id="mapping-trail" aria-hidden="true"></div><div id="mapping-hit" aria-hidden="true"></div><canvas id="logo-canvas" aria-label="Calibration drawing" hidden></canvas><div id="logo-signature" aria-hidden="true"><div id="logo-powered">Powered by</div><div id="logo-brands"><span>Midscene</span><span aria-hidden="true">×</span><span>Avatr Robotic</span></div></div><div id="logo-error" role="status" hidden></div></main><div id="fullscreen-controls"><button id="marker-fullscreen" data-fullscreen-control type="button"></button><small id="wake-gesture" role="status"></small><small id="fullscreen-help"></small></div><script>${awakeScript}
+;(${mountCalibrationPhonePage.toString()})(${JSON.stringify({ ...CALIBRATION_POINT_POLICY, ...CALIBRATION_PHONE_POLICY, verificationRadiusPx: CALIBRATION_CLICK_RADIUS_PX })}, ${JSON.stringify(pageId)}, globalThis.RobotScreenCalibAwake, (${mountLogoCanvas.toString()}));
 </script></body></html>`;
 }

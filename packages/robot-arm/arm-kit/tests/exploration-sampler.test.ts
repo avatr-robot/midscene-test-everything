@@ -1,7 +1,10 @@
 // Ported upstream simulation scenarios; acceptance is tested separately in Arm Kit.
 import { describe, expect, it } from '@rstest/core';
 import { fitExploration } from '../src/calibration/exploration/fit.js';
-import { runAutoExploration } from '../src/calibration/exploration/sampler.js';
+import {
+  type FastSamplingCheckpoint,
+  runAutoExploration,
+} from '../src/calibration/exploration/sampler.js';
 import type {
   ApplicationContext,
   AutoExplorationHost,
@@ -30,9 +33,11 @@ describe('first-time automatic exploration', () => {
     'fast-local-recovery',
     'fast-tap',
     'fast-slide',
+    'fast-resume-slide',
     'fast-reference-fallback-slide',
     'fast-refine-stalled',
     'fast-adaptive-slide',
+    'fast-audit-and-grid-recovery-slide',
     'fast-corner-slide',
     'fast-intermittent-height-slide',
     'fast-return-height-slide',
@@ -85,12 +90,14 @@ describe('first-time automatic exploration', () => {
           : mode === 'fast-offset-hysteresis' || mode === 'press-recovers'
             ? 30.7
             : 30;
+      const auditAndGridRecovery =
+        mode === 'fast-audit-and-grid-recovery-slide';
       const releaseZ =
         mode === 'fast-reported-failure'
           ? -200.12645
           : mode.includes('hysteresis')
             ? activationZ + 2.5
-            : mode === 'fast-adaptive-slide'
+            : mode === 'fast-adaptive-slide' || auditAndGridRecovery
               ? activationZ + 0.15
               : activationZ;
       let previousHeld = false;
@@ -117,12 +124,29 @@ describe('first-time automatic exploration', () => {
       let actualPose = pose(100, -50, startZ);
       const finishedSampling = false;
       let missedSlide = false;
+      const gridSlideAttempts: number[] = [];
       const gridPressHeights: number[] = [];
       let gridPressReleased = false;
       const auditPressHeights: number[] = [];
       let auditPressReleased = false;
       const heightSweeps: Array<{ z: number; touching: boolean }> = [];
       const gridStarted = new Error('Reached the sampling grid');
+      const pageDropped = new RobotArmError(
+        'PHONE_DISCONNECTED',
+        'Page disconnected during the grid',
+      );
+      let dropped = false;
+      const checkpoint: FastSamplingCheckpoint | undefined =
+        mode === 'fast-resume-slide'
+          ? {
+              direction: [],
+              heights: [],
+              grid: [],
+              samples: [],
+              gridBudgets: new Map(),
+              retriedTargets: new Set(),
+            }
+          : undefined;
       const usePreviousHeight = mode === 'fast-previous-height-slide';
       const heightReturnMisses = usePreviousHeight
         ? 2
@@ -259,7 +283,14 @@ describe('first-time automatic exploration', () => {
             }
           }
           if (
-            mode === 'fast-adaptive-slide' &&
+            auditAndGridRecovery &&
+            purpose === 'slide' &&
+            session.auto?.progress?.phase === 'height' &&
+            session.auto.progress.index === 1
+          )
+            screen = null;
+          if (
+            (mode === 'fast-adaptive-slide' || auditAndGridRecovery) &&
             purpose === 'slide' &&
             session.auto?.progress?.phase === 'grid' &&
             !missedSlide
@@ -270,10 +301,12 @@ describe('first-time automatic exploration', () => {
           if (
             mode === 'fast-corner-slide' &&
             purpose === 'slide' &&
-            session.auto?.progress?.phase === 'grid' &&
-            session.auto.progress.index === 1
-          )
-            screen = null;
+            session.auto?.progress?.phase === 'grid'
+          ) {
+            const { index } = session.auto.progress;
+            gridSlideAttempts.push(index);
+            if (index <= 2) screen = null;
+          }
           if (
             mode === 'fast-extended-recovery-slide' &&
             contact &&
@@ -480,10 +513,13 @@ describe('first-time automatic exploration', () => {
           if (mode === 'fast-local-recovery' && point.x < 50)
             touching = inside && point.z <= activationZ - 0.75;
           if (point.x < 25 && point.y > -15) {
-            if (
-              mode === 'fast-extended-recovery-slide' ||
-              mode === 'fast-recovery-budget-slide'
-            )
+            // This screen needs a fresh downstroke to register a new touch.
+            if (mode === 'fast-extended-recovery-slide')
+              touching =
+                inside &&
+                point.z <= activationZ - 1.75 &&
+                previous.z - point.z >= 1;
+            if (mode === 'fast-recovery-budget-slide')
               touching = inside && point.z <= activationZ - 1.75;
             if (mode === 'fast-recovery-no-touch-slide') touching = false;
           }
@@ -511,6 +547,16 @@ describe('first-time automatic exploration', () => {
         currentPose: async () => actualPose,
         screenCalib,
         progress: (current: CalibrationSession) => {
+          const progress = current.auto?.progress;
+          if (
+            checkpoint &&
+            !dropped &&
+            progress?.phase === 'grid' &&
+            progress.index === 3
+          ) {
+            dropped = true;
+            throw pageDropped;
+          }
           if (testHeightReturn && current.auto?.progress?.phase === 'grid')
             throw gridStarted;
           if (current.auto?.progress?.message === 'Initial touch · refine')
@@ -518,20 +564,43 @@ describe('first-time automatic exploration', () => {
         },
       };
       const samplingTiming = new Map<string, number>();
-      const job = runAutoExploration(host as never, session, ctx, {
-        startPose: pose(100, -50, startZ),
-        onSlideRecovery: (recovery) => slideRecoveries.push(recovery),
-        onTiming: (event) =>
-          samplingTiming.set(event, (samplingTiming.get(event) ?? 0) + 1),
-        ...(isFast
-          ? {
-              mode: 'fast-horizontal' as const,
-              horizontalConfirmed: true,
-              collection: slides ? ('slide' as const) : ('tap' as const),
-            }
-          : {}),
-      });
+      const collect = () =>
+        runAutoExploration(
+          host as never,
+          session,
+          ctx,
+          {
+            startPose: pose(100, -50, startZ),
+            onSlideRecovery: (recovery) => slideRecoveries.push(recovery),
+            onTiming: (event) =>
+              samplingTiming.set(event, (samplingTiming.get(event) ?? 0) + 1),
+            ...(isFast
+              ? {
+                  mode: 'fast-horizontal' as const,
+                  horizontalConfirmed: true,
+                  collection: slides ? ('slide' as const) : ('tap' as const),
+                }
+              : {}),
+          },
+          checkpoint,
+        );
       try {
+        if (checkpoint) {
+          await expect(collect()).rejects.toBe(pageDropped);
+          const confirmed = structuredClone(checkpoint.samples);
+          expect(checkpoint.grid).toHaveLength(2);
+          checkpoint.releaseBeforeResume = true;
+          const resumed = await collect();
+          expect(resumed.grid).toHaveLength(6);
+          expect(resumed.grid[2].zSource).toBe('measured');
+          expect(checkpoint.samples.slice(0, confirmed.length)).toEqual(
+            confirmed,
+          );
+          expect(checkpoint.samples).toHaveLength(11);
+          expect(samplingTiming.get('initial-search')).toBe(1);
+          return;
+        }
+        const job = collect();
         if (referenceFallback) {
           await expect(job).rejects.toBe(firstTouchRecorded);
           expect(firstSlideTouchZ).toBeDefined();
@@ -812,28 +881,43 @@ describe('first-time automatic exploration', () => {
             .filter((sample) => sample.role === role)
             .map((sample) => sample.method);
         if (mode === 'fast-corner-slide') {
-          const switchToVertical = slideRecoveries.find(
-            (recovery) => recovery.switchedToVertical,
+          // Even two consecutive vertical recoveries leave the next point eligible to slide.
+          expect(gridSlideAttempts).toEqual(
+            collection.grid.map((_, index) => index + 1),
           );
-          expect(switchToVertical?.phase).toBe('grid');
-          const switchIndex = collection.grid.findIndex(
-            ({ target }) => target.id === switchToVertical?.targetId,
-          );
-          expect(switchIndex).toBeGreaterThan(0);
-          for (const point of collection.grid.slice(switchIndex)) {
+          expect(
+            slideRecoveries.some(
+              ({ switchedToVertical }) => switchedToVertical,
+            ),
+          ).toBe(false);
+          for (const point of collection.grid.slice(0, 2)) {
             expect(point.zSource).toBe('measured');
             expect(point.heightIntervalMm).toBeDefined();
           }
         } else if (slides && mode !== 'fast-vertical-fallback-slide') {
-          const firstGridRecovered = mode === 'fast-adaptive-slide';
+          const firstGridRecovered =
+            mode === 'fast-adaptive-slide' || auditAndGridRecovery;
           expect(methodsOf('fit')).toEqual([
             firstGridRecovered ? 'stepped' : 'slide',
-            firstGridRecovered ? 'direct' : 'slide',
+            'slide',
             'slide',
             'slide',
           ]);
           expect(methodsOf('validation')).toEqual(Array(2).fill('slide'));
-          expect(methodsOf('probe').slice(3)).toEqual(['slide', 'slide']);
+          expect(methodsOf('probe').slice(3)).toEqual([
+            auditAndGridRecovery ? 'stepped' : 'slide',
+            'slide',
+          ]);
+          if (auditAndGridRecovery)
+            expect(
+              slideRecoveries.map(({ phase, switchedToVertical }) => ({
+                phase,
+                switchedToVertical,
+              })),
+            ).toEqual([
+              { phase: 'height', switchedToVertical: false },
+              { phase: 'grid', switchedToVertical: false },
+            ]);
           for (const probe of collection.probes.slice(3)) {
             expect(probe.zSource).toBe('measured');
             const [touchedZ, clearZ] = probe.heightIntervalMm!;
