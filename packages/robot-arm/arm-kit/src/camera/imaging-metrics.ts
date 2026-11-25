@@ -18,6 +18,22 @@ const TONE_PATCH_WIDTH = 36;
 const TONE_PATCH_HEIGHT = 18;
 const WHITE_BALANCE_MIN_PATCHES = 3;
 const WHITE_BALANCE_MIN_LEVEL_SPREAD = 45;
+const CALIBRATION_TONE_LEVELS = [245, 221, 184, 143, 103, 65, 23] as const;
+const CALIBRATION_TONE_CELL_COLUMNS = 3;
+const CALIBRATION_TONE_CELL_ROWS = 2;
+const CALIBRATION_TONE_CELL_WIDTH = 18;
+const CALIBRATION_TONE_CELL_HEIGHT = 12;
+const CALIBRATION_MIN_TONE_LEVELS = 4;
+const CALIBRATION_MAX_TONE_CONTAMINATION = 0.4;
+const CALIBRATION_TARGET_WHITE = 205;
+const CALIBRATION_TARGET_BLACK = 24;
+const CALIBRATION_CHECKER_COLUMNS = 10;
+const CALIBRATION_CHECKER_ROWS = 8;
+const CALIBRATION_CHECKER_CELL_WIDTH = 20;
+const CALIBRATION_CHECKER_CELL_HEIGHT = 12;
+const CALIBRATION_CHECKER_MIN_CLEAN_RATIO = 0.35;
+const CALIBRATION_CHECKER_MAX_CONTAMINATION = 0.5;
+const CALIBRATION_CHECKER_TARGET_WHITE = 220;
 
 export interface NormalizedImageRegion {
   left: number;
@@ -42,6 +58,18 @@ export const CALIBRATION_TONE_REGIONS: readonly NormalizedImageRegion[] =
     right: (index + 0.88) / 7,
     bottom: 0.97,
   }));
+
+const CALIBRATION_CHECKER_REGION: NormalizedImageRegion = {
+  left: 0.04,
+  top: 0.2,
+  right: 0.96,
+  bottom: 0.68,
+};
+
+const CALIBRATION_HEADER_WHITE_REGIONS: readonly NormalizedImageRegion[] = [
+  { left: 0.04, top: 0.03, right: 0.25, bottom: 0.15 },
+  { left: 0.75, top: 0.03, right: 0.96, bottom: 0.15 },
+];
 
 export interface ImagingScreen {
   screenId: string;
@@ -69,6 +97,34 @@ export interface ExposureReading {
   selected: LumaMetrics;
   screenReadings: Array<{ screenId: string; metrics: LumaMetrics }>;
   updatedAt: number;
+}
+
+export type ExposureCalibrationMode =
+  | 'grayscale-ramp'
+  | 'fullscreen-masked'
+  | 'insufficient';
+
+export interface ExposureCalibrationAssessment {
+  mode: ExposureCalibrationMode;
+  score: number;
+  direction?: 'too-bright' | 'too-dark';
+  confidence: number;
+  contaminationRatio: number;
+  validToneLevels: number;
+  white: number;
+  black: number;
+  warnings: string[];
+}
+
+export interface CalibrationExposureScreenReading {
+  screenId: string;
+  metrics: LumaMetrics;
+  assessment: ExposureCalibrationAssessment;
+}
+
+export interface CalibrationExposureReading
+  extends Omit<ExposureReading, 'screenReadings'> {
+  screenReadings: CalibrationExposureScreenReading[];
 }
 
 export interface FocusReading {
@@ -560,15 +616,6 @@ function rgbPatchMeans(pixels: Uint8Array) {
   return totals.map((total) => total / count) as [number, number, number];
 }
 
-export function exposureCalibrationScore(metrics: LumaMetrics) {
-  const targetError = Math.abs(metrics.mean - 205) / 205;
-  const highlightPenalty =
-    metrics.overExposedRatio * 40 + Math.max(0, metrics.p99 - 238) / 6;
-  const shadowPenalty =
-    metrics.underExposedRatio * 10 + Math.max(0, 165 - metrics.mean) / 70;
-  return targetError + highlightPenalty + shadowPenalty;
-}
-
 export async function measureWhiteBalance(
   jpeg: Buffer,
   screens: readonly ImagingScreen[],
@@ -807,6 +854,485 @@ export async function measureExposure(
   };
 }
 
+interface PatchStats {
+  mean: number;
+  stddev: number;
+  low: number;
+  high: number;
+  clippedRatio: number;
+  chroma: number;
+}
+
+interface ToneBarEvidence {
+  level: number;
+  clippedRatio: number;
+  contaminationRatio: number;
+  valid: boolean;
+}
+
+interface ToneRampEvidence {
+  bars: ToneBarEvidence[];
+  white: number;
+  black: number;
+  residual: number;
+  contaminationRatio: number;
+  validLevels: number;
+  levelSpan: number;
+  score: number;
+  direction?: 'too-bright' | 'too-dark';
+  usable: boolean;
+  warnings: string[];
+}
+
+interface CheckerEvidence {
+  white: number;
+  black: number;
+  contaminationRatio: number;
+  clippedRatio: number;
+  cleanRatio: number;
+  score: number;
+  direction?: 'too-bright' | 'too-dark';
+  usable: boolean;
+  warnings: string[];
+}
+
+function subregion(
+  region: NormalizedImageRegion,
+  column: number,
+  row: number,
+  columns: number,
+  rows: number,
+): NormalizedImageRegion {
+  const width = (region.right - region.left) / columns;
+  const height = (region.bottom - region.top) / rows;
+  return {
+    left: region.left + column * width,
+    top: region.top + row * height,
+    right: region.left + (column + 1) * width,
+    bottom: region.top + (row + 1) * height,
+  };
+}
+
+function patchStats(pixels: Uint8Array): PatchStats {
+  const histogram = new Uint32Array(256);
+  const levels: number[] = [];
+  let total = 0;
+  let totalSquares = 0;
+  let clipped = 0;
+  let chroma = 0;
+  for (let index = 0; index < pixels.length; index += 3) {
+    const red = pixels[index]!;
+    const green = pixels[index + 1]!;
+    const blue = pixels[index + 2]!;
+    const level = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    const rounded = clamp(Math.round(level), 0, 255);
+    histogram[rounded] = (histogram[rounded] ?? 0) + 1;
+    levels.push(level);
+    total += level;
+    totalSquares += level * level;
+    if (rounded > 245) clipped++;
+    if (level > 20)
+      chroma +=
+        (Math.max(red, green, blue) - Math.min(red, green, blue)) /
+        Math.max(1, level);
+  }
+  const count = Math.max(1, levels.length);
+  const mean = total / count;
+  return {
+    mean,
+    stddev: Math.sqrt(Math.max(0, totalSquares / count - mean * mean)),
+    low: percentileHistogram(histogram, 0.2),
+    high: percentileHistogram(histogram, 0.8),
+    clippedRatio: clipped / count,
+    chroma: chroma / count,
+  };
+}
+
+function rgbPixelsToGray(pixels: Uint8Array) {
+  const output = new Uint8Array(pixels.length / 3);
+  for (let index = 0; index < output.length; index += 1) {
+    output[index] = Math.round(
+      0.2126 * pixels[index * 3]! +
+        0.7152 * pixels[index * 3 + 1]! +
+        0.0722 * pixels[index * 3 + 2]!,
+    );
+  }
+  return output;
+}
+
+function rgbImageToGray(image: RgbImage): GrayImage {
+  return {
+    width: image.width,
+    height: image.height,
+    data: rgbPixelsToGray(image.data),
+  };
+}
+
+function medianAbsoluteDeviation(values: readonly number[]) {
+  if (!values.length) return 0;
+  const center = median(values);
+  return median(values.map((value) => Math.abs(value - center)));
+}
+
+function fitToneMap(
+  references: readonly number[],
+  observations: readonly number[],
+) {
+  let weights = observations.map(() => 1);
+  let intercept = 0;
+  let scale = 0;
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    let weightSum = 0;
+    let xSum = 0;
+    let ySum = 0;
+    let xxSum = 0;
+    let xySum = 0;
+    references.forEach((reference, index) => {
+      const weight = weights[index] ?? 1;
+      const x = reference / 255;
+      const y = observations[index] ?? 0;
+      weightSum += weight;
+      xSum += weight * x;
+      ySum += weight * y;
+      xxSum += weight * x * x;
+      xySum += weight * x * y;
+    });
+    const denominator = weightSum * xxSum - xSum * xSum;
+    if (Math.abs(denominator) < 1e-9) {
+      const black = Math.min(...observations);
+      const white = Math.max(...observations);
+      return {
+        black,
+        white,
+        predict: (reference: number) =>
+          black + ((white - black) * reference) / 255,
+      };
+    }
+    scale = Math.max(0, (weightSum * xySum - xSum * ySum) / denominator);
+    intercept = (ySum - scale * xSum) / Math.max(1e-9, weightSum);
+    const residuals = references.map((reference, index) => {
+      const residual =
+        (observations[index] ?? 0) - (intercept + scale * (reference / 255));
+      return Math.abs(residual);
+    });
+    const center = median(residuals);
+    const deviation = Math.max(1, medianAbsoluteDeviation(residuals));
+    const cutoff = Math.max(10, center + 2.5 * deviation);
+    weights = residuals.map((residual) =>
+      residual <= cutoff ? 1 : cutoff / residual,
+    );
+  }
+  return {
+    black: intercept,
+    white: intercept + scale,
+    predict: (reference: number) => intercept + scale * (reference / 255),
+  };
+}
+
+function analyzeToneRamp(
+  image: RgbImage,
+  correction: CameraCorrection,
+  checker: CheckerEvidence,
+): ToneRampEvidence {
+  const bars = CALIBRATION_TONE_REGIONS.map((region) => {
+    const cells: PatchStats[] = [];
+    for (let row = 0; row < CALIBRATION_TONE_CELL_ROWS; row += 1) {
+      for (
+        let column = 0;
+        column < CALIBRATION_TONE_CELL_COLUMNS;
+        column += 1
+      ) {
+        const pixels = samplePerspectiveRgb(
+          image,
+          correction,
+          CALIBRATION_TONE_CELL_WIDTH,
+          CALIBRATION_TONE_CELL_HEIGHT,
+          subregion(
+            region,
+            column,
+            row,
+            CALIBRATION_TONE_CELL_COLUMNS,
+            CALIBRATION_TONE_CELL_ROWS,
+          ),
+        );
+        cells.push(patchStats(pixels));
+      }
+    }
+    const center = median(cells.map((cell) => cell.mean));
+    const deviation = Math.max(
+      1,
+      medianAbsoluteDeviation(cells.map((cell) => cell.mean)),
+    );
+    const clean = cells.filter(
+      (cell) =>
+        cell.mean <= center + Math.max(12, 3 * deviation) &&
+        cell.clippedRatio <= 0.2 &&
+        (cell.mean < 45 || cell.chroma <= 0.18),
+    );
+    const clippedRatio =
+      cells.reduce((sum, cell) => sum + cell.clippedRatio, 0) / cells.length;
+    return {
+      level: median(clean.map((cell) => cell.mean)),
+      clippedRatio,
+      contaminationRatio: 1 - clean.length / Math.max(1, cells.length),
+      valid: clean.length >= Math.ceil(cells.length / 2),
+    } satisfies ToneBarEvidence;
+  });
+  const observations = bars.map((bar) => bar.level);
+  const active = bars.map((bar) => bar.valid);
+  const fitActive = () => {
+    const references = CALIBRATION_TONE_LEVELS.filter(
+      (_, index) => active[index],
+    );
+    const values = observations.filter((_, index) => active[index]);
+    return references.length >= 2
+      ? fitToneMap(references, values)
+      : {
+          black: 0,
+          white: 0,
+          predict: () => 0,
+        };
+  };
+  let fit = fitActive();
+  for (let iteration = 0; iteration < 2; iteration += 1) {
+    const range = Math.max(1, fit.white - fit.black);
+    let changed = false;
+    bars.forEach((bar, index) => {
+      if (!active[index]) return;
+      const residual = Math.abs(
+        bar.level - fit.predict(CALIBRATION_TONE_LEVELS[index]!),
+      );
+      const whiteMismatch =
+        index === 0 &&
+        checker.usable &&
+        Math.abs(bar.level - checker.white) >
+          Math.max(16, checker.white * 0.08);
+      const blackMismatch =
+        index === 6 &&
+        checker.usable &&
+        Math.abs(bar.level - checker.black) >
+          Math.max(18, checker.black * 0.35);
+      if (
+        residual > Math.max(14, range * 0.08) ||
+        whiteMismatch ||
+        blackMismatch
+      ) {
+        active[index] = false;
+        changed = true;
+      }
+    });
+    if (!changed || active.filter(Boolean).length < CALIBRATION_MIN_TONE_LEVELS)
+      break;
+    fit = fitActive();
+  }
+  const validIndexes = active.flatMap((valid, index) => (valid ? [index] : []));
+  const residual =
+    validIndexes.reduce(
+      (sum, index) =>
+        sum +
+        Math.abs(
+          observations[index]! - fit.predict(CALIBRATION_TONE_LEVELS[index]!),
+        ),
+      0,
+    ) / Math.max(1, validIndexes.length);
+  const usingCheckerWhite = !active[0] && checker.usable;
+  const white = active[0]
+    ? observations[0]!
+    : checker.usable
+      ? checker.white
+      : fit.white;
+  const whiteTarget = usingCheckerWhite
+    ? CALIBRATION_CHECKER_TARGET_WHITE
+    : CALIBRATION_TARGET_WHITE;
+  const black = active[6]
+    ? observations[6]!
+    : checker.usable
+      ? checker.black
+      : fit.black;
+  const firstLevel = validIndexes.length
+    ? CALIBRATION_TONE_LEVELS[validIndexes[0]!]!
+    : 0;
+  const lastLevel = validIndexes.length
+    ? CALIBRATION_TONE_LEVELS[validIndexes.at(-1)!]!
+    : 0;
+  const levelSpan = (firstLevel - lastLevel) / 222;
+  const contaminationRatio = Math.min(
+    1,
+    Math.max(
+      bars.reduce((sum, bar) => sum + bar.contaminationRatio, 0) / bars.length,
+      (bars.length - validIndexes.length) / bars.length,
+    ),
+  );
+  const clippedRatio =
+    bars.reduce((sum, bar) => sum + bar.clippedRatio, 0) / bars.length;
+  const coveragePenalty =
+    (1 - validIndexes.length / bars.length) * 0.35 +
+    Math.max(0, 0.6 - levelSpan) * 0.5;
+  const score =
+    Math.abs(white - whiteTarget) / whiteTarget +
+    (Math.abs(black - CALIBRATION_TARGET_BLACK) / 96) * 0.25 +
+    (residual / 255) * 2 +
+    Math.max(0, clippedRatio - 0.05) * 2 +
+    coveragePenalty;
+  const direction =
+    white >= whiteTarget + (usingCheckerWhite ? 25 : 33) || clippedRatio >= 0.25
+      ? 'too-bright'
+      : white <= 155
+        ? 'too-dark'
+        : undefined;
+  const usable =
+    validIndexes.length >= CALIBRATION_MIN_TONE_LEVELS &&
+    levelSpan >= 0.55 &&
+    contaminationRatio <= CALIBRATION_MAX_TONE_CONTAMINATION &&
+    residual <= 22 &&
+    !(checker.usable && !active[0] && !active[6]);
+  const warnings: string[] = [];
+  if (!active[0]) warnings.push('The white calibration bar was excluded');
+  if (contaminationRatio >= 0.2)
+    warnings.push('Part of the grayscale calibration bar was excluded');
+  if (!usable)
+    warnings.push(
+      'The grayscale calibration bar did not provide enough clean levels',
+    );
+  return {
+    bars,
+    white,
+    black,
+    residual,
+    contaminationRatio,
+    validLevels: validIndexes.length,
+    levelSpan,
+    score,
+    direction,
+    usable,
+    warnings,
+  };
+}
+
+function analyzeChecker(
+  image: RgbImage,
+  correction: CameraCorrection,
+): CheckerEvidence {
+  const cells: Array<{
+    stats: PatchStats;
+    column: number;
+    row: number;
+  }> = [];
+  for (let row = 0; row < CALIBRATION_CHECKER_ROWS; row += 1) {
+    for (let column = 0; column < CALIBRATION_CHECKER_COLUMNS; column += 1) {
+      const stats = patchStats(
+        samplePerspectiveRgb(
+          image,
+          correction,
+          CALIBRATION_CHECKER_CELL_WIDTH,
+          CALIBRATION_CHECKER_CELL_HEIGHT,
+          subregion(
+            CALIBRATION_CHECKER_REGION,
+            column,
+            row,
+            CALIBRATION_CHECKER_COLUMNS,
+            CALIBRATION_CHECKER_ROWS,
+          ),
+        ),
+      );
+      cells.push({ stats, column, row });
+    }
+  }
+  const initialBlack = median(cells.map((cell) => cell.stats.low));
+  const blackDeviation = Math.max(
+    1,
+    medianAbsoluteDeviation(cells.map((cell) => cell.stats.low)),
+  );
+  const clean = cells.filter(
+    (cell) =>
+      cell.stats.low <= initialBlack + Math.max(16, 3 * blackDeviation) &&
+      !(cell.stats.low > initialBlack + 8 && cell.stats.chroma > 0.18),
+  );
+  const blackValues = clean.map((cell) => cell.stats.low);
+  const whiteValues = clean.map((cell) => cell.stats.high);
+  const headerWhites = CALIBRATION_HEADER_WHITE_REGIONS.map(
+    (region) =>
+      patchStats(
+        samplePerspectiveRgb(
+          image,
+          correction,
+          CALIBRATION_CHECKER_CELL_WIDTH,
+          CALIBRATION_CHECKER_CELL_HEIGHT,
+          region,
+        ),
+      ).high,
+  ).filter((value) => value >= 90);
+  const black = median(blackValues);
+  const white = median(whiteValues.length >= 8 ? whiteValues : headerWhites);
+  const clippedRatio =
+    clean.reduce((sum, cell) => sum + cell.stats.clippedRatio, 0) /
+    Math.max(1, clean.length);
+  const quadrants = new Map<string, number[]>();
+  clean.forEach((cell) => {
+    const key = `${cell.column < CALIBRATION_CHECKER_COLUMNS / 2 ? 'l' : 'r'}${cell.row < CALIBRATION_CHECKER_ROWS / 2 ? 't' : 'b'}`;
+    const values = quadrants.get(key) ?? [];
+    values.push(cell.stats.high);
+    quadrants.set(key, values);
+  });
+  const quadrantWhites = [...quadrants.values()].map(median);
+  const inconsistent =
+    quadrantWhites.length === 4 &&
+    Math.max(...quadrantWhites) - Math.min(...quadrantWhites) >
+      Math.max(18, white * 0.1);
+  const headerMismatch =
+    headerWhites.length > 0 &&
+    Math.abs(median(headerWhites) - median(whiteValues)) >
+      Math.max(18, white * 0.1);
+  const blackRaised = black > 80;
+  const contaminationRatio = 1 - clean.length / Math.max(1, cells.length);
+  const cleanRatio = clean.length / Math.max(1, cells.length);
+  const dynamicRange = white - black;
+  const score =
+    Math.abs(white - CALIBRATION_CHECKER_TARGET_WHITE) /
+      CALIBRATION_CHECKER_TARGET_WHITE +
+    Math.abs(black - CALIBRATION_TARGET_BLACK) / 96 +
+    Math.abs(dynamicRange - 196) / 196 +
+    Math.max(0, clippedRatio - 0.05) * 2 +
+    contaminationRatio * 0.5;
+  const usable =
+    cleanRatio >= CALIBRATION_CHECKER_MIN_CLEAN_RATIO &&
+    contaminationRatio <= CALIBRATION_CHECKER_MAX_CONTAMINATION &&
+    dynamicRange >= 70 &&
+    !blackRaised &&
+    !inconsistent &&
+    !headerMismatch;
+  const direction =
+    white >= 245 || clippedRatio >= 0.25
+      ? 'too-bright'
+      : white <= 155
+        ? 'too-dark'
+        : undefined;
+  const warnings: string[] = [];
+  if (contaminationRatio >= 0.2)
+    warnings.push('Part of the checkerboard was excluded as reflection');
+  if (inconsistent)
+    warnings.push('Checkerboard brightness is inconsistent across the screen');
+  if (headerMismatch)
+    warnings.push('Header and checkerboard white references disagree');
+  if (blackRaised)
+    warnings.push('Checkerboard black reference is lifted by reflection');
+  if (!usable)
+    warnings.push(
+      'The full-screen references did not provide enough clean evidence',
+    );
+  return {
+    white,
+    black,
+    contaminationRatio,
+    clippedRatio,
+    cleanRatio,
+    score,
+    direction,
+    usable,
+    warnings,
+  };
+}
+
 /**
  * Exposure calibration is defined by the calibration pattern's white sample,
  * not by coverage of that sample in the complete camera frame.
@@ -814,15 +1340,109 @@ export async function measureExposure(
 export async function measureCalibrationExposure(
   jpeg: Buffer,
   screens: readonly ImagingScreen[],
-) {
-  const reading = await measureExposure(jpeg, screens, {
-    region: CALIBRATION_EXPOSURE_REGION,
+): Promise<CalibrationExposureReading> {
+  const source = jpegSize(jpeg);
+  const image = await decodeRgbFrame(jpeg);
+  const full = metricsFromPixels(
+    sampleFrame(rgbImageToGray(image), EXPOSURE_WIDTH, EXPOSURE_HEIGHT),
+    EXPOSURE_WIDTH,
+    EXPOSURE_HEIGHT,
+  );
+  const screenReadings = screens.flatMap((screen) => {
+    if (
+      screen.correction.sourceWidth !== source.width ||
+      screen.correction.sourceHeight !== source.height
+    )
+      return [];
+    const whitePixels = rgbPixelsToGray(
+      samplePerspectiveRgb(
+        image,
+        screen.correction,
+        EXPOSURE_WIDTH,
+        EXPOSURE_HEIGHT,
+        CALIBRATION_EXPOSURE_REGION,
+      ),
+    );
+    const metrics = metricsFromPixels(
+      whitePixels,
+      EXPOSURE_WIDTH,
+      EXPOSURE_HEIGHT,
+    );
+    const checker = analyzeChecker(image, screen.correction);
+    const ramp = analyzeToneRamp(image, screen.correction, checker);
+    const assessment: ExposureCalibrationAssessment = ramp.usable
+      ? {
+          mode: 'grayscale-ramp',
+          score: ramp.score,
+          ...(ramp.direction ? { direction: ramp.direction } : {}),
+          confidence: clamp(
+            1 - ramp.contaminationRatio * 0.7 - (ramp.residual / 255) * 2,
+            0.05,
+            1,
+          ),
+          contaminationRatio: ramp.contaminationRatio,
+          validToneLevels: ramp.validLevels,
+          white: round(ramp.white),
+          black: round(ramp.black),
+          warnings: ramp.warnings,
+        }
+      : checker.usable
+        ? {
+            mode: 'fullscreen-masked',
+            score: checker.score,
+            ...(checker.direction ? { direction: checker.direction } : {}),
+            confidence: clamp(1 - checker.contaminationRatio * 0.75, 0.05, 1),
+            contaminationRatio: checker.contaminationRatio,
+            validToneLevels: ramp.validLevels,
+            white: round(checker.white),
+            black: round(checker.black),
+            warnings: [...ramp.warnings, ...checker.warnings],
+          }
+        : {
+            mode: 'insufficient',
+            score: 1_000,
+            confidence: 0,
+            contaminationRatio: Math.max(
+              ramp.contaminationRatio,
+              checker.contaminationRatio,
+            ),
+            validToneLevels: ramp.validLevels,
+            white: round(checker.white),
+            black: round(checker.black),
+            warnings: [
+              ...ramp.warnings,
+              ...checker.warnings,
+              'Clean exposure references are unavailable',
+            ],
+          };
+    return [
+      {
+        screenId: screen.screenId,
+        metrics,
+        assessment,
+        pixels: whitePixels,
+      },
+    ];
   });
-  if (!reading.screenReadings.length)
+  if (!screenReadings.length)
     throw new Error(
       'Exposure calibration requires a corrected calibration-screen region',
     );
-  return reading;
+  const auto = combineMetrics(
+    screenReadings.map((reading) => reading.pixels),
+    EXPOSURE_WIDTH,
+    EXPOSURE_HEIGHT,
+  );
+  return {
+    roiEnabled: true,
+    full,
+    auto,
+    selected: auto,
+    screenReadings: screenReadings.map(
+      ({ pixels: _pixels, ...reading }) => reading,
+    ),
+    updatedAt: Date.now(),
+  };
 }
 
 async function decodeFocusFrame(jpeg: Buffer): Promise<GrayImage> {
