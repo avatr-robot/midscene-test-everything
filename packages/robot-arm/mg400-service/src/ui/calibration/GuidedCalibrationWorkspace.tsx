@@ -1998,7 +1998,6 @@ function GuidedContent({
                         cameraCheckRequired={outlineBlocked}
                         prepareFromTeaching
                         screenName={selected?.name}
-                        collapseSamplingMode={multipleScreens}
                         readyToCapture={config.ready && !outlineBlocked}
                         readyToStart={config.ready && !outlineBlocked}
                         onActivated={refresh}

@@ -1,4 +1,4 @@
-import { Button, Checkbox, Popconfirm, Radio, Space, Typography } from 'antd';
+import { Button, Checkbox, Popconfirm, Space, Typography } from 'antd';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CalibrationRequestError } from '../../client';
@@ -18,7 +18,6 @@ export function WebCalibrationWorkspace({
   readyToStart = true,
   cameraCheckRequired = false,
   prepareFromTeaching = false,
-  collapseSamplingMode = false,
   screenName,
   showSessionCancel = true,
   footer,
@@ -41,7 +40,6 @@ export function WebCalibrationWorkspace({
   readyToStart?: boolean;
   cameraCheckRequired?: boolean;
   prepareFromTeaching?: boolean;
-  collapseSamplingMode?: boolean;
   screenName?: string;
   showSessionCancel?: boolean;
   footer: HTMLElement | null;
@@ -59,41 +57,33 @@ export function WebCalibrationWorkspace({
   useCalibrationLanguage((state) => state.language);
   const { session, setup, busy, error } = controller;
   const s = completedAttempt && session?.stage !== 'completed' ? null : session;
-  const [mode, setMode] = useState<'slide' | 'standard'>('slide');
   const [confirmed, setConfirmed] = useState(false);
-  const samplingModeSelector = (
-    <Radio.Group
-      aria-label={t('Sampling mode')}
-      value={mode}
-      onChange={(event) => {
-        setMode(event.target.value);
-        setConfirmed(false);
-      }}
-    >
-      <Radio.Button value="slide">{t('Fast')}</Radio.Button>
-      <Radio.Button value="standard">{t('Regular')}</Radio.Button>
-    </Radio.Group>
-  );
   const [saveConfirmed, setSaveConfirmed] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [finishFailed, setFinishFailed] = useState(false);
   const [reviewStep, setReviewStep] = useState<number>();
   const stage = s?.stage;
-  const offerStandardRetry =
-    stage === 'interrupted' &&
-    !s?.awaitingSocketRecovery &&
-    !['MOTION_INTERRUPTED', 'MOTION_TIMEOUT'].includes(
-      s?.errorDetails?.code ?? '',
-    ) &&
-    s?.collectionFailed &&
-    s.explorationMode === 'slide';
+  const recovery = s?.automaticRecovery;
+  const recovering = Boolean(recovery);
+  const finishingAutomatically = Boolean(
+    s?.finishingAutomatically &&
+      (stage === 'boundary-review' || stage === 'review'),
+  );
   const completed = stage === 'completed' || completedAttempt;
   const activeMotion =
+    recovering ||
+    finishingAutomatically ||
     stage === 'collecting' ||
     stage === 'safety' ||
     stage === 'returning' ||
     stage === 'avoiding-camera';
   const mounted = useRef(false);
+  const activated = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (s?.stage !== 'completed' || activated.current === s.id) return;
+    activated.current = s.id;
+    void onActivated().catch(() => undefined);
+  }, [s?.id, s?.stage, onActivated]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -130,11 +120,22 @@ export function WebCalibrationWorkspace({
   }, [stage, s?.id, s?.teachingId]);
   useEffect(() => {
     onBeforeLeaveChange?.(async () => {
-      if (s && !completed && !['cancelled', 'interrupted'].includes(s.stage))
+      if (
+        s &&
+        !completed &&
+        (recovering || !['cancelled', 'interrupted'].includes(s.stage))
+      )
         await controller.command('cancel');
     });
     return () => onBeforeLeaveChange?.(null);
-  }, [s?.id, stage, completed, controller.command, onBeforeLeaveChange]);
+  }, [
+    s?.id,
+    stage,
+    completed,
+    recovering,
+    controller.command,
+    onBeforeLeaveChange,
+  ]);
   // The guided workspace is keyed by screen and attempt. Preparing a session
   // resolves the screen-specific reference without starting any robot motion.
   const prepared = useRef(false);
@@ -276,7 +277,7 @@ export function WebCalibrationWorkspace({
     >
       {t('Start automatic calibration')}
     </Button>
-  ) : stage === 'positioning' ? (
+  ) : recovery || finishingAutomatically ? null : stage === 'positioning' ? (
     <Button
       type="primary"
       loading={busy}
@@ -325,12 +326,7 @@ export function WebCalibrationWorkspace({
         (!confirmed || !s.phoneConnected || !readyToCapture)
       }
       onClick={() =>
-        start(() =>
-          controller.command(
-            mode === 'slide' ? 'start-slide' : 'start-automatic',
-            true,
-          ),
-        )
+        start(() => controller.command('start-unattended-slide', true))
       }
     >
       {t('Start automatic calibration')}
@@ -385,25 +381,9 @@ export function WebCalibrationWorkspace({
       type="primary"
       loading={busy}
       disabled={!saveConfirmed || !s.phoneConnected}
-      onClick={() =>
-        void controller
-          .command('accept', true)
-          .then(onActivated)
-          .catch(() => undefined)
-      }
+      onClick={() => command('accept', true)}
     >
       {t('Save and Use')}
-    </Button>
-  ) : offerStandardRetry ? (
-    <Button
-      type="primary"
-      disabled={busy || !readyToStart || !readyToCapture || !s.phoneConnected}
-      onClick={() => {
-        setMode('standard');
-        start(() => controller.command('retry-standard', true));
-      }}
-    >
-      {t('Retry in regular mode')}
     </Button>
   ) : ['cancelled', 'interrupted', 'capture-failed'].includes(stage ?? '') ? (
     <Button
@@ -419,7 +399,7 @@ export function WebCalibrationWorkspace({
       {showSessionCancel &&
         s &&
         !completed &&
-        !['cancelled', 'interrupted'].includes(stage ?? '') && (
+        (recovery || !['cancelled', 'interrupted'].includes(stage ?? '')) && (
           <Button
             type="primary"
             className="robot-cancel-calibration"
@@ -479,7 +459,7 @@ export function WebCalibrationWorkspace({
                       'Could not finish calibration. Check the connection and try again.',
                     ),
                   }
-                : error || s?.error
+                : !recovery && (error || s?.error)
                   ? {
                       tone: 'warning',
                       title: calibrationErrorText(error ?? s!.error!),
@@ -487,10 +467,24 @@ export function WebCalibrationWorkspace({
                   : undefined
             }
           />
-          {offerStandardRetry && (
-            <Typography.Paragraph>
-              {t('Retry in regular mode?')}
-            </Typography.Paragraph>
+          {recovery && (
+            <output>
+              {t(
+                recovery.kind === 'phone'
+                  ? 'Reconnecting to the calibration page…'
+                  : recovery.kind === 'verification'
+                    ? 'Resuming boundary verification…'
+                    : recovery.scope === 'point'
+                      ? 'Resuming fast sampling at the interrupted point…'
+                      : recovery.scope === 'height'
+                        ? 'Repeating fast height measurement…'
+                        : 'Restarting fast sampling from the reference position…',
+              )}{' '}
+              {calibrationErrorText(recovery.reason)}
+            </output>
+          )}
+          {finishingAutomatically && stage === 'review' && (
+            <output>{t('Saving the verified calibration…')}</output>
           )}
           {stage === 'ready' &&
             s?.referencePosition &&
@@ -603,20 +597,9 @@ export function WebCalibrationWorkspace({
               )}
               {stage === 'ready' && s?.referencePosition && s.teachingId && (
                 <>
-                  {collapseSamplingMode ? (
-                    <details>
-                      <summary>
-                        {t('Sampling mode')} ·{' '}
-                        {t(mode === 'slide' ? 'Fast' : 'Regular')}
-                      </summary>
-                      {samplingModeSelector}
-                    </details>
-                  ) : (
-                    samplingModeSelector
-                  )}
                   <Typography.Paragraph>
                     {t(
-                      'Sampling and fitting are followed by automatic hover and contact boundary verification. Record the Safe Position afterwards, then review and save.',
+                      'Calibration automatically retries eligible interruptions, verifies the boundaries, finds a Safe Position, and saves the result when all checks pass.',
                     )}
                   </Typography.Paragraph>
                   <Checkbox
@@ -624,16 +607,11 @@ export function WebCalibrationWorkspace({
                     onChange={(e) => {
                       setConfirmed(e.target.checked);
                       if (e.target.checked)
-                        speakCalibration(
-                          mode === 'slide' ? 'slideClearance' : 'samplingReady',
-                          2,
-                        );
+                        speakCalibration('slideClearance', 2);
                     }}
                   >
                     {t(
-                      mode === 'standard'
-                        ? 'I confirm the setup and clear workspace for sampling and automatic boundary verification.'
-                        : 'I confirm the screen is horizontal and securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.',
+                      'I confirm the screen is horizontal and securely fixed, the tool has elastic compliance, and the workspace is clear for sampling and automatic boundary verification.',
                     )}
                   </Checkbox>
                 </>
@@ -656,7 +634,7 @@ export function WebCalibrationWorkspace({
                 </Typography.Paragraph>
               )}
               <ExplorationQualitySummary quality={quality} />
-              {stage === 'review' && (
+              {stage === 'review' && !finishingAutomatically && (
                 <Checkbox
                   checked={saveConfirmed}
                   onChange={(e) => setSaveConfirmed(e.target.checked)}

@@ -1,7 +1,6 @@
 import type {
   CalibrationBatchCommand,
   CalibrationBatchPlan,
-  CalibrationBatchSamplingMode,
   CalibrationBatchState,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
@@ -11,7 +10,6 @@ import {
   Checkbox,
   Modal,
   Popconfirm,
-  Radio,
   Space,
   Table,
   Tag,
@@ -32,6 +30,13 @@ import { CalibrationQualityWarnings } from './CalibrationQualityWarnings';
 
 const active = (batch: CalibrationBatchState | null | undefined) =>
   Boolean(batch && ['running', 'waiting', 'stopping'].includes(batch.status));
+const recoveryLabels: Record<string, string> = {
+  'recovering-phone': 'Reconnecting to the calibration page…',
+  'retrying-verification': 'Resuming boundary verification…',
+  'retrying-point': 'Resuming fast sampling at the interrupted point…',
+  'retrying-height': 'Repeating fast height measurement…',
+  'retrying-screen': 'Restarting fast sampling from the reference position…',
+};
 const itemLabels: Record<string, string> = {
   pending: 'Pending',
   preparing: 'Preparing screen',
@@ -186,8 +191,6 @@ export const CalibrationBatchPanel = forwardRef<
   const [plan, setPlan] = useState<CalibrationBatchPlan>();
   const [previewPlan, setPreviewPlan] = useState<CalibrationBatchPlan>();
   const [deletedCalibrations, setDeletedCalibrations] = useState<string[]>([]);
-  const [samplingMode, setSamplingMode] =
-    useState<CalibrationBatchSamplingMode>('slide');
   const [horizontalConfirmed, setHorizontalConfirmed] = useState(false);
   const [manualAcceptance, setManualAcceptance] = useState(false);
   const latest = useRef({ onChanged, onActiveChange });
@@ -283,7 +286,6 @@ export const CalibrationBatchPanel = forwardRef<
       if (!mounted.current) return;
       setPlan(next);
       setHorizontalConfirmed(false);
-      setSamplingMode('slide');
       setManualAcceptance(false);
     });
   useImperativeHandle(
@@ -308,8 +310,8 @@ export const CalibrationBatchPanel = forwardRef<
         cameraId,
         auto: true,
         horizontalConfirmed: true,
-        compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
-        samplingMode,
+        compliantSetupConfirmed: true,
+        samplingMode: 'slide',
         ...(manualAcceptance ? { acceptance: 'manual' as const } : {}),
       });
       setPlan(undefined);
@@ -481,7 +483,11 @@ export const CalibrationBatchPanel = forwardRef<
                 {index === batch.currentIndex &&
                   item.status === 'exploring' &&
                   item.progress?.message && (
-                    <div>{t(item.progress.message)}</div>
+                    <div>
+                      {recoveryLabels[item.progress.phase] &&
+                        `${t(recoveryLabels[item.progress.phase])} `}
+                      {calibrationErrorText(item.progress.message)}
+                    </div>
                   )}
                 {index === batch.currentIndex &&
                   item.status.startsWith('awaiting-') &&
@@ -862,31 +868,12 @@ export const CalibrationBatchPanel = forwardRef<
               );
             })}
           </ol>
-          <details>
-            <summary>
-              {t('Sampling mode')} ·{' '}
-              {t(samplingMode === 'slide' ? 'Fast' : 'Regular')}
-            </summary>
-            <Radio.Group
-              aria-label={t('Sampling mode')}
-              value={samplingMode}
-              onChange={(event) => {
-                setSamplingMode(event.target.value);
-                setHorizontalConfirmed(false);
-              }}
-            >
-              <Radio.Button value="slide">{t('Fast')}</Radio.Button>
-              <Radio.Button value="standard">{t('Regular')}</Radio.Button>
-            </Radio.Group>
-          </details>
           <Checkbox
             checked={horizontalConfirmed}
             onChange={(event) => setHorizontalConfirmed(event.target.checked)}
           >
             {t(
-              samplingMode === 'slide'
-                ? 'All screens are fixed horizontally and the tool has elastic compliance.'
-                : 'All screens are secured; the measured plane allows limited tilt. The tool has elastic compliance.',
+              'All screens are fixed horizontally and the tool has elastic compliance.',
             )}
           </Checkbox>
           <Checkbox
