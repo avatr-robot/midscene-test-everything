@@ -2778,12 +2778,17 @@ export class CalibrationWorkflow {
       }
     } else await verify();
     if (s.stage !== 'safety') return;
-    if (
-      s.calibration.auto?.deferParkingBatchId ||
-      s.calibration.auto?.observationRecorded
-    ) {
-      s.safePosition = s.calibration.auto.observationRecorded
-        ? s.calibration.candidate!.observationPose
+    const calibration = s.calibration;
+    if (!calibration)
+      throw new RobotArmError(
+        'INVALID_SESSION',
+        'Boundary verification session is missing',
+        409,
+      );
+    const auto = calibration.auto;
+    if (auto?.deferParkingBatchId || auto?.observationRecorded) {
+      s.safePosition = auto.observationRecorded
+        ? calibration.candidate!.observationPose
         : undefined;
       s.stage = 'review';
     } else {
@@ -2791,7 +2796,7 @@ export class CalibrationWorkflow {
       s.stage = 'return-ready';
       if (s.teachingId)
         s.error =
-          s.calibration.auto?.cameraVisibility?.clear === false
+          auto?.cameraVisibility?.clear === false
             ? 'The camera could not verify the current screen after automatic parking. Check the live view or record a Safe Position manually.'
             : 'No reachable camera-clear Safe Position was found within the bounded search.';
     }

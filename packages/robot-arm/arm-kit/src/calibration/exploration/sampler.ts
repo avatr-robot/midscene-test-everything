@@ -111,7 +111,7 @@ interface GridTouch extends TouchPoint {
 export interface FastSamplingCheckpoint {
   direction: SampledTouch[];
   heights: SampledTouch[];
-  grid: GridTouch[];
+  grid: (GridTouch & SampledTouch)[];
   samples: CollectedSample[];
   searchBudget?: { searchSteps: number; maxSearchSteps: number };
   gridBudgets: Map<string, { searchSteps: number; maxSearchSteps: number }>;
@@ -1869,8 +1869,9 @@ export async function runAutoExploration(
       // A successful fallback confirms contact at this target. The next target
       // can slide from here using its own predicted height.
       if (touch.recovered && target.role === 'fit') heightAnchors.push(touch);
-      grid.push({ ...touch, target });
-      checkpoint?.grid.push(grid[grid.length - 1]);
+      const sample = { ...touch, target };
+      grid.push(sample);
+      checkpoint?.grid.push(sample);
       if (audit) auditSamples.push(touch);
       // Measured points (audit corners, local recoveries) keep improving the
       // plane that later predicted presses are derived from.
