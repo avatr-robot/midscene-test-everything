@@ -56,6 +56,7 @@ export class CalibrationBatch {
   private choice?: 'retry' | 'skip';
   private writes: Promise<unknown> = Promise.resolve();
   private stopRevision?: number;
+  private activeAttempt?: { host: CalibrationHost; id: string };
   constructor(private readonly devices: PlaygroundDevices) {}
   get active() {
     return Boolean(this.task || this.starting || this.stopping || this.busy);
@@ -947,6 +948,15 @@ export class CalibrationBatch {
   }
   private check(signal: AbortSignal) {
     signal.throwIfAborted();
+    const attempt = this.activeAttempt;
+    if (
+      this.runtime.stopRevision !== this.stopRevision &&
+      attempt?.host.service.followsAutomaticSamplingStop?.(
+        attempt.id,
+        this.stopRevision!,
+      )
+    )
+      this.stopRevision = this.runtime.stopRevision;
     this.runtime.assertStopRevision(this.stopRevision!);
   }
   private async wait(signal: AbortSignal) {
@@ -1161,6 +1171,7 @@ export class CalibrationBatch {
             this.check(signal);
             let session = await host.service.create({ batch: true });
             attemptId = session.id;
+            this.activeAttempt = { host, id: attemptId };
             const readAttempt = () => {
               const status = host.service.status();
               if (!status || status.id !== attemptId)
@@ -1254,6 +1265,34 @@ export class CalibrationBatch {
                   row.error = undefined;
                 });
                 break;
+              }
+              if (current.automaticRecovery) {
+                const recovery = current.automaticRecovery;
+                const progress = {
+                  phase:
+                    recovery.kind === 'phone'
+                      ? 'recovering-phone'
+                      : recovery.kind === 'verification'
+                        ? 'retrying-verification'
+                        : `retrying-${recovery.scope ?? 'screen'}`,
+                  message: recovery.reason,
+                  index: recovery.attempt,
+                  total: 2,
+                };
+                if (semanticJson(row.progress) !== semanticJson(progress))
+                  await this.update(() => {
+                    state.status = 'running';
+                    row.status = 'exploring';
+                    row.progress = progress;
+                  });
+                if (Date.now() > deadline)
+                  throw new RobotArmError(
+                    'AUTO_MOVE_TIMEOUT',
+                    'Screen exploration exceeded the batch time limit',
+                    409,
+                  );
+                await this.wait(signal);
+                continue;
               }
               if (
                 ['cancelled', 'interrupted', 'capture-failed'].includes(
@@ -1374,7 +1413,6 @@ export class CalibrationBatch {
                 row.status = 'failed';
                 row.error =
                   error instanceof Error ? error.message : String(error);
-                state.status = 'waiting';
               });
               // A controller fault or a failed submitted move stops all screens.
               const runtime = await this.runtime.state();
@@ -1384,11 +1422,29 @@ export class CalibrationBatch {
                 !runtime.state.connected
               )
                 throw error;
-              await this.update(() => {
-                state.status = 'failed';
-              });
-              return undefined;
+              if (
+                !attemptId &&
+                state.acceptance === 'automatic' &&
+                state.transfer?.corridorConfirmed &&
+                error instanceof RobotArmError &&
+                error.code === 'PHONE_UNAVAILABLE' &&
+                state.items
+                  .slice(state.currentIndex + 1)
+                  .some((item) => !terminal(item.status))
+              ) {
+                await this.assertResumeContext();
+                this.check(signal);
+                if (!this.choice) break;
+              }
+              if (!this.choice) {
+                await this.update(() => {
+                  state.status = 'failed';
+                });
+                return undefined;
+              }
             }
+          } finally {
+            this.activeAttempt = undefined;
           }
           if (this.choice === 'retry') retry = true;
           else if (this.choice === 'skip')
@@ -1426,13 +1482,14 @@ export class CalibrationBatch {
       }
       this.check(signal);
       await this.update(() => {
-        state.status = state.items.some((r) => r.status === 'failed')
-          ? 'failed'
-          : 'completed';
-        state.currentIndex = Math.min(
-          state.currentIndex,
-          state.items.length - 1,
+        const failed = state.items.findIndex(
+          (item) => item.status === 'failed',
         );
+        state.status = failed >= 0 ? 'failed' : 'completed';
+        state.currentIndex =
+          failed >= 0
+            ? failed
+            : Math.min(state.currentIndex, state.items.length - 1);
       });
       return last;
     } catch (error) {
@@ -1494,6 +1551,12 @@ export class CalibrationBatch {
             row.status = stopped ? 'stopped' : 'failed';
             row.error = state.error;
           }
+        }
+        if (!row) {
+          const failed = state.items.findIndex(
+            (item) => item.status === 'failed',
+          );
+          if (failed >= 0) state.currentIndex = failed;
         }
       });
       return undefined;

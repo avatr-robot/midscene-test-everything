@@ -686,6 +686,74 @@ describe('phone-assisted calibration coordinator', () => {
       }
     },
   );
+  it('stops fast sampling after the search budget is exhausted', async () => {
+    const f = await setup();
+    try {
+      const contactLost = new RobotArmError(
+        'FAST_ADAPTATION_LIMIT',
+        'Fast height search exhausted',
+      );
+      const run = rstest
+        .spyOn(AutomaticCapture.prototype, 'run')
+        .mockImplementation(async (host) => {
+          await host.move(pose(25, 30, 30));
+          throw contactLost;
+        });
+      const ready = await f.recordReference();
+      await f.service.command(ready.id, 'start-unattended-slide', true);
+      await rstest.waitFor(() => {
+        expect(f.service.status()).toMatchObject({
+          id: ready.id,
+          stage: 'interrupted',
+          explorationMode: 'slide',
+          errorDetails: { code: 'FAST_ADAPTATION_LIMIT' },
+        });
+        expect(run).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it.each([false, true])(
+    'only resumes unattended sampling when no operator stop occurred (%s)',
+    async (stop) => {
+      const f = await setup();
+      try {
+        const run = rstest
+          .spyOn(AutomaticCapture.prototype, 'run')
+          .mockImplementationOnce(async (host) => {
+            await new Promise<void>((resolve) =>
+              host.signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            );
+            host.check();
+          })
+          .mockRejectedValue(new Error('Second collection ended'));
+        const ready = await f.recordReference();
+        await f.service.command(ready.id, 'start-unattended-slide', true);
+        await rstest.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+        f.service.disconnectPhone();
+        await rstest.waitFor(() =>
+          expect(f.service.status()?.automaticRecovery?.kind).toBe('phone'),
+        );
+        if (stop) await f.runtime.stop();
+        await f.send();
+        await rstest.waitFor(() => {
+          expect(f.service.status()).toMatchObject({
+            id: ready.id,
+            stage: 'interrupted',
+          });
+          expect(f.service.status()?.automaticRecovery).toBeUndefined();
+          expect(run).toHaveBeenCalledTimes(stop ? 1 : 2);
+        });
+      } finally {
+        await f.dispose();
+      }
+    },
+  );
+
   it.each([
     'phone',
     'controller',
@@ -1642,9 +1710,10 @@ it.each([
   { mode: 'standard', offsetMm: 3, warns: true },
   { mode: 'slide', offsetMm: 2.01, warns: false },
 ])(
-  'parks after verified boundaries and checks a $offsetMm mm holdout for $mode batch acceptance',
+  'parks after verified boundaries and checks a $offsetMm mm holdout for $mode automatic acceptance',
   async ({ mode, offsetMm, warns }) => {
     const f = await setup();
+    const finishesAutomatically = mode === 'slide';
     const timer = setInterval(() => void f.send(), 50);
     try {
       rstest
@@ -1715,6 +1784,24 @@ it.each([
       const move = rstest.spyOn(f.adapter, 'moveLinear');
       let approachMoveCount: number | undefined;
       const phases = new Set<string>();
+      const boundarySteps: string[] = [];
+      if (finishesAutomatically) {
+        const verify = f.runtime.calibrationCommand.bind(f.runtime);
+        rstest
+          .spyOn(f.runtime, 'calibrationCommand')
+          .mockImplementation(async (...args) => {
+            const step = args[1].boundaryStep;
+            if (step) {
+              boundarySteps.push(step);
+              if (step === 'contact' && boundarySteps.length === 2)
+                throw new RobotArmError(
+                  'PHONE_DISCONNECTED',
+                  'Phone feedback temporarily unavailable',
+                );
+            }
+            return verify(...args);
+          });
+      }
       const unsubscribe = f.service.subscribe(() => {
         const current = f.service.status()!;
         if (current.referenceTravel) phases.add(current.referenceTravel);
@@ -1726,7 +1813,7 @@ it.each([
       });
       await f.service.command(
         f.state.id,
-        mode === 'slide' ? 'start-slide' : 'start-automatic',
+        finishesAutomatically ? 'start-unattended-slide' : 'start-automatic',
         true,
       );
       if (warns) {
@@ -1747,12 +1834,21 @@ it.each([
         () => {
           const state = f.service.status()!;
           expect(state.error).toBeUndefined();
-          expect(state.stage).toBe('review');
+          expect(state.stage).toBe(
+            finishesAutomatically ? 'completed' : 'review',
+          );
         },
         { timeout: 30000 },
       );
       const state = f.service.status()!;
       unsubscribe();
+      if (finishesAutomatically)
+        expect(boundarySteps).toEqual([
+          'hover',
+          'contact',
+          'contact',
+          'parking',
+        ]);
       expect([...phases]).toEqual([
         'approach',
         'hover',
@@ -1774,7 +1870,7 @@ it.each([
       }
       expect(state.calibration?.auto?.observationRecorded).toBe(true);
       expect(state.safePosition!.positionMm.z).toBeGreaterThanOrEqual(80);
-      expect(state.result).toBeUndefined();
+      if (!finishesAutomatically) expect(state.result).toBeUndefined();
       expect(state.explorationQuality?.holdoutMaxMm).toBeCloseTo(offsetMm);
       if (mode === 'slide') {
         expect(state.explorationQuality?.shortSideMm).toBeCloseTo(100);
@@ -1784,8 +1880,8 @@ it.each([
         (run) => run.group === 'hover',
       );
       expect(hoverRun?.targets.at(-1)?.name).toBe('Boundary edge 4');
-      const automatic = await f.service.acceptAutomatically();
-      expect(automatic.accepted).toBe(true);
+      if (!finishesAutomatically)
+        expect((await f.service.acceptAutomatically()).accepted).toBe(true);
       const saved = f.service.status()!;
       expect(saved.stage).toBe('completed');
       expect(saved.result?.verification?.protocol).toBe('auto-boundary-v1');

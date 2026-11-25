@@ -492,6 +492,14 @@ export interface AssistedCalibrationState {
   /** Stage at which this attempt was interrupted. */
   interruptedFrom?: AssistedCalibrationState['stage'];
   awaitingSocketRecovery?: boolean;
+  finishingAutomatically?: boolean;
+  automaticRecovery?: {
+    kind: 'phone' | 'sampling' | 'verification';
+    scope?: 'point' | 'height' | 'screen';
+    targetId?: string;
+    reason: string;
+    attempt: number;
+  };
   anchors: WebPoint[];
   points: CapturedCalibrationPoint[];
   /** Diagnostic 3D residuals, never a substitute for click verification. */
@@ -613,6 +621,7 @@ export type AssistedCalibrationAction =
   | 'return-safe'
   | 'start'
   | 'start-automatic'
+  | 'start-unattended-slide'
   | 'start-fast'
   | 'start-slide'
   | 'verify-boundary'
