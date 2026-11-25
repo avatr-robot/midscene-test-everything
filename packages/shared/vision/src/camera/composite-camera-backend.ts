@@ -2,6 +2,7 @@ import { RobotVisionError } from './errors.js';
 import type {
   CameraBackend,
   CameraDevice,
+  CameraHardwareControl,
   CameraSource,
   ResolvedCameraStreamOptions,
 } from './types.js';
@@ -83,5 +84,15 @@ export class CompositeCameraBackend implements CameraBackend {
       );
     }
     return backend.openStream(options);
+  }
+
+  async openHardwareControl(
+    deviceId: string,
+  ): Promise<CameraHardwareControl | undefined> {
+    // Enumeration owns device routing. Avoid a full hardware probe merely to
+    // answer an optional capability query for a device this registry does not
+    // currently route.
+    const backend = this.deviceBackends.get(deviceId);
+    return backend?.openHardwareControl?.(deviceId) ?? undefined;
   }
 }

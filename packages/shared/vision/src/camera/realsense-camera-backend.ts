@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RobotVisionError } from './errors.js';
+import { RealsenseCameraHardwareControl } from './realsense-camera-control.js';
 import { RealsenseCaptureGroup } from './realsense-capture-group.js';
 import type {
   CameraBackend,
@@ -10,6 +11,7 @@ import type {
   CameraControlCapability,
   CameraControlChoice,
   CameraDevice,
+  CameraHardwareControl,
   CameraIntrinsics,
   CameraKind,
   CameraSource,
@@ -266,8 +268,9 @@ export class RealsenseCameraBackend implements CameraBackend {
           name: /\brgb\b/iu.test(baseName) ? baseName : `${baseName} RGB`,
           backend: 'realsense',
           kind: 'color',
-          defaultCaptureSettings: { width: 1280, height: 720, fps: 30 },
-          ...(pairedModes.length ? { captureModes: pairedModes } : {}),
+          defaultCaptureSettings: colorModes[0] ??
+            pairedModes[0] ?? { width: 1280, height: 720, fps: 30 },
+          ...(colorModes.length ? { captureModes: colorModes } : {}),
           serial: input.serial,
           pairedDeviceId: depthId,
         },
@@ -318,6 +321,26 @@ export class RealsenseCameraBackend implements CameraBackend {
       });
     this.captures.set(device.serial, capture);
     return capture.open(kind, { ...options, kind });
+  }
+
+  async openHardwareControl(
+    deviceId: string,
+  ): Promise<CameraHardwareControl | undefined> {
+    let device = this.deviceCache.get(deviceId);
+    if (!device) {
+      await this.listDevices();
+      device = this.deviceCache.get(deviceId);
+    }
+    if (device?.kind !== 'color') return undefined;
+    const control = new RealsenseCameraHardwareControl(
+      deviceId,
+      device.serial,
+      this.pythonPath,
+      this.helperPath,
+      { spawnProcess: this.spawnProcess },
+    );
+    await control.open();
+    return control;
   }
 
   private async runProbe(args: string[]): Promise<string> {

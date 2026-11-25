@@ -67,6 +67,102 @@ function cameraDepthSettingsFile(directory: string, cameraId: string): string {
   );
 }
 
+interface CameraCaptureSettings {
+  width: number;
+  height: number;
+  fps: number;
+}
+
+type CameraProfileLabel =
+  | 'front'
+  | 'back'
+  | 'left'
+  | 'right'
+  | 'top'
+  | 'bottom';
+
+interface CameraProfilePreferences extends CameraCaptureSettings {
+  name?: string;
+  label?: CameraProfileLabel;
+  verticalFlip: boolean;
+  horizontalFlip: boolean;
+}
+
+function cameraCaptureSettingsFile(
+  directory: string,
+  cameraId: string,
+): string {
+  return path.join(
+    directory,
+    `${createHash('sha256').update(`capture:${cameraId}`).digest('hex')}.capture.json`,
+  );
+}
+
+function normalizeCaptureSettings(value: unknown): CameraCaptureSettings {
+  const input =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)
+      : undefined;
+  if (
+    !input ||
+    !Number.isInteger(input.width) ||
+    !Number.isInteger(input.height) ||
+    !Number.isInteger(input.fps) ||
+    (input.width as number) < 1 ||
+    (input.width as number) > 7680 ||
+    (input.height as number) < 1 ||
+    (input.height as number) > 4320 ||
+    (input.fps as number) < 1 ||
+    (input.fps as number) > 120
+  )
+    throw new RobotArmError(
+      'INVALID_ARGUMENT',
+      'Capture settings must contain valid width, height, and fps values',
+      400,
+    );
+  return {
+    width: input.width as number,
+    height: input.height as number,
+    fps: input.fps as number,
+  };
+}
+
+function normalizeCameraPreferences(value: unknown): CameraProfilePreferences {
+  const settings = normalizeCaptureSettings(value);
+  const input = value as Record<string, unknown>;
+  const name = input.name;
+  const label = input.label;
+  if (
+    name !== undefined &&
+    (typeof name !== 'string' || !name.trim() || name.trim().length > 120)
+  )
+    throw new RobotArmError(
+      'INVALID_ARGUMENT',
+      'Camera name must be between 1 and 120 characters',
+      400,
+    );
+  if (
+    label !== undefined &&
+    !['front', 'back', 'left', 'right', 'top', 'bottom'].includes(
+      label as string,
+    )
+  )
+    throw new RobotArmError(
+      'INVALID_ARGUMENT',
+      'Unsupported camera label',
+      400,
+    );
+  return {
+    ...settings,
+    ...(typeof name === 'string' ? { name: name.trim() } : {}),
+    ...(typeof label === 'string'
+      ? { label: label as CameraProfileLabel }
+      : {}),
+    verticalFlip: input.verticalFlip === true,
+    horizontalFlip: input.horizontalFlip === true,
+  };
+}
+
 function normalizeDepthControls(
   value: Record<string, number>,
 ): Record<string, number> {
@@ -666,6 +762,10 @@ export class CameraSessionManager {
     string,
     Record<string, number>
   >();
+  private readonly captureSettingsByCamera = new Map<
+    string,
+    CameraProfilePreferences
+  >();
   private readonly operations = new Map<string, Promise<unknown>>();
   private closing?: Promise<void>;
   private readonly owners = new Map<string, Set<string>>();
@@ -757,6 +857,100 @@ export class CameraSessionManager {
       if (error instanceof RobotArmError) throw error;
       return {};
     }
+  }
+
+  async cameraPreferences(
+    cameraId: string,
+  ): Promise<CameraProfilePreferences | undefined> {
+    const cached = this.captureSettingsByCamera.get(cameraId);
+    if (cached) return { ...cached };
+    try {
+      const stored = JSON.parse(
+        await readFile(
+          cameraCaptureSettingsFile(this.directory, cameraId),
+          'utf8',
+        ),
+      ) as unknown;
+      const settings = normalizeCameraPreferences(stored);
+      this.captureSettingsByCamera.set(cameraId, settings);
+      return { ...settings };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (error instanceof RobotArmError) throw error;
+      return undefined;
+    }
+  }
+
+  async captureSettings(
+    cameraId: string,
+  ): Promise<CameraCaptureSettings | undefined> {
+    const preferences = await this.cameraPreferences(cameraId);
+    if (!preferences) return undefined;
+    return {
+      width: preferences.width,
+      height: preferences.height,
+      fps: preferences.fps,
+    };
+  }
+
+  async setCaptureSettings(
+    cameraId: string,
+    value: CameraCaptureSettings &
+      Partial<
+        Pick<
+          CameraProfilePreferences,
+          'name' | 'label' | 'verticalFlip' | 'horizontalFlip'
+        >
+      >,
+  ): Promise<{
+    settings: CameraProfilePreferences;
+    stream?: CameraStreamInfo;
+  }> {
+    return this.serialize(cameraId, async () => {
+      const session = this.sessions.get(cameraId);
+      const device =
+        session?.camera ??
+        (await this.backend.listDevices()).find(
+          (candidate) => candidate.id === cameraId,
+        );
+      if (!device)
+        throw new RobotArmError('CAMERA_NOT_FOUND', 'Camera not found', 404);
+      const settings = normalizeCameraPreferences(value);
+      if (
+        device.captureModes?.length &&
+        !device.captureModes.some(
+          (mode) =>
+            mode.width === settings.width &&
+            mode.height === settings.height &&
+            mode.fps === settings.fps,
+        )
+      )
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'The selected capture mode is not supported by this camera',
+          400,
+        );
+      await mkdir(this.directory, { recursive: true });
+      const file = cameraCaptureSettingsFile(this.directory, cameraId);
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      await writeFile(temporary, JSON.stringify({ cameraId, ...settings }), {
+        mode: 0o600,
+      });
+      await rename(temporary, file);
+      this.captureSettingsByCamera.set(cameraId, settings);
+      if (session)
+        await this.streams.applyCaptureOptions(cameraId, {
+          width: settings.width,
+          height: settings.height,
+          fps: settings.fps,
+          verticalFlip: settings.verticalFlip,
+          horizontalFlip: settings.horizontalFlip,
+        });
+      return {
+        settings: { ...settings },
+        ...(session ? { stream: session.stream.getInfo() } : {}),
+      };
+    });
   }
 
   async setDepthControls(
@@ -927,6 +1121,7 @@ export class CameraSessionManager {
       (entry) => entry.id === id,
     );
     if (!camera) throw new Error(`Camera not found: ${id}`);
+    const savedPreferences = await this.cameraPreferences(id);
     const stream = await this.streams.create({
       deviceId: id,
       kind: camera.kind,
@@ -934,6 +1129,15 @@ export class CameraSessionManager {
         ? { depthControls: await this.depthControls(id) }
         : {}),
       ...camera.defaultCaptureSettings,
+      ...(savedPreferences
+        ? {
+            width: savedPreferences.width,
+            height: savedPreferences.height,
+            fps: savedPreferences.fps,
+            verticalFlip: savedPreferences.verticalFlip,
+            horizontalFlip: savedPreferences.horizontalFlip,
+          }
+        : {}),
     });
     try {
       let control;

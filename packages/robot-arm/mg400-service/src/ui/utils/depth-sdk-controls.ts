@@ -1,16 +1,7 @@
 import type { CameraControlCapability, CameraControlChoice } from '../cameras';
+import { hasTranslation, t } from '../i18n';
 
-const CONTROL_LABELS_ZH: Record<string, string> = {
-  enable_auto_exposure: '自动曝光',
-  exposure: '曝光',
-  gain: '增益',
-  laser_power: '激光功率',
-  emitter_enabled: '红外发射器',
-  visual_preset: '视觉预设',
-  hdr_enabled: 'HDR',
-  depth_units: '深度单位',
-  frames_queue_size: '帧队列长度',
-};
+const GENERIC_SDK_DESCRIPTIONS = new Set(['hdroption']);
 const CHOICE_LABELS_ZH: Record<string, string> = {
   custom: '自定义',
   default: '默认',
@@ -48,13 +39,8 @@ function formatNumber(value: number): string {
   return Number(value.toPrecision(6)).toString();
 }
 
-export function depthControlLabel(
-  control: CameraControlCapability,
-  language: 'zh' | 'en',
-): string {
-  return language === 'zh'
-    ? (CONTROL_LABELS_ZH[control.key] ?? control.label)
-    : control.label;
+function normalize(value: string): string {
+  return value.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/gu, '');
 }
 
 export function depthControlDescription(
@@ -63,13 +49,14 @@ export function depthControlDescription(
 ): string | undefined {
   const description = control.description?.trim();
   if (!description || SELF_EXPLANATORY.has(control.key)) return undefined;
-  if (language === 'en') return description;
-  const translated = /increases|decreases|controls|values|l%|projector/i.test(
-    description,
+  const normalizedDescription = normalize(description);
+  if (
+    normalizedDescription === normalize(control.label) ||
+    GENERIC_SDK_DESCRIPTIONS.has(normalizedDescription)
   )
-    ? undefined
-    : description;
-  return translated;
+    return undefined;
+  if (language === 'en') return description;
+  return hasTranslation(description, language) ? t(description) : undefined;
 }
 
 export function depthControlRangeHint(

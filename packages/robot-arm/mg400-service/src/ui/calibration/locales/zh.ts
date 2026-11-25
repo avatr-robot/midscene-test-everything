@@ -1,4 +1,5 @@
 import { assistedCalibrationZh } from './assisted-calibration-zh';
+import { depthZh } from './depth-zh';
 import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
   'The preview phone does not match this screen’s saved binding. Use the bound phone or release the binding first.':
@@ -2394,4 +2395,5 @@ export const zh: Record<string, string> = {
   ...setupZh,
   ...migratedZh,
   ...assistedCalibrationZh,
+  ...depthZh,
 };

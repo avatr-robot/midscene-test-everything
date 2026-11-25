@@ -12,6 +12,7 @@ import { RealsenseCameraBackend } from '../dist/index.js';
 
 const backend = new RealsenseCameraBackend();
 let source;
+let control;
 try {
   const devices = await backend.listDevices();
   const depth = devices.find((device) => device.kind === 'depth');
@@ -20,6 +21,28 @@ try {
     throw new Error('No paired RealSense RGB and depth endpoints found');
   if (depth.pairedDeviceId !== color.id || color.pairedDeviceId !== depth.id)
     throw new Error('RealSense RGB and depth endpoints are not paired');
+
+  control = await backend.openHardwareControl(color.id);
+  if (!control) throw new Error('RealSense RGB control bridge did not open');
+  const controls = await control.read();
+  for (const property of [
+    'exposure',
+    'gain',
+    'whiteBalance',
+    'brightness',
+    'contrast',
+  ]) {
+    if (!controls[property]?.supportsManual)
+      throw new Error(`RealSense RGB ${property} control is unavailable`);
+  }
+  await control.set(
+    'exposure',
+    controls.exposure.value,
+    controls.exposure.mode,
+  );
+  const written = await control.read();
+  if (written.exposure?.mode !== controls.exposure.mode)
+    throw new Error('RealSense RGB exposure mode did not persist');
 
   const mode = depth.captureModes?.[0] ?? {
     width: 1280,
@@ -60,5 +83,6 @@ try {
     `PASS ${depth.name} ${mode.width}x${mode.height}@${mode.fps}, ${frame.depth.data.length} depth bytes, ${frame.alignedColorJpeg.length} RGB bytes\n`,
   );
 } finally {
+  await control?.close();
   await source?.close();
 }

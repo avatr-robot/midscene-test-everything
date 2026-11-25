@@ -16,11 +16,11 @@ import {
   Cable,
   ChevronDown,
   ChevronUp,
+  Edit3,
   Play,
   RefreshCw,
   ScanLine,
   Settings2,
-  SlidersHorizontal,
   StopCircle,
   Unplug,
   VideoOff,
@@ -45,11 +45,14 @@ import {
   cameraPreviewUrl,
 } from '../camera-preview';
 import {
+  type CameraCaptureSettings,
+  type CameraProfileUpdate,
   activateCameraImaging,
   cameraRailEntries,
   cameraScreenNeedsCalibration,
   cameraStateLabel,
   selectCameraScreen,
+  updateCameraCaptureSettings,
   useCameras,
 } from '../cameras';
 import { useConnection } from '../connection';
@@ -62,14 +65,15 @@ import { useRobotArm } from '../hooks/useRobotArm';
 import { usePreferences, useT } from '../i18n';
 import { PreviewControl } from '../preview/PreviewControl';
 import type { PreviewScreenGeometry } from '../preview/projection';
+import { depthFusionResolutionMismatch } from '../utils/depth-fusion';
 import { CameraPerspectiveActions } from './CameraPerspectiveActions';
+import { CameraProfileEditor } from './CameraProfileEditor';
 import { CameraRail } from './CameraRail';
 import { CameraStagePreview } from './CameraStagePreview';
 import { DepthCameraPreview } from './DepthCameraPreview';
 import { DepthFusionControl } from './DepthFusionControl';
 import { DepthPointCloudView } from './DepthPointCloudView';
 import { DepthProbeOverlay } from './DepthProbeOverlay';
-import { DepthSdkControls } from './DepthSdkControls';
 import { DeviceCalibration } from './DeviceCalibration';
 import { DeviceTransfer } from './DeviceTransfer';
 import { RobotConnectionDialog } from './RobotConnectionDialog';
@@ -101,14 +105,11 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const [transferId, setTransferId] = useState<string>();
   const [preferredView, setCameraView] = useState<CameraView>('raw');
   const [depthViewMode, setDepthViewMode] = useState<'2d' | '3d'>('2d');
-  const [depthSettingsOpen, setDepthSettingsOpen] = useState(false);
-  const [depthControlValues, setDepthControlValues] = useState<
-    Record<string, number>
-  >({});
-  const [depthControlsSaving, setDepthControlsSaving] = useState(false);
-  const [depthSettingsError, setDepthSettingsError] = useState<string>();
   const [depthFusionEnabled, setDepthFusionEnabled] = useState(false);
   const [depthFusionOpacity, setDepthFusionOpacity] = useState(0.45);
+  const [cameraSettingsOpen, setCameraSettingsOpen] = useState(false);
+  const [cameraSettingsSaving, setCameraSettingsSaving] = useState(false);
+  const [cameraSettingsError, setCameraSettingsError] = useState<string>();
   const [twinView, setTwinView] = useState<TwinViewPreset>('default');
   const [previewError, setPreviewError] = useState<string>();
   const [previewRevision, setPreviewRevision] = useState(0);
@@ -169,10 +170,10 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     setWizard(undefined);
     setPausedCamera(undefined);
     setPreferredScreenId(undefined);
-    setDepthSettingsOpen(false);
-    setDepthSettingsError(undefined);
     setDepthViewMode('2d');
     setDepthFusionEnabled(false);
+    setCameraSettingsOpen(false);
+    setCameraSettingsError(undefined);
   }, [setupSession]);
   useEffect(() => {
     if (
@@ -188,20 +189,28 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const pairedColorCamera = depthCamera
     ? cameras.find((camera) => camera.id === selected?.pairedDeviceId)
     : undefined;
-  const railCameras = cameraRailEntries(cameras, selected, depthFusionEnabled);
+  const depthFusionAvailable =
+    selected?.stream?.state === 'running' &&
+    pairedColorCamera?.stream?.state === 'running';
+  const depthFusionMismatch =
+    depthFusionAvailable &&
+    depthFusionResolutionMismatch(selected, pairedColorCamera);
+  const depthFusionBlockedReason = depthFusionMismatch
+    ? language === 'zh'
+      ? `分辨率不一致：RGB ${depthFusionMismatch.color.width}×${depthFusionMismatch.color.height}，深度 ${depthFusionMismatch.depth.width}×${depthFusionMismatch.depth.height}。请先调整为相同分辨率。`
+      : `Resolution mismatch: RGB ${depthFusionMismatch.color.width}×${depthFusionMismatch.color.height}, depth ${depthFusionMismatch.depth.width}×${depthFusionMismatch.depth.height}. Use the same resolution before fusion.`
+    : undefined;
+  const depthFusionActive =
+    depthFusionEnabled && depthFusionAvailable && !depthFusionBlockedReason;
+  const railCameras = cameraRailEntries(cameras, selected, depthFusionActive);
+  useEffect(() => {
+    if (depthFusionEnabled && !depthFusionActive) setDepthFusionEnabled(false);
+  }, [depthFusionActive, depthFusionEnabled]);
   useEffect(() => {
     setDepthViewMode('2d');
     setDepthFusionEnabled(false);
-    setDepthSettingsOpen(false);
-    setDepthSettingsError(undefined);
-    setDepthControlValues(
-      Object.fromEntries(
-        (selected?.controls ?? []).map((control) => [
-          control.key,
-          selected?.depthControls?.[control.key] ?? control.value,
-        ]),
-      ),
-    );
+    setCameraSettingsOpen(false);
+    setCameraSettingsError(undefined);
   }, [selected?.id]);
   const depthProbe = useDepthProbe(selected, selected?.stream);
   const streamState = selected?.stream?.state;
@@ -457,24 +466,28 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     // A status poll already in flight may still describe the completed motion.
     await Promise.all([refresh(false), check(true)]);
   }, [check, refresh]);
-  const saveDepthSettings = useCallback(async () => {
-    if (!depthCamera || !selectedId) return;
-    setDepthControlsSaving(true);
-    setDepthSettingsError(undefined);
-    try {
-      const result = await updateDepthControls(selectedId, depthControlValues);
-      setDepthControlValues(result.controls);
-      setPreviewRevision((value) => value + 1);
-      await refresh(false);
-      setDepthSettingsOpen(false);
-    } catch (error) {
-      setDepthSettingsError(
-        error instanceof Error ? error.message : String(error),
-      );
-    } finally {
-      setDepthControlsSaving(false);
-    }
-  }, [depthCamera, depthControlValues, refresh, selectedId]);
+  const saveCameraSettings = useCallback(
+    async (update: CameraProfileUpdate) => {
+      if (!selectedId) return;
+      setCameraSettingsSaving(true);
+      setCameraSettingsError(undefined);
+      try {
+        await updateCameraCaptureSettings(selectedId, update);
+        if (update.depthControls)
+          await updateDepthControls(selectedId, update.depthControls);
+        setPreviewRevision((value) => value + 1);
+        await refresh(false);
+        setCameraSettingsOpen(false);
+      } catch (error) {
+        setCameraSettingsError(
+          error instanceof Error ? error.message : String(error),
+        );
+      } finally {
+        setCameraSettingsSaving(false);
+      }
+    },
+    [refresh, selectedId],
+  );
   const previewControl = usePreviewControl({
     contextKey: JSON.stringify([controlContext, cameraView]),
     onCompleted: refreshAfterControl,
@@ -789,8 +802,9 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                 (pairedColorCamera?.stream?.state === 'running' ||
                   depthFusionEnabled) && (
                   <DepthFusionControl
-                    available={pairedColorCamera?.stream?.state === 'running'}
-                    enabled={depthFusionEnabled}
+                    available={depthFusionAvailable}
+                    blockedReason={depthFusionBlockedReason}
+                    enabled={depthFusionActive}
                     onChange={setDepthFusionEnabled}
                     onOpacityChange={setDepthFusionOpacity}
                     opacity={depthFusionOpacity}
@@ -809,20 +823,16 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                   ]}
                 />
               )}
-              {depthCamera && selected.controls?.length ? (
-                <Tooltip
-                  title={language === 'zh' ? '深度参数' : 'Depth controls'}
-                >
-                  <Button
-                    type="text"
-                    aria-label={
-                      language === 'zh' ? '深度参数' : 'Depth controls'
-                    }
-                    icon={<SlidersHorizontal size={16} />}
-                    onClick={() => setDepthSettingsOpen(true)}
-                  />
-                </Tooltip>
-              ) : null}
+              <Tooltip
+                title={language === 'zh' ? '相机配置' : 'Camera profile'}
+              >
+                <Button
+                  type="text"
+                  aria-label={language === 'zh' ? '相机配置' : 'Camera profile'}
+                  icon={<Edit3 size={16} />}
+                  onClick={() => setCameraSettingsOpen(true)}
+                />
+              </Tooltip>
               {activeScreen && (standalone || (connected && setupSession)) && (
                 <CameraPerspectiveActions
                   key={JSON.stringify([
@@ -986,8 +996,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                       <>
                         <DepthCameraPreview
                           alt={
-                            depthFusionEnabled &&
-                            pairedColorCamera?.stream?.state === 'running'
+                            depthFusionActive
                               ? `${selected.name} · RGB + Depth`
                               : selected.name
                           }
@@ -1028,8 +1037,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                           onPointerSample={depthProbe.onPointerSample}
                           overlayOpacity={depthFusionOpacity}
                           overlaySrc={
-                            depthFusionEnabled &&
-                            pairedColorCamera?.stream?.state === 'running'
+                            depthFusionActive
                               ? `${cameraPreviewUrl(
                                   selected.id,
                                   'raw',
@@ -1038,8 +1046,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                               : undefined
                           }
                           src={
-                            depthFusionEnabled &&
-                            pairedColorCamera?.stream?.state === 'running'
+                            depthFusionActive
                               ? `${cameraPreviewUrl(
                                   pairedColorCamera.id,
                                   'raw',
@@ -1165,62 +1172,14 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
           {error && <Typography.Text type="danger">{error}</Typography.Text>}
         </section>
       )}
-      <Drawer
-        rootClassName="robot-drawer robot-settings-drawer"
-        title={
-          <Space>
-            <SlidersHorizontal size={17} />
-            <span>{language === 'zh' ? '深度参数' : 'Depth controls'}</span>
-          </Space>
-        }
-        open={Boolean(depthCamera && depthSettingsOpen)}
-        onClose={() => setDepthSettingsOpen(false)}
-        width={460}
-        extra={
-          <Button
-            type="primary"
-            loading={depthControlsSaving}
-            onClick={() => void saveDepthSettings()}
-          >
-            {language === 'zh' ? '保存并重载' : 'Save and restart'}
-          </Button>
-        }
-      >
-        <div className="robot-panel">
-          {depthSettingsError && (
-            <Alert
-              showIcon
-              type="error"
-              message={
-                language === 'zh'
-                  ? '无法应用深度参数'
-                  : 'Could not apply depth controls'
-              }
-              description={depthSettingsError}
-            />
-          )}
-          {selected?.controls?.length ? (
-            <DepthSdkControls
-              controls={selected.controls}
-              values={depthControlValues}
-              onChange={(key, value) =>
-                setDepthControlValues((current) => ({
-                  ...current,
-                  [key]: value,
-                }))
-              }
-            />
-          ) : (
-            <Empty
-              description={
-                language === 'zh'
-                  ? '该深度相机没有可调整的 SDK 参数'
-                  : 'This depth camera exposes no SDK controls'
-              }
-            />
-          )}
-        </div>
-      </Drawer>
+      <CameraProfileEditor
+        camera={cameraSettingsOpen ? (selected ?? null) : null}
+        error={cameraSettingsError}
+        fallbackSettings={{ width: 1280, height: 720, fps: 30 }}
+        saving={cameraSettingsSaving}
+        onCancel={() => setCameraSettingsOpen(false)}
+        onSave={(settings) => void saveCameraSettings(settings)}
+      />
       {connected && (
         <Drawer
           rootClassName="robot-drawer robot-settings-drawer"

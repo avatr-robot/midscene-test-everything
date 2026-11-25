@@ -19,6 +19,12 @@ export function t(
     Number(index) < values.length ? String(values[Number(index)]) : match,
   );
 }
+export function hasTranslation(
+  message: string,
+  language: Language = useCalibrationLanguage.getState().language,
+): boolean {
+  return language === 'en' || Object.prototype.hasOwnProperty.call(zh, message);
+}
 export function calibrationErrorText(message: string): string {
   const parkingOrientation =
     /^Shared parking needs the taught tool orientation\. The tool is off by ([\d.]+)° \(allowed ([\d.]+)°\)\. Align it at a confirmed safe position and retry\.$/.exec(

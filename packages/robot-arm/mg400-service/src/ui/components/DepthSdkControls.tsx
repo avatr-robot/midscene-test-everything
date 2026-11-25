@@ -1,10 +1,9 @@
 import { InputNumber, Select, Switch, Tooltip, Typography } from 'antd';
 import type { CameraControlCapability } from '../cameras';
-import { useLanguage } from '../i18n';
+import { t, useLanguage } from '../i18n';
 import {
   depthControlChoiceLabel,
   depthControlDescription,
-  depthControlLabel,
   depthControlRangeHint,
 } from '../utils/depth-sdk-controls';
 
@@ -56,7 +55,7 @@ function DepthControlField({
 }) {
   const disabled = isDisabled(control, values);
   const value = values[control.key] ?? control.value;
-  const label = depthControlLabel(control, language);
+  const label = t(control.label);
   const description = depthControlDescription(control, language);
   const range = depthControlRangeHint(control, language);
   const tooltip =

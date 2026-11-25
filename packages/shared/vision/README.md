@@ -58,6 +58,13 @@ little-endian `uint16` depth map aligned to the RGB frame. Use
 for the matching RGB image. RealSense capture modes also include the RGB
 intrinsics needed to build a 3D point cloud.
 
+The RealSense RGB endpoint also exposes camera-imaging controls through
+`librealsense`. Exposure, gain, white balance, brightness and contrast are read
+and written through the color sensor options used by the existing camera
+calibration workflow. Focus is only reported when the connected RGB sensor
+exposes a focus option; capture-only color modules continue calibrating
+exposure, white balance and tone without a synthetic focus control.
+
 After installing the dependencies, run the hardware smoke test:
 
 ```sh

@@ -27,6 +27,14 @@ MAX_RECORD_BYTES = 64 * 1024 * 1024
 OPTION_CHOICE_LABELS = {
     ("visual_preset", 6.0): "Remove Irregular Streaks",
 }
+COLOR_CONTROL_OPTIONS = {
+    "exposure": "exposure",
+    "gain": "gain",
+    "whiteBalance": "white_balance",
+    "brightness": "brightness",
+    "contrast": "contrast",
+    "focus": "focus",
+}
 
 
 def fail(message: str) -> None:
@@ -131,6 +139,157 @@ def supported_capture_modes(
             key=lambda item: (-item[0], -item[1], -item[2]),
         )
     ]
+
+
+def color_sensor(rs: Any, serial: str) -> Any:
+    device = next(
+        (
+            candidate
+            for candidate in rs.context().query_devices()
+            if candidate.get_info(rs.camera_info.serial_number) == serial
+        ),
+        None,
+    )
+    if device is None:
+        raise RuntimeError(f"RealSense device not found: {serial}")
+    sensor = sensor_for_stream(device, rs.stream.color)
+    if sensor is None:
+        raise RuntimeError(f"RealSense device has no color sensor: {serial}")
+    return sensor
+
+
+def option_control(
+    sensor: Any,
+    rs: Any,
+    property_name: str,
+    option_name: str,
+    *,
+    supports_auto: bool,
+    auto_option: Any | None = None,
+) -> dict[str, Any]:
+    option = getattr(rs.option, option_name)
+    if option not in sensor.get_supported_options():
+        raise RuntimeError(f"Unsupported RealSense color option: {option_name}")
+    option_range = sensor.get_option_range(option)
+    auto = (
+        supports_auto
+        and auto_option is not None
+        and sensor.get_option(auto_option) > 0
+    )
+    return {
+        "property": property_name,
+        "value": float(sensor.get_option(option)),
+        "mode": "auto" if auto else "manual",
+        "min": float(option_range.min),
+        "max": float(option_range.max),
+        "step": float(option_range.step),
+        "default": float(option_range.default),
+        "supportsAuto": supports_auto,
+        "supportsManual": True,
+    }
+
+
+def query_color_controls(rs: Any, sensor: Any) -> dict[str, Any]:
+    auto_exposure = rs.option.enable_auto_exposure
+    auto_white_balance = rs.option.enable_auto_white_balance
+    controls = {}
+    supported = sensor.get_supported_options()
+    for property_name, option_name in COLOR_CONTROL_OPTIONS.items():
+        option = getattr(rs.option, option_name, None)
+        if option is None:
+            if property_name == "focus":
+                continue
+            raise RuntimeError(f"Unsupported RealSense color option: {option_name}")
+        if option not in supported:
+            if property_name == "focus":
+                continue
+            raise RuntimeError(f"Unsupported RealSense color option: {option_name}")
+        supports_auto = property_name in ("exposure", "gain", "whiteBalance")
+        controls[property_name] = option_control(
+            sensor,
+            rs,
+            property_name,
+            option_name,
+            supports_auto=supports_auto,
+            auto_option=(
+                auto_white_balance
+                if property_name == "whiteBalance"
+                else auto_exposure
+            )
+            if supports_auto
+            else None,
+        )
+    return controls
+
+
+def set_color_control(rs: Any, sensor: Any, command: dict[str, Any]) -> None:
+    property_name = command.get("property")
+    option_name = COLOR_CONTROL_OPTIONS.get(str(property_name))
+    if option_name is None:
+        raise RuntimeError(f"Unsupported RealSense camera control: {property_name}")
+    option = getattr(rs.option, option_name, None)
+    if option is None:
+        raise RuntimeError(f"Unsupported RealSense camera control: {property_name}")
+    mode = command.get("mode")
+    if mode not in ("auto", "manual"):
+        raise RuntimeError(f"Invalid control mode: {mode}")
+    if property_name == "focus" and mode == "auto":
+        return
+    if property_name in ("exposure", "gain"):
+        sensor.set_option(
+            rs.option.enable_auto_exposure,
+            0.0 if mode == "manual" else 1.0,
+        )
+    if property_name == "whiteBalance":
+        sensor.set_option(
+            rs.option.enable_auto_white_balance,
+            0.0 if mode == "manual" else 1.0,
+        )
+    if mode == "manual" or property_name in ("brightness", "contrast"):
+        value = command.get("value")
+        if not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise RuntimeError(f"Invalid control value for {property_name}: {value}")
+        sensor.set_option(option, float(value))
+
+
+def control_bridge(rs: Any, serial: str) -> None:
+    sensor = color_sensor(rs, serial)
+    sys.stdout.write(
+        json.dumps({"id": "ready", "ok": True}, separators=(",", ":")) + "\n"
+    )
+    sys.stdout.flush()
+    for line in sys.stdin:
+        request_id = None
+        try:
+            command = json.loads(line)
+            request_id = command.get("id")
+            action = command.get("action")
+            if action == "query":
+                response = {
+                    "id": request_id,
+                    "ok": True,
+                    "controls": query_color_controls(rs, sensor),
+                }
+            elif action == "set":
+                set_color_control(rs, sensor, command)
+                response = {"id": request_id, "ok": True}
+            elif action == "shutdown":
+                sys.stdout.write(
+                    json.dumps({"id": request_id, "ok": True}, separators=(",", ":"))
+                    + "\n"
+                )
+                sys.stdout.flush()
+                return
+            else:
+                raise RuntimeError(f"Unknown control action: {action}")
+        except Exception as error:
+            response = {
+                "id": request_id,
+                "ok": False,
+                "error": str(error),
+            }
+        sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
 
 
 def list_devices(rs: Any) -> dict[str, Any]:
@@ -416,6 +575,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list")
+    control = subparsers.add_parser("control")
+    control.add_argument("--serial", required=True)
     stream = subparsers.add_parser("stream")
     stream.add_argument("--serial", required=True)
     stream.add_argument("--depth-width", required=True, type=int)
@@ -432,6 +593,9 @@ def main() -> None:
     rs, np, image_module = imports()
     if args.command == "list":
         print(json.dumps(list_devices(rs), separators=(",", ":")), flush=True)
+        return
+    if args.command == "control":
+        control_bridge(rs, args.serial)
         return
     controls = {}
     for item in args.control:

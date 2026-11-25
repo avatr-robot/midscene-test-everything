@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from '@rstest/core';
+import { depthFusionResolutionMismatch } from '../src/ui/utils/depth-fusion';
 import {
   buildDepthPointCloud,
   depthClipZ,
@@ -63,4 +64,24 @@ test('ignores sparse far-range readings when framing a nearby work surface', () 
 
   assert.equal(cloud.pointCount, 4);
   assert.ok(cloud.radius < 2);
+});
+
+test('only allows RGB and depth fusion for equal native capture resolutions', () => {
+  assert.deepEqual(
+    depthFusionResolutionMismatch(
+      { stream: { width: 1280, height: 720 } },
+      { stream: { width: 1920, height: 1080 } },
+    ),
+    {
+      depth: { width: 1280, height: 720 },
+      color: { width: 1920, height: 1080 },
+    },
+  );
+  assert.equal(
+    depthFusionResolutionMismatch(
+      { stream: { width: 1280, height: 720 } },
+      { stream: { width: 1280, height: 720 } },
+    ),
+    undefined,
+  );
 });

@@ -1,14 +1,16 @@
-import { Slider, Switch } from 'antd';
+import { Slider, Switch, Tooltip } from 'antd';
 import { useLanguage } from '../i18n';
 
 export function DepthFusionControl({
   available,
+  blockedReason,
   enabled,
   opacity,
   onChange,
   onOpacityChange,
 }: {
   available: boolean;
+  blockedReason?: string;
   enabled: boolean;
   opacity: number;
   onChange: (enabled: boolean) => void;
@@ -17,16 +19,21 @@ export function DepthFusionControl({
   const zh = useLanguage() === 'zh';
   return (
     <div className="depth-fusion-control">
-      <span className="depth-fusion-toggle">
-        <span>{zh ? 'RGB + 深度' : 'RGB + Depth'}</span>
-        <Switch
-          aria-label={zh ? '融合 RGB 与深度' : 'Fuse RGB and depth'}
-          checked={enabled}
-          disabled={!available && !enabled}
-          onChange={onChange}
-          size="small"
-        />
-      </span>
+      <Tooltip title={blockedReason}>
+        <span className="depth-fusion-toggle">
+          <span>{zh ? 'RGB + 深度' : 'RGB + Depth'}</span>
+          <Switch
+            aria-label={zh ? '融合 RGB 与深度' : 'Fuse RGB and depth'}
+            checked={enabled}
+            disabled={(!available || Boolean(blockedReason)) && !enabled}
+            onChange={onChange}
+            size="small"
+          />
+        </span>
+      </Tooltip>
+      {blockedReason ? (
+        <span className="depth-fusion-warning">{blockedReason}</span>
+      ) : null}
       {enabled ? (
         <div className="depth-fusion-opacity">
           <span>{zh ? '深度层透明度' : 'Depth opacity'}</span>

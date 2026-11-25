@@ -48,6 +48,10 @@ export {
   type RealsenseCameraBackendOptions,
 } from './realsense-camera-backend.js';
 export {
+  RealsenseCameraHardwareControl,
+  type RealsenseCameraHardwareControlOptions,
+} from './realsense-camera-control.js';
+export {
   RealsenseCaptureGroup,
   RealsenseStreamSource,
 } from './realsense-capture-group.js';

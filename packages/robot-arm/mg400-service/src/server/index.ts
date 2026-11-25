@@ -1134,6 +1134,16 @@ export async function startPlaygroundHost({
               camera.kind === 'depth'
                 ? await cameraManager.depthControls(camera.id)
                 : {};
+            const preferences = await cameraManager.cameraPreferences(
+              camera.id,
+            );
+            const captureSettings = preferences
+              ? {
+                  width: preferences.width,
+                  height: preferences.height,
+                  fps: preferences.fps,
+                }
+              : undefined;
             // Camera-only mode has no Device, so read the same persisted
             // correction the Device will restore once the arm is connected.
             const stored = entry
@@ -1146,6 +1156,12 @@ export async function startPlaygroundHost({
               entry?.camera.getCorrection() ?? stored?.correction;
             return {
               ...camera,
+              name: preferences?.name ?? camera.name,
+              deviceName: camera.name,
+              label: preferences?.label,
+              verticalFlip: preferences?.verticalFlip,
+              horizontalFlip: preferences?.horizontalFlip,
+              captureSettings,
               depthControls,
               controls: camera.controls?.map((control) => ({
                 ...control,
@@ -1421,6 +1437,45 @@ export async function startPlaygroundHost({
         );
         return send(200, result);
       }
+      if (
+        url.pathname === '/api/cameras/capture-settings' &&
+        req.method === 'POST'
+      ) {
+        const input = await readBody(req);
+        if (typeof input.id !== 'string')
+          return send(400, { error: 'Camera id is required' });
+        try {
+          const result = await cameraManager.setCaptureSettings(input.id, {
+            width: input.width,
+            height: input.height,
+            fps: input.fps,
+            ...(typeof input.name === 'string' ? { name: input.name } : {}),
+            ...(typeof input.label === 'string'
+              ? {
+                  label: input.label as
+                    | 'front'
+                    | 'back'
+                    | 'left'
+                    | 'right'
+                    | 'top'
+                    | 'bottom',
+                }
+              : {}),
+            verticalFlip: input.verticalFlip === true,
+            horizontalFlip: input.horizontalFlip === true,
+          });
+          return send(200, result);
+        } catch (error) {
+          return send(
+            error && typeof error === 'object' && 'status' in error
+              ? Number(error.status)
+              : 400,
+            {
+              error: error instanceof Error ? error.message : String(error),
+            },
+          );
+        }
+      }
       if (url.pathname === '/api/cameras/depth' && req.method === 'GET') {
         const id = url.searchParams.get('id');
         if (!id) return send(400, { error: 'Camera id is required' });
@@ -1503,14 +1558,23 @@ export async function startPlaygroundHost({
           return send(400, {
             error: 'This camera does not contain a paired RGB and depth frame',
           });
-        const mode = camera.captureModes?.find(
+        const knownCameras = await listCameras({
+          includeBuiltIn: true,
+          cachedOnly: true,
+        });
+        const intrinsicsCamera =
+          knownCameras.find(
+            (candidate) => candidate.id === camera.pairedDeviceId,
+          ) ?? camera;
+        const intrinsicsMode = intrinsicsCamera.captureModes?.find(
           (candidate) =>
             candidate.width === depth.width &&
             candidate.height === depth.height &&
             candidate.fps ===
-              (frame.capture?.fps ?? camera.defaultCaptureSettings?.fps),
+              (frame.capture?.fps ??
+                intrinsicsCamera.defaultCaptureSettings?.fps),
         );
-        const intrinsics = mode?.intrinsics;
+        const intrinsics = intrinsicsMode?.intrinsics;
         if (!intrinsics)
           return send(409, {
             error: 'The active RealSense capture mode has no RGB intrinsics',

@@ -36,6 +36,11 @@ preview and the 3D point cloud. Hover over the 2D image to read aligned depth,
 and open **Depth controls** to change sensor parameters. Saving those settings
 restarts the running depth stream.
 
+Camera mapping calibrates the RealSense RGB imaging settings through the
+RealSense SDK. Exposure, gain, white balance, brightness and contrast are
+available when reported by the connected RGB sensor; focus remains available
+only on color sensors that expose a focus control.
+
 ## Calibrate a touchscreen
 
 Secure the stylus, screen, and overhead camera with the full touch area in view. The target screen must be able to open the calibration page over the local network. Open **Calibration** in the management UI.

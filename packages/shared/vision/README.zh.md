@@ -55,6 +55,11 @@ python -m pip install -r packages/shared/vision/native/realsense-depth/requireme
 `stream.getFrame().alignedColorJpeg` 读取同一帧的 RGB 图像。RealSense 采集模式还包含
 生成三维点云所需的 RGB 内参。
 
+RealSense RGB 端点同时通过 `librealsense` 暴露相机成像参数。曝光、增益、白平衡、
+亮度和对比度使用彩色传感器 option 读写，并接入现有相机标定流程。只有连接的 RGB
+传感器实际提供对焦 option 时才会报告对焦控制；不提供该 option 的彩色模块会继续完成
+曝光、白平衡和色调标定，不使用伪造的对焦值。
+
 依赖安装完成后可运行硬件冒烟测试：
 
 ```sh
