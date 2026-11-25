@@ -30,7 +30,34 @@ export interface CameraScreen {
   /** Per-screen readiness for manual camera-view control. */
   control?: CameraScreenControl;
 }
+export type CameraKind = 'color' | 'depth';
+export interface CameraControlChoice {
+  value: number;
+  label: string;
+}
+export interface CameraControlCapability {
+  key: string;
+  label: string;
+  description?: string;
+  type: 'boolean' | 'number' | 'select';
+  choices?: CameraControlChoice[];
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  value: number;
+}
+export interface CameraCaptureMode {
+  width: number;
+  height: number;
+  fps: number;
+}
 export interface CameraEntry extends CameraScreen {
+  kind?: CameraKind;
+  pairedDeviceId?: string;
+  captureModes?: CameraCaptureMode[];
+  controls?: CameraControlCapability[];
+  depthControls?: Record<string, number>;
   previewScreenId?: string;
   screens?: CameraScreen[];
   error?: string;
@@ -42,6 +69,12 @@ export interface CameraEntry extends CameraScreen {
     actualFps?: number;
     hasFrame: boolean;
     error?: string;
+    depth?: {
+      scaleMeters: number;
+      width: number;
+      height: number;
+      alignedTo?: 'color';
+    };
   };
 }
 
@@ -75,6 +108,21 @@ export function cameraStateLabel(camera: CameraEntry) {
     default:
       return camera.error ? 'cameraFailed' : 'stopped';
   }
+}
+
+/** The RGB endpoint is folded into the depth card while fusion is active. */
+export function cameraRailEntries(
+  cameras: CameraEntry[],
+  selected: CameraEntry | undefined,
+  depthFusionEnabled: boolean,
+) {
+  if (
+    !depthFusionEnabled ||
+    selected?.kind !== 'depth' ||
+    !selected.pairedDeviceId
+  )
+    return cameras;
+  return cameras.filter((camera) => camera.id !== selected.pairedDeviceId);
 }
 type CameraStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error';
 // Camera records are discovered by the Node host, never manually created in UI.

@@ -35,6 +35,33 @@
 
 ## ⚡ 快速开始
 
+### Intel RealSense 深度
+
+RealSense 彩色和已对齐深度通过同一条 `librealsense` 管线采集。深度端点显示为
+`realsense:<serial>`，配对的 RGB 端点显示为 `realsense:<serial>:color`。
+
+请使用服务实际调用的 Python 解释器安装 helper 依赖：
+
+```sh
+python -m pip install -r packages/shared/vision/native/realsense-depth/requirements.txt
+```
+
+可通过 `ROBOT_VISION_REALSENSE_PYTHON` 指定其他解释器，或通过
+`ROBOT_VISION_REALSENSE_HELPER_PATH` 指定自定义 helper。RealSense 依赖不可用时，
+普通相机仍会正常枚举和使用。
+
+深度流同时提供伪彩 MJPEG 预览和已对齐到 RGB 的原始小端 `uint16` 深度图。使用
+`stream.getDepthFrame()` 读取深度图，使用
+`stream.getFrame().alignedColorJpeg` 读取同一帧的 RGB 图像。RealSense 采集模式还包含
+生成三维点云所需的 RGB 内参。
+
+依赖安装完成后可运行硬件冒烟测试：
+
+```sh
+pnpm --filter @midscene/robotics-vision build
+pnpm --filter @midscene/robotics-vision realsense:smoke
+```
+
 ### 安装
 
 ```sh

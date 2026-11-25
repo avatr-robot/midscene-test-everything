@@ -94,8 +94,11 @@ export class DeviceRegistry implements CameraBackend {
     return this.list(options).then((result) => result.devices);
   }
 
-  openStream(options: ResolvedCameraStreamOptions): Promise<CameraSource> {
-    return this.backend.openStream(options);
+  openStream(
+    options: ResolvedCameraStreamOptions,
+    signal?: AbortSignal,
+  ): Promise<CameraSource> {
+    return this.backend.openStream(options, signal);
   }
 
   openHardwareControl(

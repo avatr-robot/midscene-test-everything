@@ -20,6 +20,7 @@ import {
   RefreshCw,
   ScanLine,
   Settings2,
+  SlidersHorizontal,
   StopCircle,
   Unplug,
   VideoOff,
@@ -45,13 +46,16 @@ import {
 } from '../camera-preview';
 import {
   activateCameraImaging,
+  cameraRailEntries,
   cameraScreenNeedsCalibration,
   cameraStateLabel,
   selectCameraScreen,
   useCameras,
 } from '../cameras';
 import { useConnection } from '../connection';
+import { updateDepthControls } from '../depth-api';
 import { useViews } from '../extensions';
+import { useDepthProbe } from '../hooks/useDepthProbe';
 import { useDeviceReadiness } from '../hooks/useDeviceReadiness';
 import { usePreviewControl } from '../hooks/usePreviewControl';
 import { useRobotArm } from '../hooks/useRobotArm';
@@ -61,6 +65,11 @@ import type { PreviewScreenGeometry } from '../preview/projection';
 import { CameraPerspectiveActions } from './CameraPerspectiveActions';
 import { CameraRail } from './CameraRail';
 import { CameraStagePreview } from './CameraStagePreview';
+import { DepthCameraPreview } from './DepthCameraPreview';
+import { DepthFusionControl } from './DepthFusionControl';
+import { DepthPointCloudView } from './DepthPointCloudView';
+import { DepthProbeOverlay } from './DepthProbeOverlay';
+import { DepthSdkControls } from './DepthSdkControls';
 import { DeviceCalibration } from './DeviceCalibration';
 import { DeviceTransfer } from './DeviceTransfer';
 import { RobotConnectionDialog } from './RobotConnectionDialog';
@@ -91,6 +100,15 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const [wizardScreen, setWizardScreen] = useState<string>();
   const [transferId, setTransferId] = useState<string>();
   const [preferredView, setCameraView] = useState<CameraView>('raw');
+  const [depthViewMode, setDepthViewMode] = useState<'2d' | '3d'>('2d');
+  const [depthSettingsOpen, setDepthSettingsOpen] = useState(false);
+  const [depthControlValues, setDepthControlValues] = useState<
+    Record<string, number>
+  >({});
+  const [depthControlsSaving, setDepthControlsSaving] = useState(false);
+  const [depthSettingsError, setDepthSettingsError] = useState<string>();
+  const [depthFusionEnabled, setDepthFusionEnabled] = useState(false);
+  const [depthFusionOpacity, setDepthFusionOpacity] = useState(0.45);
   const [twinView, setTwinView] = useState<TwinViewPreset>('default');
   const [previewError, setPreviewError] = useState<string>();
   const [previewRevision, setPreviewRevision] = useState(0);
@@ -151,6 +169,10 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     setWizard(undefined);
     setPausedCamera(undefined);
     setPreferredScreenId(undefined);
+    setDepthSettingsOpen(false);
+    setDepthSettingsError(undefined);
+    setDepthViewMode('2d');
+    setDepthFusionEnabled(false);
   }, [setupSession]);
   useEffect(() => {
     if (
@@ -162,6 +184,26 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     return () => clearTimeout(timer);
   }, [cameras, status, refresh]);
   const selected = cameras.find((camera) => camera.id === selectedId);
+  const depthCamera = selected?.kind === 'depth';
+  const pairedColorCamera = depthCamera
+    ? cameras.find((camera) => camera.id === selected?.pairedDeviceId)
+    : undefined;
+  const railCameras = cameraRailEntries(cameras, selected, depthFusionEnabled);
+  useEffect(() => {
+    setDepthViewMode('2d');
+    setDepthFusionEnabled(false);
+    setDepthSettingsOpen(false);
+    setDepthSettingsError(undefined);
+    setDepthControlValues(
+      Object.fromEntries(
+        (selected?.controls ?? []).map((control) => [
+          control.key,
+          selected?.depthControls?.[control.key] ?? control.value,
+        ]),
+      ),
+    );
+  }, [selected?.id]);
+  const depthProbe = useDepthProbe(selected, selected?.stream);
   const streamState = selected?.stream?.state;
   const robotReady =
     connected && Boolean(setupSession && setupSession === deviceSession);
@@ -181,14 +223,15 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const transferTargets = cameras.flatMap((camera) =>
     camera.stream?.state === 'running' ? (camera.screens ?? []) : [],
   );
-  const activeScreen =
-    selectCameraScreen(availableScreens, [
-      preferredScreenId,
-      selected?.previewScreenId,
-      selectedId ?? undefined,
-    ]) ?? (!connected ? selected : undefined);
+  const activeScreen = depthCamera
+    ? undefined
+    : (selectCameraScreen(availableScreens, [
+        preferredScreenId,
+        selected?.previewScreenId,
+        selectedId ?? undefined,
+      ]) ?? (!connected ? selected : undefined));
   const deviceId =
-    robotReady && streamState === 'running'
+    !depthCamera && robotReady && streamState === 'running'
       ? (activeScreen?.id ?? selectedId ?? undefined)
       : undefined;
   const controlScreens = useMemo<PreviewScreenGeometry[]>(
@@ -414,6 +457,24 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     // A status poll already in flight may still describe the completed motion.
     await Promise.all([refresh(false), check(true)]);
   }, [check, refresh]);
+  const saveDepthSettings = useCallback(async () => {
+    if (!depthCamera || !selectedId) return;
+    setDepthControlsSaving(true);
+    setDepthSettingsError(undefined);
+    try {
+      const result = await updateDepthControls(selectedId, depthControlValues);
+      setDepthControlValues(result.controls);
+      setPreviewRevision((value) => value + 1);
+      await refresh(false);
+      setDepthSettingsOpen(false);
+    } catch (error) {
+      setDepthSettingsError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setDepthControlsSaving(false);
+    }
+  }, [depthCamera, depthControlValues, refresh, selectedId]);
   const previewControl = usePreviewControl({
     contextKey: JSON.stringify([controlContext, cameraView]),
     onCompleted: refreshAfterControl,
@@ -492,7 +553,8 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
               }
             />
           )}
-          {camera &&
+          {!depthCamera &&
+            camera &&
             selected &&
             !switchingScreen &&
             ((connected && !robotReady) ||
@@ -680,6 +742,11 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                   >
                     {t(cameraStateLabel(camera))}
                   </Tag>
+                  {depthCamera && (
+                    <Tag color="cyan">
+                      {language === 'zh' ? '深度' : 'Depth'}
+                    </Tag>
+                  )}
                   <Typography.Text type="secondary">
                     {camera.stream?.width
                       ? `${camera.stream.width} × ${camera.stream.height}`
@@ -718,6 +785,44 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
               )}
             </div>
             <div className="camera-stage-actions">
+              {depthCamera &&
+                (pairedColorCamera?.stream?.state === 'running' ||
+                  depthFusionEnabled) && (
+                  <DepthFusionControl
+                    available={pairedColorCamera?.stream?.state === 'running'}
+                    enabled={depthFusionEnabled}
+                    onChange={setDepthFusionEnabled}
+                    onOpacityChange={setDepthFusionOpacity}
+                    opacity={depthFusionOpacity}
+                  />
+                )}
+              {depthCamera && (
+                <Segmented
+                  className="rv-segmented"
+                  aria-label={language === 'zh' ? '深度视图' : 'Depth view'}
+                  disabled={!previewEnabled}
+                  value={depthViewMode}
+                  onChange={(value) => setDepthViewMode(value as '2d' | '3d')}
+                  options={[
+                    { value: '2d', label: '2D' },
+                    { value: '3d', label: '3D' },
+                  ]}
+                />
+              )}
+              {depthCamera && selected.controls?.length ? (
+                <Tooltip
+                  title={language === 'zh' ? '深度参数' : 'Depth controls'}
+                >
+                  <Button
+                    type="text"
+                    aria-label={
+                      language === 'zh' ? '深度参数' : 'Depth controls'
+                    }
+                    icon={<SlidersHorizontal size={16} />}
+                    onClick={() => setDepthSettingsOpen(true)}
+                  />
+                </Tooltip>
+              ) : null}
               {activeScreen && (standalone || (connected && setupSession)) && (
                 <CameraPerspectiveActions
                   key={JSON.stringify([
@@ -823,11 +928,13 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
           </header>
           <div className="workspace-views">
             <section className="camera-stage">
-              <PerspectiveObservationCard
-                observation={perspective}
-                screenName={activeScreen?.name ?? selected.name}
-                onRecalibrate={openCameraCorrection}
-              />
+              {!depthCamera && (
+                <PerspectiveObservationCard
+                  observation={perspective}
+                  screenName={activeScreen?.name ?? selected.name}
+                  onRecalibrate={openCameraCorrection}
+                />
+              )}
               <div className="camera-frame">
                 <CameraStagePreview
                   actions={
@@ -852,7 +959,16 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                   )}
                   outlines={stageOutlines}
                   frameSize={
-                    cameraView === 'corrected' ? previewTarget : undefined
+                    depthCamera &&
+                    selected.stream?.width &&
+                    selected.stream.height
+                      ? {
+                          width: selected.stream.width,
+                          height: selected.stream.height,
+                        }
+                      : cameraView === 'corrected'
+                        ? previewTarget
+                        : undefined
                   }
                 >
                   {previewEnabled && previewError === previewKey ? (
@@ -863,41 +979,117 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                           : 'Preview unavailable. Refresh to retry.'
                       }
                     />
+                  ) : depthCamera && depthViewMode === '3d' ? (
+                    <DepthPointCloudView cameraId={selected.id} />
                   ) : previewEnabled && previewId ? (
-                    <PreviewControl
-                      key={previewKey}
-                      activeScreenId={activeScreen?.id}
-                      alt={
-                        cameraView === 'corrected'
-                          ? (activeScreen?.name ?? selected.name)
-                          : selected.name
-                      }
-                      available={controlAvailable}
-                      longPressEnabled={Boolean(
-                        arm.capabilities?.screenActions.includes('longPress'),
-                      )}
-                      className="stream-preview"
-                      control={previewControl}
-                      enabled={controlEnabled}
-                      onError={() => setPreviewError(previewKey)}
-                      onLoad={(event) => {
-                        const image = event.currentTarget;
-                        const { naturalWidth: width, naturalHeight: height } =
-                          image;
-                        if (width && height)
-                          setFrame((previous) =>
-                            previous?.key === previewKey &&
-                            previous.image === image &&
-                            previous.width === width &&
-                            previous.height === height
-                              ? previous
-                              : { key: previewKey, width, height, image },
-                          );
-                      }}
-                      screens={controlScreens}
-                      src={`${cameraPreviewUrl(previewId, cameraView)}&revision=${encodeURIComponent(previewKey)}`}
-                      view={cameraView}
-                    />
+                    depthCamera ? (
+                      <>
+                        <DepthCameraPreview
+                          alt={
+                            depthFusionEnabled &&
+                            pairedColorCamera?.stream?.state === 'running'
+                              ? `${selected.name} · RGB + Depth`
+                              : selected.name
+                          }
+                          depthWidth={selected.stream?.depth?.width}
+                          depthHeight={selected.stream?.depth?.height}
+                          imageRef={(image) => {
+                            if (!image) return;
+                            setFrame((previous) =>
+                              previous?.key === previewKey &&
+                              previous.image === image
+                                ? previous
+                                : {
+                                    key: previewKey,
+                                    width:
+                                      image.naturalWidth ||
+                                      selected.stream?.width ||
+                                      0,
+                                    height:
+                                      image.naturalHeight ||
+                                      selected.stream?.height ||
+                                      0,
+                                    image,
+                                  },
+                            );
+                          }}
+                          onError={() => setPreviewError(previewKey)}
+                          onLoad={(image) => {
+                            const width = image.naturalWidth;
+                            const height = image.naturalHeight;
+                            if (width && height)
+                              setFrame({
+                                key: previewKey,
+                                width,
+                                height,
+                                image,
+                              });
+                          }}
+                          onPointerSample={depthProbe.onPointerSample}
+                          overlayOpacity={depthFusionOpacity}
+                          overlaySrc={
+                            depthFusionEnabled &&
+                            pairedColorCamera?.stream?.state === 'running'
+                              ? `${cameraPreviewUrl(
+                                  selected.id,
+                                  'raw',
+                                  'depth-overlay',
+                                )}&revision=${encodeURIComponent(previewKey)}`
+                              : undefined
+                          }
+                          src={
+                            depthFusionEnabled &&
+                            pairedColorCamera?.stream?.state === 'running'
+                              ? `${cameraPreviewUrl(
+                                  pairedColorCamera.id,
+                                  'raw',
+                                  'depth-fusion',
+                                )}&revision=${encodeURIComponent(previewKey)}`
+                              : `${cameraPreviewUrl(
+                                  selected.id,
+                                  'raw',
+                                  'depth-stage',
+                                )}&revision=${encodeURIComponent(previewKey)}`
+                          }
+                        />
+                        <DepthProbeOverlay sample={depthProbe.sample} />
+                      </>
+                    ) : (
+                      <PreviewControl
+                        key={previewKey}
+                        activeScreenId={activeScreen?.id}
+                        alt={
+                          cameraView === 'corrected'
+                            ? (activeScreen?.name ?? selected.name)
+                            : selected.name
+                        }
+                        available={controlAvailable}
+                        longPressEnabled={Boolean(
+                          arm.capabilities?.screenActions.includes('longPress'),
+                        )}
+                        className="stream-preview"
+                        control={previewControl}
+                        enabled={controlEnabled}
+                        onError={() => setPreviewError(previewKey)}
+                        onLoad={(event) => {
+                          const image = event.currentTarget;
+                          const { naturalWidth: width, naturalHeight: height } =
+                            image;
+                          if (width && height)
+                            setFrame((previous) =>
+                              previous?.key === previewKey &&
+                              previous.image === image &&
+                              previous.width === width &&
+                              previous.height === height
+                                ? previous
+                                : { key: previewKey, width, height, image },
+                            );
+                        }}
+                        screens={controlScreens}
+                        src={`${cameraPreviewUrl(previewId, cameraView)}&revision=${encodeURIComponent(previewKey)}`}
+                        view={cameraView}
+                      />
+                    )
                   ) : starting ? (
                     <Spin aria-label={t('cameraStarting')} />
                   ) : (
@@ -912,13 +1104,14 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                   expanded={cameraRailExpanded}
                   entries={
                     standalone
-                      ? cameras.map((entry) =>
+                      ? railCameras.map((entry) =>
                           entry.id === camera.id ? camera : entry,
                         )
-                      : cameras
+                      : railCameras
                   }
                   selectedId={selectedId}
                   selectedImage={
+                    depthViewMode !== '3d' &&
                     previewEnabled &&
                     previewError !== previewKey &&
                     frame?.key === previewKey
@@ -972,6 +1165,62 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
           {error && <Typography.Text type="danger">{error}</Typography.Text>}
         </section>
       )}
+      <Drawer
+        rootClassName="robot-drawer robot-settings-drawer"
+        title={
+          <Space>
+            <SlidersHorizontal size={17} />
+            <span>{language === 'zh' ? '深度参数' : 'Depth controls'}</span>
+          </Space>
+        }
+        open={Boolean(depthCamera && depthSettingsOpen)}
+        onClose={() => setDepthSettingsOpen(false)}
+        width={460}
+        extra={
+          <Button
+            type="primary"
+            loading={depthControlsSaving}
+            onClick={() => void saveDepthSettings()}
+          >
+            {language === 'zh' ? '保存并重载' : 'Save and restart'}
+          </Button>
+        }
+      >
+        <div className="robot-panel">
+          {depthSettingsError && (
+            <Alert
+              showIcon
+              type="error"
+              message={
+                language === 'zh'
+                  ? '无法应用深度参数'
+                  : 'Could not apply depth controls'
+              }
+              description={depthSettingsError}
+            />
+          )}
+          {selected?.controls?.length ? (
+            <DepthSdkControls
+              controls={selected.controls}
+              values={depthControlValues}
+              onChange={(key, value) =>
+                setDepthControlValues((current) => ({
+                  ...current,
+                  [key]: value,
+                }))
+              }
+            />
+          ) : (
+            <Empty
+              description={
+                language === 'zh'
+                  ? '该深度相机没有可调整的 SDK 参数'
+                  : 'This depth camera exposes no SDK controls'
+              }
+            />
+          )}
+        </div>
+      </Drawer>
       {connected && (
         <Drawer
           rootClassName="robot-drawer robot-settings-drawer"

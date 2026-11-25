@@ -21,6 +21,21 @@ Open the URL printed in the terminal and confirm that the MG400 is connected in 
 
 Run `pnpm dev --manual` to specify the controller IP address. Run `pnpm dev:mock` to try the management UI with a simulated arm.
 
+## Intel RealSense depth camera
+
+Install the RealSense helper dependencies with the Python interpreter used by
+the service:
+
+```sh
+python -m pip install -r packages/shared/vision/native/realsense-depth/requirements.txt
+```
+
+The RealSense RGB and depth endpoints appear automatically in the camera rail.
+For a depth camera, use the stage controls to switch between the 2D depth
+preview and the 3D point cloud. Hover over the 2D image to read aligned depth,
+and open **Depth controls** to change sensor parameters. Saving those settings
+restarts the running depth stream.
+
 ## Calibrate a touchscreen
 
 Secure the stylus, screen, and overhead camera with the full touch area in view. The target screen must be able to open the calibration page over the local network. Open **Calibration** in the management UI.

@@ -104,8 +104,12 @@ export class CameraStreamManager {
       width: this.resolveInteger(options.width, 1920, 'width', 1, 7680),
       height: this.resolveInteger(options.height, 1080, 'height', 1, 4320),
       fps: this.resolveInteger(options.fps, 30, 'fps', 1, 120),
+      kind: options.kind ?? 'color',
       verticalFlip: options.verticalFlip === true,
       horizontalFlip: options.horizontalFlip === true,
+      ...(options.depthControls && Object.keys(options.depthControls).length > 0
+        ? { depthControls: { ...options.depthControls } }
+        : {}),
     };
   }
 
@@ -120,19 +124,37 @@ export class CameraStreamManager {
    */
   async applyCaptureOptions(
     deviceId: string,
-    patch: { verticalFlip?: boolean; horizontalFlip?: boolean },
+    patch: {
+      width?: number;
+      height?: number;
+      fps?: number;
+      verticalFlip?: boolean;
+      horizontalFlip?: boolean;
+      depthControls?: Record<string, number>;
+    },
   ): Promise<CameraStream | undefined> {
     const stream = this.findByDevice(deviceId);
     if (!stream) return undefined;
     const current = stream.getOptions();
     const next = {
       ...current,
+      width: patch.width ?? current.width,
+      height: patch.height ?? current.height,
+      fps: patch.fps ?? current.fps,
       verticalFlip: patch.verticalFlip ?? current.verticalFlip,
       horizontalFlip: patch.horizontalFlip ?? current.horizontalFlip,
+      ...(patch.depthControls === undefined
+        ? {}
+        : { depthControls: { ...patch.depthControls } }),
     };
     if (
+      next.width === current.width &&
+      next.height === current.height &&
+      next.fps === current.fps &&
       next.verticalFlip === current.verticalFlip &&
-      next.horizontalFlip === current.horizontalFlip
+      next.horizontalFlip === current.horizontalFlip &&
+      this.controlsKey(next.depthControls) ===
+        this.controlsKey(current.depthControls)
     ) {
       return stream;
     }
@@ -187,5 +209,13 @@ export class CameraStreamManager {
       );
     }
     return resolved;
+  }
+
+  private controlsKey(value: Record<string, number> | undefined): string {
+    return JSON.stringify(
+      Object.entries(value ?? {}).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
   }
 }

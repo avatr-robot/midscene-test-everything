@@ -44,6 +44,9 @@ import {
 import type {
   CameraBackend,
   CameraDevice,
+  CameraFrame,
+  CameraStreamInfo,
+  DepthFrame,
   PerspectiveReferenceFrame,
 } from './types.js';
 import { measuredPerspectiveTarget, validateQuad } from './vision-geometry.js';
@@ -55,6 +58,35 @@ export interface StoredCameraPerspective {
   correction: CameraCorrection;
   target?: PerspectiveTarget;
   applied?: false;
+}
+
+function cameraDepthSettingsFile(directory: string, cameraId: string): string {
+  return path.join(
+    directory,
+    `${createHash('sha256').update(`depth:${cameraId}`).digest('hex')}.depth.json`,
+  );
+}
+
+function normalizeDepthControls(
+  value: Record<string, number>,
+): Record<string, number> {
+  const entries = Object.entries(value);
+  if (
+    entries.length > 64 ||
+    entries.some(
+      ([key, control]) =>
+        !key ||
+        key.length > 80 ||
+        typeof control !== 'number' ||
+        !Number.isFinite(control),
+    )
+  )
+    throw new RobotArmError(
+      'INVALID_ARGUMENT',
+      'Depth controls must map control names to finite numbers',
+      400,
+    );
+  return Object.fromEntries(entries);
 }
 
 /** Camera-only previews read the same file the Device later restores. */
@@ -630,6 +662,10 @@ export class CameraSessionManager {
   private readonly sessions = new Map<string, CameraSession>();
   private readonly screenSessions = new Map<string, CameraSession>();
   private readonly imaging = new Map<string, CameraImagingController>();
+  private readonly depthControlsByCamera = new Map<
+    string,
+    Record<string, number>
+  >();
   private readonly operations = new Map<string, Promise<unknown>>();
   private closing?: Promise<void>;
   private readonly owners = new Map<string, Set<string>>();
@@ -687,6 +723,113 @@ export class CameraSessionManager {
     } catch {
       return undefined;
     }
+  }
+  async depthControls(cameraId: string): Promise<Record<string, number>> {
+    const cached = this.depthControlsByCamera.get(cameraId);
+    if (cached) return { ...cached };
+    try {
+      const stored = JSON.parse(
+        await readFile(
+          cameraDepthSettingsFile(this.directory, cameraId),
+          'utf8',
+        ),
+      ) as { controls?: unknown };
+      if (
+        !stored.controls ||
+        typeof stored.controls !== 'object' ||
+        Array.isArray(stored.controls)
+      )
+        return {};
+      const controls = normalizeDepthControls(
+        Object.fromEntries(
+          Object.entries(stored.controls).filter(
+            ([key, value]) =>
+              Boolean(key) &&
+              typeof value === 'number' &&
+              Number.isFinite(value),
+          ),
+        ) as Record<string, number>,
+      );
+      this.depthControlsByCamera.set(cameraId, controls);
+      return { ...controls };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      if (error instanceof RobotArmError) throw error;
+      return {};
+    }
+  }
+
+  async setDepthControls(
+    cameraId: string,
+    patch: Record<string, number>,
+  ): Promise<{
+    controls: Record<string, number>;
+    stream?: CameraStreamInfo;
+  }> {
+    return this.serialize(cameraId, async () => {
+      const session = this.sessions.get(cameraId);
+      const device =
+        session?.camera ??
+        (await this.backend.listDevices()).find(
+          (candidate) => candidate.id === cameraId,
+        );
+      if (!device)
+        throw new RobotArmError('CAMERA_NOT_FOUND', 'Camera not found', 404);
+      if (device.kind !== 'depth')
+        throw new RobotArmError(
+          'INVALID_ARGUMENT',
+          'Depth SDK controls are only available for RealSense depth cameras',
+          400,
+        );
+      const controls = normalizeDepthControls({
+        ...(await this.depthControls(cameraId)),
+        ...patch,
+      });
+      await mkdir(this.directory, { recursive: true });
+      const file = cameraDepthSettingsFile(this.directory, cameraId);
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      await writeFile(temporary, JSON.stringify({ cameraId, controls }), {
+        mode: 0o600,
+      });
+      await rename(temporary, file);
+      this.depthControlsByCamera.set(cameraId, controls);
+      if (session)
+        await this.streams.applyCaptureOptions(cameraId, {
+          depthControls: controls,
+        });
+      return {
+        controls: { ...controls },
+        ...(session ? { stream: session.stream.getInfo() } : {}),
+      };
+    });
+  }
+
+  async depthFrame(cameraId: string): Promise<DepthFrame> {
+    const session = this.sessions.get(cameraId);
+    if (!session)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Start the depth camera before reading depth data',
+        409,
+      );
+    return session.stream.getDepthFrame();
+  }
+
+  async depthSnapshot(
+    cameraId: string,
+    fresh = true,
+  ): Promise<{ frame: CameraFrame; camera: CameraDevice }> {
+    const session = this.sessions.get(cameraId);
+    if (!session)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Start the depth camera before reading depth data',
+        409,
+      );
+    return {
+      camera: session.camera,
+      frame: await session.stream.getFrame({ fresh, timeoutMs: 5_000 }),
+    };
   }
   /** Clear one screen correction without starting the camera. */
   clearPerspective(cameraId: string, screenId?: string): Promise<void> {
@@ -786,6 +929,10 @@ export class CameraSessionManager {
     if (!camera) throw new Error(`Camera not found: ${id}`);
     const stream = await this.streams.create({
       deviceId: id,
+      kind: camera.kind,
+      ...(camera.kind === 'depth'
+        ? { depthControls: await this.depthControls(id) }
+        : {}),
       ...camera.defaultCaptureSettings,
     });
     try {

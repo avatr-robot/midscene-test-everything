@@ -9,6 +9,7 @@ import {
 } from '../src/server/camera-preview';
 import {
   type CameraEntry,
+  cameraRailEntries,
   cameraScreenNeedsCalibration,
   selectCameraScreen,
   useCameras,
@@ -91,11 +92,36 @@ test('running thumbnails show the stage image for the selected camera', () => {
   assert.ok(selected.includes('<canvas'));
   assert.ok(!selected.includes('/api/cameras/preview'));
   assert.ok(selected.includes('运行中'));
+  const selectedWithoutStageImage = render(camera, camera.id);
+  assert.ok(selectedWithoutStageImage.includes('/api/cameras/preview'));
   const stopped = render({ ...camera, stream: undefined });
   assert.ok(!stopped.includes('<img'));
   assert.ok(!stopped.includes('<canvas'));
   assert.ok(stopped.includes('未启动'));
   assert.ok(!render(camera, 'other', undefined, false).includes('<img'));
+});
+
+test('depth fusion folds the paired RGB endpoint into one rail entry', () => {
+  const depth = {
+    ...camera,
+    id: 'realsense:serial',
+    name: 'D435I Depth',
+    kind: 'depth' as const,
+    pairedDeviceId: 'realsense:serial:color',
+  };
+  const color = {
+    ...camera,
+    id: 'realsense:serial:color',
+    name: 'D435I RGB',
+    kind: 'color' as const,
+    pairedDeviceId: depth.id,
+  };
+
+  assert.deepEqual(cameraRailEntries([depth, color], depth, false), [
+    depth,
+    color,
+  ]);
+  assert.deepEqual(cameraRailEntries([depth, color], depth, true), [depth]);
 });
 
 test('keeps a legacy camera response distinct from a detached or matching installation', async () => {

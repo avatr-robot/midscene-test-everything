@@ -55,6 +55,8 @@ import { StatusPanel } from './status-panel.js';
 import type { TwinSceneSnapshot } from './twin-types.js';
 import { TwinStream, buildTwinScene } from './twin.js';
 
+const POINT_CLOUD_HEADER_BYTES = 40;
+
 export interface PlaygroundOptions {
   /** Resolve the controller address on startup and on each reconnect. */
   discoverHost?(): Promise<string>;
@@ -1128,6 +1130,10 @@ export async function startPlaygroundHost({
         const entries = await Promise.all(
           cameras.map(async (camera) => {
             const entry = registry?.entries.get(camera.id);
+            const depthControls =
+              camera.kind === 'depth'
+                ? await cameraManager.depthControls(camera.id)
+                : {};
             // Camera-only mode has no Device, so read the same persisted
             // correction the Device will restore once the arm is connected.
             const stored = entry
@@ -1140,6 +1146,11 @@ export async function startPlaygroundHost({
               entry?.camera.getCorrection() ?? stored?.correction;
             return {
               ...camera,
+              depthControls,
+              controls: camera.controls?.map((control) => ({
+                ...control,
+                value: depthControls[control.key] ?? control.value,
+              })),
               previewScreenId: registry
                 ? previewScreens.get(camera.id)
                 : undefined,
@@ -1380,6 +1391,151 @@ export async function startPlaygroundHost({
           ? await devices.activateCameraImaging(input.id, input.screenId)
           : await cameraManager.activateScreen(input.id, input.screenId);
         return send(200, { imaging });
+      }
+      if (
+        url.pathname === '/api/cameras/depth/controls' &&
+        req.method === 'POST'
+      ) {
+        const input = await readBody(req);
+        if (typeof input.id !== 'string' || !input.controls)
+          return send(400, {
+            error: 'Camera id and depth controls are required',
+          });
+        if (
+          typeof input.controls !== 'object' ||
+          Array.isArray(input.controls) ||
+          Object.entries(input.controls).some(
+            ([key, value]) =>
+              !key ||
+              key.length > 80 ||
+              typeof value !== 'number' ||
+              !Number.isFinite(value),
+          )
+        )
+          return send(400, {
+            error: 'Depth controls must map control names to finite numbers',
+          });
+        const result = await cameraManager.setDepthControls(
+          input.id,
+          input.controls as Record<string, number>,
+        );
+        return send(200, result);
+      }
+      if (url.pathname === '/api/cameras/depth' && req.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return send(400, { error: 'Camera id is required' });
+        const { frame } = await cameraManager.depthSnapshot(
+          id,
+          url.searchParams.get('fresh') === 'true',
+        );
+        const depth = frame.depth;
+        if (!depth)
+          return send(400, {
+            error: 'This camera does not contain depth data',
+          });
+        res.writeHead(200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(depth.data.length),
+          'X-Depth-Format': 'uint16le',
+          'X-Depth-Width': String(depth.width),
+          'X-Depth-Height': String(depth.height),
+          'X-Depth-Scale-Meters': String(depth.depthScaleMeters),
+          ...(depth.alignedTo ? { 'X-Depth-Aligned-To': depth.alignedTo } : {}),
+          'X-Frame-Id': String(frame.id),
+          'X-Captured-At': String(frame.capturedAt),
+        });
+        return res.end(depth.data);
+      }
+      if (
+        url.pathname === '/api/cameras/depth/sample' &&
+        req.method === 'GET'
+      ) {
+        const id = url.searchParams.get('id');
+        if (!id) return send(400, { error: 'Camera id is required' });
+        const { frame } = await cameraManager.depthSnapshot(
+          id,
+          url.searchParams.get('fresh') === 'true',
+        );
+        const depth = frame.depth;
+        if (!depth)
+          return send(400, {
+            error: 'This camera does not contain depth data',
+          });
+        const coordinate = (
+          name: 'x' | 'y',
+          max: number,
+        ): number | undefined => {
+          const value = Number(url.searchParams.get(name));
+          return Number.isInteger(value) && value >= 0 && value < max
+            ? value
+            : undefined;
+        };
+        const x = coordinate('x', depth.width);
+        const y = coordinate('y', depth.height);
+        if (x === undefined || y === undefined)
+          return send(400, {
+            error: `x and y must be inside the ${depth.width} × ${depth.height} depth frame`,
+          });
+        const units = depth.data.readUInt16LE((y * depth.width + x) * 2);
+        return send(200, {
+          frameId: frame.id,
+          capturedAt: frame.capturedAt,
+          x,
+          y,
+          width: depth.width,
+          height: depth.height,
+          units,
+          scaleMeters: depth.depthScaleMeters,
+          depthMeters: units === 0 ? null : units * depth.depthScaleMeters,
+        });
+      }
+      if (url.pathname === '/api/cameras/pointcloud' && req.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return send(400, { error: 'Camera id is required' });
+        const { camera, frame } = await cameraManager.depthSnapshot(
+          id,
+          url.searchParams.get('fresh') !== 'false',
+        );
+        const depth = frame.depth;
+        const colorJpeg = frame.alignedColorJpeg;
+        if (!depth || !colorJpeg)
+          return send(400, {
+            error: 'This camera does not contain a paired RGB and depth frame',
+          });
+        const mode = camera.captureModes?.find(
+          (candidate) =>
+            candidate.width === depth.width &&
+            candidate.height === depth.height &&
+            candidate.fps ===
+              (frame.capture?.fps ?? camera.defaultCaptureSettings?.fps),
+        );
+        const intrinsics = mode?.intrinsics;
+        if (!intrinsics)
+          return send(409, {
+            error: 'The active RealSense capture mode has no RGB intrinsics',
+          });
+        const header = Buffer.alloc(POINT_CLOUD_HEADER_BYTES);
+        header.write('RSPC', 0, 4, 'ascii');
+        header.writeUInt32LE(depth.width, 4);
+        header.writeUInt32LE(depth.height, 8);
+        header.writeUInt32LE(depth.data.length, 12);
+        header.writeUInt32LE(colorJpeg.length, 16);
+        header.writeFloatLE(depth.depthScaleMeters, 20);
+        header.writeFloatLE(intrinsics.fx, 24);
+        header.writeFloatLE(intrinsics.fy, 28);
+        header.writeFloatLE(intrinsics.cx, 32);
+        header.writeFloatLE(intrinsics.cy, 36);
+        res.writeHead(200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(
+            POINT_CLOUD_HEADER_BYTES + depth.data.length + colorJpeg.length,
+          ),
+          'X-Frame-Id': String(frame.id),
+          'X-Captured-At': String(frame.capturedAt),
+        });
+        return res.end(Buffer.concat([header, depth.data, colorJpeg]));
       }
       if (url.pathname === '/api/cameras/preview' && req.method === 'GET') {
         const id = url.searchParams.get('id') ?? '';
