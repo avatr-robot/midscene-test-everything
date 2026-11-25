@@ -23,7 +23,7 @@ import {
   type PhoneProbeEvidence,
   StationaryPhoneObservation,
 } from './phone-observation.js';
-import { runAutoExploration } from './sampler.js';
+import { type FastSamplingCheckpoint, runAutoExploration } from './sampler.js';
 import { mappedExplorationTargets } from './targets.js';
 import type {
   ApplicationContext,
@@ -179,6 +179,7 @@ export class AutomaticCapture {
       webToImage: number[];
       minimumTravelTipZMm?: number;
       directTravel?: ApplicationContext['directTravel'];
+      checkpoint?: FastSamplingCheckpoint;
       onTiming?(event: string, elapsedMs: number): void;
     },
   ) {
@@ -450,6 +451,7 @@ export class AutomaticCapture {
         onTiming: config.onTiming,
         onSlideRecovery: (recovery) => this.slideRecoveries.push(recovery),
       },
+      config.checkpoint,
     );
     this.captured = true;
     this.changed();

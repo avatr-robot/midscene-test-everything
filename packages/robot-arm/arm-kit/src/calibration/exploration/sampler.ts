@@ -24,6 +24,7 @@ import {
   type AutoExplorationHost,
   type AutoExplorationOptions,
   type CalibrationSession,
+  type CollectedSample,
   type ProbePurpose,
   type ScreenCalibTarget,
   type SlideRecovery,
@@ -104,6 +105,22 @@ interface SampledTouch extends TouchPoint {
 }
 interface GridTouch extends TouchPoint {
   target: ScreenCalibTarget;
+}
+
+/** Confirmed samples and spent search budget for one fast calibration run. */
+export interface FastSamplingCheckpoint {
+  direction: SampledTouch[];
+  heights: SampledTouch[];
+  grid: GridTouch[];
+  samples: CollectedSample[];
+  searchBudget?: { searchSteps: number; maxSearchSteps: number };
+  gridBudgets: Map<string, { searchSteps: number; maxSearchSteps: number }>;
+  retriedTargets: Set<string>;
+  next?: {
+    phase: 'reference' | 'direction' | 'height' | 'grid';
+    targetId: string;
+  };
+  releaseBeforeResume?: boolean;
 }
 /** Four distributed fit corners and two held-out edge points, in serpentine order. */
 export function fastExplorationTargets(
@@ -239,13 +256,25 @@ export async function runAutoExploration(
   session: CalibrationSession,
   ctx: ApplicationContext,
   options: AutoExplorationOptions,
+  checkpoint?: FastSamplingCheckpoint,
 ) {
   const fast = options.mode === 'fast-horizontal';
   const timing = options.onTiming;
   let moveCount = 0;
-  const runRecoveryBudget = {
+  const runRecoveryBudget = checkpoint?.searchBudget ?? {
     searchSteps: 0,
     maxSearchSteps: FAST_RUN_RECOVERY_STEPS,
+  };
+  if (checkpoint) checkpoint.searchBudget = runRecoveryBudget;
+  const gridBudget = (targetId: string | undefined) => {
+    const existing = targetId && checkpoint?.gridBudgets.get(targetId);
+    if (existing) return existing;
+    const budget = {
+      searchSteps: 0,
+      maxSearchSteps: FAST_GRID_POINT_RECOVERY_STEPS,
+    };
+    if (targetId) checkpoint?.gridBudgets.set(targetId, budget);
+    return budget;
   };
   const countRecoveryStep = (
     budget = runRecoveryBudget,
@@ -283,6 +312,7 @@ export async function runAutoExploration(
     session.auto.mode = fast ? 'fast-horizontal' : 'standard';
     session.auto.collection = options.collection ?? 'tap';
     session.auto.horizontalConfirmed = options.horizontalConfirmed === true;
+    if (checkpoint) session.auto.collectedSamples = checkpoint.samples;
   }
   const start = options.startPose;
   const dwellMs = fast ? 100 : DWELL_MS;
@@ -307,18 +337,26 @@ export async function runAutoExploration(
   const pressOptions = fast
     ? moveOptions
     : motionAtFactor(STANDARD_PRESS_FACTOR);
-  const poseAt = (contact: { x: number; y: number; z: number }) =>
-    flangePose(contact, start.orientation, tool.offsetMm);
+  const poseAt = (
+    contact: { x: number; y: number; z: number },
+    orientation = start.orientation,
+  ) => flangePose(contact, orientation, tool.offsetMm);
   const preflight = async (
     contact: { x: number; y: number; z: number },
     name: string,
     motion = moveOptions,
-  ) => host.preflight([{ name, pose: poseAt(contact), options: motion }], ctx);
+    orientation = start.orientation,
+  ) =>
+    host.preflight(
+      [{ name, pose: poseAt(contact, orientation), options: motion }],
+      ctx,
+    );
   const moveTo = async (
     contact: { x: number; y: number; z: number },
     motion = moveOptions,
+    orientation = start.orientation,
   ) => {
-    const pose = poseAt(contact);
+    const pose = poseAt(contact, orientation);
     const started = performance.now();
     try {
       await assertPage();
@@ -506,6 +544,7 @@ export async function runAutoExploration(
       endZ?: number;
       phase: 'height' | 'grid';
       coarseStepMm?: number;
+      targetId?: string;
     },
   ): Promise<SampledTouch> => {
     const retryAttempts = singleAttempt ? 0 : TOUCH_RETRY_ATTEMPTS;
@@ -688,7 +727,7 @@ export async function runAutoExploration(
     // A grid endpoint can still need a full local search after recovering an audit.
     const gridRecovery = localSearch?.phase === 'grid';
     const recoveryBudget = gridRecovery
-      ? { searchSteps: 0, maxSearchSteps: FAST_GRID_POINT_RECOVERY_STEPS }
+      ? gridBudget(localSearch?.targetId)
       : runRecoveryBudget;
     const searchScope = gridRecovery ? 'grid-point' : 'run';
     const pressRetryAttempts = localSearch
@@ -1025,48 +1064,95 @@ export async function runAutoExploration(
   // Require the current phone protocol before submitting the first motion.
   await observe('preflight', 0);
   const startContact = contactPoint(start, tool.offsetMm);
-  const initialStarted = performance.now();
-  let first: SampledTouch | undefined;
-  try {
-    first = await touchAt(
-      startContact.x,
-      startContact.y,
-      startContact.z,
-      'Initial touch',
-      INITIAL_DESCENT_MM,
-      true,
-    );
-  } catch (error) {
-    if (!(error instanceof RobotArmError) || error.code !== 'TOUCH_NOT_FOUND')
-      throw error;
-    for (let row = -2; row <= 2 && !first; row++)
-      for (let column = -2; column <= 2 && !first; column++) {
-        if (row === 0 && column === 0) continue;
-        try {
-          first = await touchAt(
-            startContact.x + column * SEARCH_PITCH_MM,
-            startContact.y + row * SEARCH_PITCH_MM,
-            startContact.z,
-            'Search touch',
-            SEARCH_DESCENT_MM,
-            false,
-          );
-        } catch (searchError) {
-          if (
-            !(searchError instanceof RobotArmError) ||
-            searchError.code !== 'TOUCH_NOT_FOUND'
-          )
-            throw searchError;
-        }
-      }
+  if (checkpoint?.releaseBeforeResume) {
+    const stopped = await host.currentPose();
+    const current = contactPoint(stopped, tool.offsetMm);
+    const lift = {
+      ...current,
+      z: Math.max(
+        current.z + RELEASE_LIFT_MM,
+        startContact.z,
+        ctx.minimumTravelTipZMm ?? Number.NEGATIVE_INFINITY,
+      ),
+    };
+    await preflight(lift, 'Resume release', travelOptions, stopped.orientation);
+    await moveTo(lift, travelOptions, stopped.orientation);
+    if ((await observe('release')).screen)
+      throw new RobotArmError(
+        'TOUCH_NOT_RELEASED',
+        'The stylus did not release before resuming fast calibration.',
+        409,
+      );
+    checkpoint.releaseBeforeResume = undefined;
   }
-  timing?.('initial-search', performance.now() - initialStarted);
-  if (!first)
-    throw new RobotArmError(
-      'TOUCH_NOT_FOUND',
-      'No screen touch was found within the search area; place the stylus closer to the centre and retry',
-      409,
-    );
+  const initialStarted = performance.now();
+  const retainedDirection = checkpoint?.direction ?? [];
+  const retryStationaryProbe = async (
+    targetId: string,
+    probe: (retry: boolean) => Promise<SampledTouch>,
+  ) => {
+    try {
+      return await probe(false);
+    } catch (error) {
+      if (
+        !checkpoint ||
+        !isIntermittentContact(error) ||
+        checkpoint.retriedTargets.has(targetId)
+      )
+        throw error;
+      host.check();
+      checkpoint.retriedTargets.add(targetId);
+      return probe(true);
+    }
+  };
+  const firstWasRetained = retainedDirection.length > 0;
+  let first: SampledTouch | undefined = retainedDirection[0];
+  if (!first) {
+    if (checkpoint)
+      checkpoint.next = { phase: 'reference', targetId: 'first-touch' };
+    try {
+      first = await retryStationaryProbe('first-touch', (retry) =>
+        touchAt(
+          startContact.x,
+          startContact.y,
+          startContact.z,
+          'Initial touch',
+          INITIAL_DESCENT_MM,
+          !retry,
+        ),
+      );
+    } catch (error) {
+      if (!(error instanceof RobotArmError) || error.code !== 'TOUCH_NOT_FOUND')
+        throw error;
+      for (let row = -2; row <= 2 && !first; row++)
+        for (let column = -2; column <= 2 && !first; column++) {
+          if (row === 0 && column === 0) continue;
+          try {
+            first = await touchAt(
+              startContact.x + column * SEARCH_PITCH_MM,
+              startContact.y + row * SEARCH_PITCH_MM,
+              startContact.z,
+              'Search touch',
+              SEARCH_DESCENT_MM,
+              false,
+            );
+          } catch (searchError) {
+            if (
+              !(searchError instanceof RobotArmError) ||
+              searchError.code !== 'TOUCH_NOT_FOUND'
+            )
+              throw searchError;
+          }
+        }
+    }
+    timing?.('initial-search', performance.now() - initialStarted);
+    if (!first)
+      throw new RobotArmError(
+        'TOUCH_NOT_FOUND',
+        'No screen touch was found within the search area; place the stylus closer to the centre and retry',
+        409,
+      );
+  }
   const heightAnchors = [first];
   // Use only measured activation heights. Successful predicted presses and
   // held-out validation points must not train the height predictor.
@@ -1103,24 +1189,39 @@ export async function runAutoExploration(
   });
   const probeZ = first.contact.z + APPROACH_LIFT_MM;
   const probes: TouchPoint[] = [first];
-  await recordSample(first, 'probe', 'stepped');
-  for (const [dx, dy, label] of [
-    [PROBE_MM, 0, 'Probe +X'],
-    [0, PROBE_MM, 'Probe +Y'],
-  ] as const) {
-    const probe = await touchAt(
-      first.contact.x + dx,
-      first.contact.y + dy,
-      probeZ,
-      label,
-      TOUCH_DESCENT_MM,
-      false,
-      safetyFloorZ,
-      fast
-        ? predictHeights(first.contact.x + dx, first.contact.y + dy)
-        : undefined,
+  if (!firstWasRetained) {
+    if (checkpoint) retainedDirection.push(first);
+    await recordSample(first, 'probe', 'stepped');
+  }
+  for (const [index, [dx, dy, label]] of (
+    [
+      [PROBE_MM, 0, 'Probe +X'],
+      [0, PROBE_MM, 'Probe +Y'],
+    ] as const
+  ).entries()) {
+    const retained = retainedDirection[index + 1];
+    if (retained) {
+      probes.push(retained);
+      if (retained.recovered) heightAnchors.push(retained);
+      continue;
+    }
+    if (checkpoint) checkpoint.next = { phase: 'direction', targetId: label };
+    const probe = await retryStationaryProbe(label, () =>
+      touchAt(
+        first.contact.x + dx,
+        first.contact.y + dy,
+        probeZ,
+        label,
+        TOUCH_DESCENT_MM,
+        false,
+        safetyFloorZ,
+        fast
+          ? predictHeights(first.contact.x + dx, first.contact.y + dy)
+          : undefined,
+      ),
     );
     probes.push(probe);
+    if (checkpoint) retainedDirection.push(probe);
     if (probe.recovered) heightAnchors.push(probe);
     await recordSample(
       probe,
@@ -1128,11 +1229,26 @@ export async function runAutoExploration(
       fast && !probe.recovered ? 'direct' : 'stepped',
     );
   }
-  const initialAffine = fitAffine(
-    probes.map((probe) => ({ x: probe.contact.x, y: probe.contact.y })),
-    probes.map((probe) => probe.screen),
-  );
-  const initialFrame = screenFrame(initialAffine, screen);
+  let initialFrame: ReturnType<typeof screenFrame>;
+  try {
+    initialFrame = screenFrame(
+      fitAffine(
+        probes.map((probe) => ({ x: probe.contact.x, y: probe.contact.y })),
+        probes.map((probe) => probe.screen),
+      ),
+      screen,
+    );
+  } catch (error) {
+    if (
+      checkpoint &&
+      error instanceof RobotArmError &&
+      error.code === 'CALIBRATION_QUALITY'
+    )
+      throw new RobotArmError(error.code, error.message, error.status, {
+        recoveryPhase: 'reference',
+      });
+    throw error;
+  }
   const targets = await host.screenCalib.targets(page.id);
   if (targets.mappingVersion !== mappingVersion)
     throw new RobotArmError(
@@ -1489,6 +1605,7 @@ export async function runAutoExploration(
         phase,
         coarseStepMm:
           phase === 'grid' ? FAST_GRID_RECOVERY_COARSE_STEP_MM : undefined,
+        targetId,
       },
     );
     timing?.('slide-recovery', performance.now() - started);
@@ -1522,8 +1639,12 @@ export async function runAutoExploration(
       return await sample(point);
     } catch (error) {
       if (!fast || !isGridContactMiss(error)) throw error;
+      if (checkpoint && error.code === 'TOUCH_SAFETY_LIMIT') throw error;
+      const retryKey = `${audit ? 'height' : 'grid'}:${target.id}`;
+      if (checkpoint?.retriedTargets.has(retryKey)) throw error;
       const distance = Math.hypot(inside.x - point.x, inside.y - point.y);
       if (!retryAtTarget && distance <= FAST_GRID_RETRY_INSET_MM) throw error;
+      checkpoint?.retriedTargets.add(retryKey);
       try {
         return await sample(
           retryAtTarget
@@ -1565,6 +1686,7 @@ export async function runAutoExploration(
           'CALIBRATION_QUALITY',
           'The measured screen heights could not define a plane for sliding',
           409,
+          { recoveryPhase: 'height' },
         );
       for (const target of gridTargets) {
         const { x, y } = affinePoint(initialFrame.inverse, target.screen);
@@ -1577,7 +1699,7 @@ export async function runAutoExploration(
     if (!(maxDeviationMm <= TILT_AUDIT_MAX_DEVIATION_MM))
       throw new RobotArmError(
         'SCREEN_TILT_UNSUPPORTED',
-        `Fast calibration measured ${maxDeviationMm.toFixed(2)} mm of screen height error at the audit points (limit ${TILT_AUDIT_MAX_DEVIATION_MM} mm); calibrate this screen in standard mode`,
+        `Fast calibration measured ${maxDeviationMm.toFixed(2)} mm of screen height error at the audit points (limit ${TILT_AUDIT_MAX_DEVIATION_MM} mm). Check that the screen is level and secured.`,
         422,
         {
           deviationsMm,
@@ -1593,6 +1715,15 @@ export async function runAutoExploration(
       .map((probe, index) => (index === 0 ? firstReferenceZ : probe.pressedZ))
       .sort((a, b) => a - b)[1];
     for (const [index, target] of [...auditPoints].reverse().entries()) {
+      const retained = checkpoint?.heights[index];
+      if (retained) {
+        if (!retained.recovered) slidingAudits.push(retained);
+        auditSamples.push(retained);
+        probes.push(retained);
+        continue;
+      }
+      if (checkpoint)
+        checkpoint.next = { phase: 'height', targetId: target.id };
       const progress = {
         phase: 'height',
         operation: 'travel',
@@ -1622,10 +1753,17 @@ export async function runAutoExploration(
       if (!touch.recovered) slidingAudits.push(touch);
       auditSamples.push(touch);
       probes.push(touch);
+      checkpoint?.heights.push(touch);
       await recordSample(touch, 'probe', touch.recovered ? 'stepped' : 'slide');
     }
     refreshMeasuredPlane();
     useSlide = slidingAudits.length > 0;
+    if (checkpoint && !useSlide)
+      throw new RobotArmError(
+        'TOUCH_CONTACT_LOST',
+        'Fast calibration could not establish stable sliding contact. Check the screen and stylus.',
+        409,
+      );
     if (useSlide) {
       pressOffsetMm =
         slidingAudits.reduce(
@@ -1635,6 +1773,19 @@ export async function runAutoExploration(
       checkAudit();
     }
   }
+  for (const touch of checkpoint?.grid ?? []) {
+    grid.push(touch);
+    if (touch.recovered && touch.target.role === 'fit')
+      heightAnchors.push(touch);
+  }
+  if (
+    grid.some(
+      (touch) => touch.target.role === 'fit' && touch.zSource === 'measured',
+    )
+  )
+    refreshMeasuredPlane();
+  const firstPendingGrid = grid.length;
+  const needsFreshContact = checkpoint?.next?.phase === 'grid';
   const reestablishAfterAudit = probes.at(-1)?.recovered === true;
   setPhase(host, session, {
     phase: 'grid',
@@ -1643,10 +1794,13 @@ export async function runAutoExploration(
     total: orderedTargets.length,
     message: 'Sampling the screen',
   });
-  for (let index = 0; index < orderedTargets.length; index++) {
+  for (let index = firstPendingGrid; index < orderedTargets.length; index++) {
     const target = orderedTargets[index];
     const audit = !slide && auditIds.has(target.id);
-    const sliding = useSlide && (index !== 0 || !reestablishAfterAudit);
+    const reacquire = needsFreshContact && index === firstPendingGrid;
+    const sliding =
+      useSlide && !reacquire && (index !== 0 || !reestablishAfterAudit);
+    if (checkpoint) checkpoint.next = { phase: 'grid', targetId: target.id };
     const progress = {
       phase: 'grid',
       operation: sliding ? 'slide' : 'travel',
@@ -1669,7 +1823,7 @@ export async function runAutoExploration(
     };
     try {
       let touch: SampledTouch;
-      if (prediction && prediction.pressZ < slideCommandFloor) {
+      if (prediction && (reacquire || prediction.pressZ < slideCommandFloor)) {
         touch = await recoverSlide(prediction.pressZ);
       } else if (prediction) {
         touch = await withContactRetry(
@@ -1716,6 +1870,7 @@ export async function runAutoExploration(
       // can slide from here using its own predicted height.
       if (touch.recovered && target.role === 'fit') heightAnchors.push(touch);
       grid.push({ ...touch, target });
+      checkpoint?.grid.push(grid[grid.length - 1]);
       if (audit) auditSamples.push(touch);
       // Measured points (audit corners, local recoveries) keep improving the
       // plane that later predicted presses are derived from.

@@ -1112,6 +1112,7 @@ export interface CalibrationSession extends ProfileBinding {
 }
 export interface CalibrationCommand {
   point?: { x: number; y: number };
+  boundaryStep?: 'hover' | 'contact' | 'parking';
   commandId: string;
   expectedRevision: number;
   type:

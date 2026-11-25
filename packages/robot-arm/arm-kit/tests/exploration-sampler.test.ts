@@ -1,7 +1,10 @@
 // Ported upstream simulation scenarios; acceptance is tested separately in Arm Kit.
 import { describe, expect, it } from '@rstest/core';
 import { fitExploration } from '../src/calibration/exploration/fit.js';
-import { runAutoExploration } from '../src/calibration/exploration/sampler.js';
+import {
+  type FastSamplingCheckpoint,
+  runAutoExploration,
+} from '../src/calibration/exploration/sampler.js';
 import type {
   ApplicationContext,
   AutoExplorationHost,
@@ -30,6 +33,7 @@ describe('first-time automatic exploration', () => {
     'fast-local-recovery',
     'fast-tap',
     'fast-slide',
+    'fast-resume-slide',
     'fast-reference-fallback-slide',
     'fast-refine-stalled',
     'fast-adaptive-slide',
@@ -127,6 +131,22 @@ describe('first-time automatic exploration', () => {
       let auditPressReleased = false;
       const heightSweeps: Array<{ z: number; touching: boolean }> = [];
       const gridStarted = new Error('Reached the sampling grid');
+      const pageDropped = new RobotArmError(
+        'PHONE_DISCONNECTED',
+        'Page disconnected during the grid',
+      );
+      let dropped = false;
+      const checkpoint: FastSamplingCheckpoint | undefined =
+        mode === 'fast-resume-slide'
+          ? {
+              direction: [],
+              heights: [],
+              grid: [],
+              samples: [],
+              gridBudgets: new Map(),
+              retriedTargets: new Set(),
+            }
+          : undefined;
       const usePreviousHeight = mode === 'fast-previous-height-slide';
       const heightReturnMisses = usePreviousHeight
         ? 2
@@ -527,6 +547,16 @@ describe('first-time automatic exploration', () => {
         currentPose: async () => actualPose,
         screenCalib,
         progress: (current: CalibrationSession) => {
+          const progress = current.auto?.progress;
+          if (
+            checkpoint &&
+            !dropped &&
+            progress?.phase === 'grid' &&
+            progress.index === 3
+          ) {
+            dropped = true;
+            throw pageDropped;
+          }
           if (testHeightReturn && current.auto?.progress?.phase === 'grid')
             throw gridStarted;
           if (current.auto?.progress?.message === 'Initial touch · refine')
@@ -534,20 +564,43 @@ describe('first-time automatic exploration', () => {
         },
       };
       const samplingTiming = new Map<string, number>();
-      const job = runAutoExploration(host as never, session, ctx, {
-        startPose: pose(100, -50, startZ),
-        onSlideRecovery: (recovery) => slideRecoveries.push(recovery),
-        onTiming: (event) =>
-          samplingTiming.set(event, (samplingTiming.get(event) ?? 0) + 1),
-        ...(isFast
-          ? {
-              mode: 'fast-horizontal' as const,
-              horizontalConfirmed: true,
-              collection: slides ? ('slide' as const) : ('tap' as const),
-            }
-          : {}),
-      });
+      const collect = () =>
+        runAutoExploration(
+          host as never,
+          session,
+          ctx,
+          {
+            startPose: pose(100, -50, startZ),
+            onSlideRecovery: (recovery) => slideRecoveries.push(recovery),
+            onTiming: (event) =>
+              samplingTiming.set(event, (samplingTiming.get(event) ?? 0) + 1),
+            ...(isFast
+              ? {
+                  mode: 'fast-horizontal' as const,
+                  horizontalConfirmed: true,
+                  collection: slides ? ('slide' as const) : ('tap' as const),
+                }
+              : {}),
+          },
+          checkpoint,
+        );
       try {
+        if (checkpoint) {
+          await expect(collect()).rejects.toBe(pageDropped);
+          const confirmed = structuredClone(checkpoint.samples);
+          expect(checkpoint.grid).toHaveLength(2);
+          checkpoint.releaseBeforeResume = true;
+          const resumed = await collect();
+          expect(resumed.grid).toHaveLength(6);
+          expect(resumed.grid[2].zSource).toBe('measured');
+          expect(checkpoint.samples.slice(0, confirmed.length)).toEqual(
+            confirmed,
+          );
+          expect(checkpoint.samples).toHaveLength(11);
+          expect(samplingTiming.get('initial-search')).toBe(1);
+          return;
+        }
+        const job = collect();
         if (referenceFallback) {
           await expect(job).rejects.toBe(firstTouchRecorded);
           expect(firstSlideTouchZ).toBeDefined();
