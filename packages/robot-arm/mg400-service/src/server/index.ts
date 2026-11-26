@@ -55,6 +55,7 @@ import type {
 import { StatusPanel } from './status-panel.js';
 import type { TwinSceneSnapshot } from './twin-types.js';
 import { TwinStream, buildTwinScene } from './twin.js';
+import { classifyCameraViewpoints } from './viewpoint-classifier.js';
 
 const POINT_CLOUD_HEADER_BYTES = 40;
 
@@ -1648,6 +1649,57 @@ export async function startPlaygroundHost({
           'X-Captured-At': String(frame.capturedAt),
         });
         return res.end(Buffer.concat([header, depth.data, colorJpeg]));
+      }
+      if (
+        url.pathname === '/api/cameras/viewpoints/infer' &&
+        req.method === 'POST'
+      ) {
+        const input = await readBody(req, 65536);
+        if (
+          !Array.isArray(input.cameraIds) ||
+          input.cameraIds.length !== 2 ||
+          input.cameraIds.some((id: unknown) => typeof id !== 'string') ||
+          new Set(input.cameraIds).size !== 2
+        )
+          return send(400, {
+            error: 'Exactly two distinct camera ids are required',
+          });
+        const model = input.model;
+        if (
+          !model ||
+          typeof model !== 'object' ||
+          !['modelName', 'modelFamily', 'baseUrl', 'apiKey'].every(
+            (key) => typeof model[key] === 'string' && model[key].trim(),
+          )
+        )
+          return send(400, {
+            error: 'Complete VLM model settings are required',
+          });
+
+        const frames = await Promise.all(
+          input.cameraIds.map(async (cameraId: string) => {
+            const owner = `viewpoint-inference:${randomUUID()}`;
+            const camera = await cameraManager.acquire(cameraId, owner);
+            try {
+              return { cameraId, jpeg: await camera.rawFrame() };
+            } finally {
+              await cameraManager.release(cameraId, owner);
+            }
+          }),
+        );
+        return send(
+          200,
+          await classifyCameraViewpoints({
+            frames,
+            model: {
+              provider: model.provider,
+              modelName: model.modelName,
+              modelFamily: model.modelFamily,
+              baseUrl: model.baseUrl,
+              apiKey: model.apiKey,
+            },
+          }),
+        );
       }
       if (url.pathname === '/api/cameras/snapshots' && req.method === 'POST') {
         const input = await readBody(req);

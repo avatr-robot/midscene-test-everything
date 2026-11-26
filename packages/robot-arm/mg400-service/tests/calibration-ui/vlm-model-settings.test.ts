@@ -22,6 +22,8 @@ it('fills a selected GPT model from its provider preset', () => {
   expect(findVlmModelPreset('OpenRouter', 'openai/gpt-6-sol')?.family).toBe(
     'gpt-6',
   );
+  expect(findVlmModelPreset('OpenAI', 'gpt-6.2-astra')?.family).toBe('gpt-6');
+  expect(findVlmModelPreset('OpenAI', 'gpt-6.2-sol')?.family).toBe('gpt-6');
 });
 
 it('provides direct presets for the mainstream model providers', () => {

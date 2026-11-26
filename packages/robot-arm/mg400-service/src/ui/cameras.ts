@@ -69,6 +69,14 @@ export type CameraLabel =
   | 'right'
   | 'top'
   | 'bottom';
+export type CameraViewpoint = 'front' | 'top';
+export const CAMERA_VIEWPOINT_OPTIONS: {
+  value: CameraViewpoint;
+  label: string;
+}[] = [
+  { value: 'front', label: '平视' },
+  { value: 'top', label: '俯视' },
+];
 export interface CameraProfileUpdate extends CameraCaptureSettings {
   name: string;
   label: CameraLabel | null;
@@ -94,6 +102,54 @@ export const FLIP_OPTIONS: { value: FlipMode; label: string }[] = [
 export const WIDTH_RANGE = { min: 160, max: 7680 };
 export const HEIGHT_RANGE = { min: 120, max: 4320 };
 export const FPS_RANGE = { min: 1, max: 120 };
+
+export function cameraViewpointOf(
+  label: CameraLabel | null | undefined,
+): CameraViewpoint | undefined {
+  return label === 'front' || label === 'top' ? label : undefined;
+}
+
+export function cameraViewpointCandidates<
+  T extends {
+    kind?: CameraKind;
+    stream?: { state: string };
+  },
+>(cameras: readonly T[]): T[] {
+  return cameras.filter(
+    (camera) =>
+      camera.kind !== 'depth' &&
+      (camera.stream?.state === 'running' ||
+        camera.stream?.state === 'starting'),
+  );
+}
+
+export function cameraViewpointAssignments(
+  cameras: readonly Pick<CameraEntry, 'id' | 'kind' | 'label'>[],
+  selectedId: string,
+  viewpoint: CameraViewpoint,
+): Array<{ id: string; label: CameraViewpoint }> {
+  const selected = cameras.find((camera) => camera.id === selectedId);
+  if (!selected) return [];
+  const other = cameras.find(
+    (camera) =>
+      camera.id !== selectedId &&
+      camera.kind !== 'depth' &&
+      cameraViewpointOf(camera.label) ===
+        (viewpoint === 'top' ? 'front' : 'top'),
+  );
+  const fallback = cameras.find(
+    (camera) => camera.id !== selectedId && camera.kind !== 'depth',
+  );
+  const counterpart = other ?? fallback;
+  if (!counterpart) return [];
+  return [
+    { id: selectedId, label: viewpoint },
+    {
+      id: counterpart.id,
+      label: viewpoint === 'top' ? 'front' : 'top',
+    },
+  ];
+}
 
 export function captureResolutionKey(
   settings: Pick<CameraCaptureSettings, 'width' | 'height'>,
@@ -438,4 +494,56 @@ export async function updateCameraCaptureSettings(
   if (!response.ok || !data.settings)
     throw new Error(data.error || 'Camera settings update failed');
   return { settings: data.settings, stream: data.stream };
+}
+
+export interface CameraViewpointInferenceResult {
+  overheadCameraId: string;
+  eyeLevelCameraId: string;
+  confidence: number;
+  reason?: string;
+}
+
+export async function inferCameraViewpoints(
+  cameraIds: readonly [string, string],
+  model: {
+    provider: string;
+    modelName: string;
+    modelFamily: string;
+    baseUrl: string;
+    apiKey: string;
+  },
+): Promise<CameraViewpointInferenceResult> {
+  const response = await fetch('/api/cameras/viewpoints/infer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cameraIds, model }),
+    signal: AbortSignal.timeout(60_000),
+  });
+  const data =
+    (await response.json()) as Partial<CameraViewpointInferenceResult> & {
+      error?: string;
+    };
+  if (!response.ok)
+    throw new Error(data.error || 'Camera viewpoint inference failed');
+  if (
+    typeof data.overheadCameraId !== 'string' ||
+    typeof data.eyeLevelCameraId !== 'string' ||
+    !cameraIds.includes(data.overheadCameraId) ||
+    !cameraIds.includes(data.eyeLevelCameraId) ||
+    data.overheadCameraId === data.eyeLevelCameraId
+  )
+    throw new Error(
+      'Camera viewpoint inference returned an invalid camera mapping',
+    );
+  return {
+    overheadCameraId: data.overheadCameraId,
+    eyeLevelCameraId: data.eyeLevelCameraId,
+    confidence:
+      typeof data.confidence === 'number' && Number.isFinite(data.confidence)
+        ? Math.min(1, Math.max(0, data.confidence))
+        : 0.5,
+    ...(typeof data.reason === 'string' && data.reason.trim()
+      ? { reason: data.reason.trim() }
+      : {}),
+  };
 }

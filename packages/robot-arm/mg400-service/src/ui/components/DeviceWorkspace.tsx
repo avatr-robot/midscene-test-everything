@@ -1,5 +1,6 @@
 import {
   Alert,
+  App,
   Button,
   Empty,
   Segmented,
@@ -14,6 +15,7 @@ import { Drawer, Tooltip } from 'antd';
 import {
   ArrowRightLeft,
   Cable,
+  Camera,
   ChevronDown,
   ChevronUp,
   Edit3,
@@ -45,12 +47,19 @@ import {
   cameraPreviewUrl,
 } from '../camera-preview';
 import {
+  CAMERA_VIEWPOINT_OPTIONS,
   type CameraCaptureSettings,
+  type CameraEntry,
   type CameraProfileUpdate,
+  type CameraViewpoint,
   activateCameraImaging,
   cameraRailEntries,
   cameraScreenNeedsCalibration,
   cameraStateLabel,
+  cameraViewpointAssignments,
+  cameraViewpointCandidates,
+  cameraViewpointOf,
+  inferCameraViewpoints,
   selectCameraScreen,
   updateCameraCaptureSettings,
   useCameras,
@@ -83,10 +92,12 @@ import { ConnectSettings } from './robot-arm/ConnectSettings';
 import { ControllerMotionSettings } from './robot-arm/ControllerMotionSettings';
 import { DeviceSettings } from './robot-arm/DeviceSettings';
 import { RobotStatusBar } from './robot-arm/RobotStatusBar';
+import { loadVlmModelSettings } from './robot-arm/vlm-model-settings';
 import './CameraStage.less';
 
 export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const t = useT();
+  const { message } = App.useApp();
   const { ConnectionForm } = useViews();
   const arm = useRobotArm();
   const [enabledControlContext, setEnabledControlContext] = useState<string>();
@@ -109,6 +120,9 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   const [depthFusionOpacity, setDepthFusionOpacity] = useState(0.45);
   const [cameraSettingsOpen, setCameraSettingsOpen] = useState(false);
   const [cameraSettingsSaving, setCameraSettingsSaving] = useState(false);
+  const [cameraViewpointSaving, setCameraViewpointSaving] = useState(false);
+  const [cameraViewpointDetecting, setCameraViewpointDetecting] =
+    useState(false);
   const [cameraSettingsError, setCameraSettingsError] = useState<string>();
   const [twinView, setTwinView] = useState<TwinViewPreset>('default');
   const [previewError, setPreviewError] = useState<string>();
@@ -186,6 +200,11 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   }, [cameras, status, refresh]);
   const selected = cameras.find((camera) => camera.id === selectedId);
   const depthCamera = selected?.kind === 'depth';
+  const viewpointCameras = useMemo(
+    () => cameraViewpointCandidates(cameras),
+    [cameras],
+  );
+  const selectedViewpoint = cameraViewpointOf(selected?.label);
   const pairedColorCamera = depthCamera
     ? cameras.find((camera) => camera.id === selected?.pairedDeviceId)
     : undefined;
@@ -498,6 +517,116 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     },
     [refresh, selectedId],
   );
+  const persistCameraViewpoints = useCallback(
+    async (
+      assignments: ReadonlyArray<{ id: string; label: CameraViewpoint }>,
+    ) => {
+      setCameraViewpointSaving(true);
+      try {
+        await Promise.all(
+          assignments.map(async (assignment) => {
+            const camera = cameras.find(
+              (candidate) => candidate.id === assignment.id,
+            );
+            if (!camera)
+              throw new Error(
+                language === 'zh' ? '找不到相机' : 'Camera not found',
+              );
+            await updateCameraCaptureSettings(
+              camera.id,
+              cameraViewpointUpdate(camera, assignment.label),
+            );
+          }),
+        );
+        await refresh(false);
+        message.success(
+          language === 'zh' ? '相机位置已更新' : 'Camera viewpoints updated',
+        );
+      } catch (error) {
+        await refresh(false).catch(() => undefined);
+        throw error;
+      } finally {
+        setCameraViewpointSaving(false);
+      }
+    },
+    [cameras, language, message, refresh],
+  );
+  const assignCameraViewpoint = useCallback(
+    async (viewpoint: CameraViewpoint) => {
+      if (!selectedId || cameraViewpointSaving || cameraViewpointDetecting)
+        return;
+      const assignments = cameraViewpointAssignments(
+        viewpointCameras,
+        selectedId,
+        viewpoint,
+      );
+      if (assignments.length !== 2) {
+        message.warning(
+          language === 'zh'
+            ? '需要两台运行中的彩色相机才能分配平视和俯视位置'
+            : 'Two running color cameras are required to assign eye-level and overhead views',
+        );
+        return;
+      }
+      try {
+        await persistCameraViewpoints(assignments);
+      } catch (error) {
+        message.error(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [
+      cameraViewpointDetecting,
+      cameraViewpointSaving,
+      language,
+      message,
+      persistCameraViewpoints,
+      selectedId,
+      viewpointCameras,
+    ],
+  );
+  const detectCameraViewpoints = useCallback(async () => {
+    if (cameraViewpointDetecting || cameraViewpointSaving) return;
+    const model = loadVlmModelSettings();
+    if (!model) {
+      message.warning(
+        language === 'zh'
+          ? '请先在模型配置中填写完整的 VLM 接口'
+          : 'Configure a complete VLM interface first',
+      );
+      return;
+    }
+    if (viewpointCameras.length !== 2) {
+      message.warning(
+        language === 'zh'
+          ? '需要恰好两台运行中的彩色相机'
+          : 'Exactly two running color cameras are required',
+      );
+      return;
+    }
+    setCameraViewpointDetecting(true);
+    try {
+      const cameraIds = [
+        viewpointCameras[0]!.id,
+        viewpointCameras[1]!.id,
+      ] as const;
+      const result = await inferCameraViewpoints(cameraIds, model);
+      await persistCameraViewpoints([
+        { id: result.overheadCameraId, label: 'top' },
+        { id: result.eyeLevelCameraId, label: 'front' },
+      ]);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCameraViewpointDetecting(false);
+    }
+  }, [
+    cameraViewpointDetecting,
+    cameraViewpointSaving,
+    language,
+    message,
+    persistCameraViewpoints,
+    viewpointCameras,
+  ]);
   const previewControl = usePreviewControl({
     contextKey: JSON.stringify([controlContext, cameraView]),
     onCompleted: refreshAfterControl,
@@ -765,6 +894,62 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                   >
                     {t(cameraStateLabel(camera))}
                   </Tag>
+                  {!depthCamera && viewpointCameras.length > 1 && (
+                    <Select
+                      className="camera-viewpoint-select"
+                      aria-label={
+                        language === 'zh' ? '相机位置' : 'Camera viewpoint'
+                      }
+                      value={selectedViewpoint}
+                      placeholder={
+                        language === 'zh' ? '标记位置' : 'Set viewpoint'
+                      }
+                      disabled={cameraViewpointDetecting}
+                      loading={cameraViewpointSaving}
+                      onChange={(viewpoint) =>
+                        void assignCameraViewpoint(viewpoint)
+                      }
+                      popupMatchSelectWidth={false}
+                      options={CAMERA_VIEWPOINT_OPTIONS.map((option) => ({
+                        value: option.value,
+                        label:
+                          language === 'zh'
+                            ? option.label
+                            : option.value === 'front'
+                              ? 'Eye level'
+                              : 'Overhead',
+                      }))}
+                    />
+                  )}
+                  {!depthCamera && viewpointCameras.length > 1 && (
+                    <Tooltip
+                      title={
+                        language === 'zh'
+                          ? '自动判断相机位置'
+                          : 'Auto-detect camera viewpoints'
+                      }
+                    >
+                      <span className="camera-viewpoint-detect-wrap">
+                        <Button
+                          className="camera-viewpoint-detect"
+                          type="text"
+                          size="small"
+                          aria-label={
+                            language === 'zh'
+                              ? '自动判断相机位置'
+                              : 'Auto-detect camera viewpoints'
+                          }
+                          disabled={
+                            cameraViewpointSaving ||
+                            viewpointCameras.length !== 2
+                          }
+                          loading={cameraViewpointDetecting}
+                          icon={<Camera size={16} />}
+                          onClick={() => void detectCameraViewpoints()}
+                        />
+                      </span>
+                    </Tooltip>
+                  )}
                   {depthCamera && (
                     <Tag color="cyan">
                       {language === 'zh' ? '深度' : 'Depth'}
@@ -1292,4 +1477,29 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
       )}
     </>
   );
+}
+
+function cameraViewpointUpdate(
+  camera: CameraEntry,
+  label: CameraViewpoint,
+): CameraProfileUpdate {
+  const fallback = camera.captureModes?.[0];
+  return {
+    name: camera.name,
+    label,
+    width:
+      camera.stream?.width ??
+      camera.captureSettings?.width ??
+      fallback?.width ??
+      640,
+    height:
+      camera.stream?.height ??
+      camera.captureSettings?.height ??
+      fallback?.height ??
+      480,
+    fps:
+      camera.stream?.fps ?? camera.captureSettings?.fps ?? fallback?.fps ?? 30,
+    verticalFlip: camera.verticalFlip === true,
+    horizontalFlip: camera.horizontalFlip === true,
+  };
 }

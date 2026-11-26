@@ -31,6 +31,9 @@ interface VlmProviderPreset {
 }
 
 const GPT_MODELS: readonly VlmModelPreset[] = [
+  { name: 'gpt-6.2-astra', label: 'GPT-6.2 Astra', family: 'gpt-6' },
+  { name: 'gpt-6.2-sol', label: 'GPT-6.2 Sol', family: 'gpt-6' },
+  { name: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', family: 'gpt-6' },
   { name: 'gpt-6-sol', label: 'GPT-6 Sol', family: 'gpt-6' },
   { name: 'gpt-6-astra', label: 'GPT-6 Astra', family: 'gpt-6' },
   { name: 'gpt-6-luna', label: 'GPT-6 Luna', family: 'gpt-6' },
