@@ -36,6 +36,7 @@ import {
   streamCameraPreview,
   streamStandalonePreview,
 } from './camera-preview.js';
+import { CameraSnapshots } from './camera-snapshots.js';
 import { CodeSetup } from './code-setup.js';
 import { PlaygroundDevices } from './devices.js';
 import { MarkerPreview } from './marker-preview.js';
@@ -175,6 +176,7 @@ export async function startPlaygroundHost({
     }));
   };
   const cameraManager = new CameraSessionManager();
+  const cameraSnapshots = new CameraSnapshots(cameraManager.dataDirectory);
   const pendingPerspectives = new PreviewPerspectives(cameraManager);
   const previewScreens = new Map<string, string>();
   let adapterName: string | undefined;
@@ -1616,6 +1618,66 @@ export async function startPlaygroundHost({
           'X-Captured-At': String(frame.capturedAt),
         });
         return res.end(Buffer.concat([header, depth.data, colorJpeg]));
+      }
+      if (url.pathname === '/api/cameras/snapshots' && req.method === 'POST') {
+        const input = await readBody(req);
+        if (
+          typeof input.cameraId !== 'string' ||
+          typeof input.screenId !== 'string'
+        )
+          return send(400, {
+            error: 'Camera id and selected screen id are required',
+          });
+        if (!devices)
+          return send(409, {
+            error: 'Connect the device before taking a photo',
+          });
+        const entry = devices.entries.get(input.screenId);
+        if (!entry || entry.cameraId !== input.cameraId)
+          return send(404, { error: 'Selected screen camera is not running' });
+        const screenName =
+          devices.screenTarget(input.screenId)?.name ??
+          entry.camera.camera.name;
+        return send(
+          201,
+          await cameraSnapshots.capture({
+            camera: entry.camera,
+            cameraId: input.cameraId,
+            screenId: input.screenId,
+            screenName,
+          }),
+        );
+      }
+      if (
+        url.pathname === '/api/cameras/snapshots/latest' &&
+        req.method === 'GET'
+      ) {
+        const cameraId = url.searchParams.get('cameraId');
+        const screenId = url.searchParams.get('screenId');
+        if (!cameraId || !screenId)
+          return send(400, {
+            error: 'Camera id and selected screen id are required',
+          });
+        const snapshot = await cameraSnapshots.latest(cameraId, screenId);
+        return snapshot
+          ? send(200, snapshot)
+          : send(404, { error: 'No snapshot has been captured yet' });
+      }
+      const snapshotFileRoute =
+        /^\/api\/cameras\/snapshots\/([^/]+)\/(raw|corrected)$/.exec(
+          url.pathname,
+        );
+      if (snapshotFileRoute && req.method === 'GET') {
+        const image = await cameraSnapshots.image(
+          decodeURIComponent(snapshotFileRoute[1]),
+          snapshotFileRoute[2] as 'raw' | 'corrected',
+        );
+        res.writeHead(200, {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'image/jpeg',
+          'Content-Disposition': `inline; filename="${snapshotFileRoute[2]}.jpg"`,
+        });
+        return res.end(image);
       }
       if (url.pathname === '/api/cameras/preview' && req.method === 'GET') {
         const id = url.searchParams.get('id') ?? '';

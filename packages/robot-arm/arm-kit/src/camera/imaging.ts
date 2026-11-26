@@ -2274,8 +2274,11 @@ export class CameraImagingController {
     this.captureInProgress = true;
     try {
       const initial = await this.currentExposureReading();
-      const classification = classifyExposureExtreme(initial.selected);
-      if (!classification) return;
+      const targetDirection = exposureTargetDirection(
+        initial.selected,
+        Date.now() < this.darkModeUntil,
+      );
+      if (!targetDirection) return;
 
       const started = Date.now();
       let previousDirection: 'too-bright' | 'too-dark' | undefined;
@@ -2396,9 +2399,29 @@ export class CameraImagingController {
         window.min,
         window.max,
       );
-      if (nextExposure === exposure.value) return false;
-
-      await controls.set('exposure', nextExposure, 'manual');
+      let nextGain: number | undefined;
+      if (nextExposure === exposure.value) {
+        if (background) return false;
+        const gain = values.gain;
+        if (!gain?.supportsManual) return false;
+        const gainUnits = Math.max(
+          1,
+          Math.min(
+            Math.max(1, Math.abs(gain.step || 1)) *
+              exposureSeverity(metrics, direction),
+            MAX_STEP_UNITS,
+          ),
+        );
+        nextGain = clamp(
+          gain.value + (direction === 'too-bright' ? -gainUnits : gainUnits),
+          gain.min,
+          gain.max,
+        );
+        if (nextGain === gain.value) return false;
+        await controls.set('gain', nextGain, 'manual');
+      } else {
+        await controls.set('exposure', nextExposure, 'manual');
+      }
       this.lastAdjustAt = Date.now();
       this.extremeDirection = undefined;
       this.extremeCount = 0;
@@ -2406,9 +2429,12 @@ export class CameraImagingController {
         ...this.statusValue,
         state: 'ready',
         exposure: nextExposure,
+        ...(nextGain !== undefined ? { gain: nextGain } : {}),
         message: background
           ? 'Exposure value adjusted automatically'
-          : 'Exposure value converged before capture',
+          : nextGain !== undefined
+            ? 'Gain adjusted after exposure reached its capture limit'
+            : 'Exposure value converged before capture',
         updatedAt: Date.now(),
       };
       return true;

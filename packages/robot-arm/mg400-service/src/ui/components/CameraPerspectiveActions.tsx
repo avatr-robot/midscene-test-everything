@@ -1,7 +1,7 @@
 import type { PerspectiveTarget } from '@midscene/robotics-shared/camera/vision-types';
 import type { CameraCorrection } from '@midscene/robotics-shared/contracts';
 import { App, Button } from 'antd';
-import { Eraser, ScanLine, SlidersHorizontal } from 'lucide-react';
+import { Camera, Eraser, ScanLine, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { CameraView } from '../camera-preview';
 import type { CameraScreen } from '../cameras';
@@ -31,6 +31,7 @@ export function CameraPerspectiveActions({
   const [draft, setDraft] = useState<PerspectiveDraft>();
   const [request, setRequest] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [capturing, setCapturing] = useState(false);
   const scope = useRef(new AbortController());
   const objectUrl = useRef<string>();
   useEffect(() => {
@@ -120,8 +121,51 @@ export function CameraPerspectiveActions({
     else message.success(t('correctionSaved'));
     if (result.mappingError) message.warning(result.mappingError);
   };
+  const capture = async () => {
+    setCapturing(true);
+    try {
+      const response = await fetch('/api/cameras/snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cameraId, screenId: screen.id }),
+        signal: signal(),
+      });
+      const result = await response.json();
+      if (!response.ok)
+        throw new Error(
+          result.error?.message ?? result.error ?? `HTTP ${response.status}`,
+        );
+      if (!scope.current.signal.aborted)
+        message.success(
+          zh
+            ? '已保存原始画面和校正画面'
+            : 'Saved the original and corrected images',
+        );
+    } catch (error) {
+      if (!scope.current.signal.aborted) message.error(String(error));
+    } finally {
+      setCapturing(false);
+    }
+  };
   return (
     <>
+      <Button
+        disabled={disabled || !screen.hasCorrection}
+        loading={capturing}
+        title={
+          screen.hasCorrection
+            ? zh
+              ? '拍摄原始画面和校正画面'
+              : 'Capture original and corrected images'
+            : zh
+              ? '请先应用透视校正'
+              : 'Apply perspective correction first'
+        }
+        icon={<Camera size={16} />}
+        onClick={() => void capture()}
+      >
+        {zh ? '拍照' : 'Take photo'}
+      </Button>
       {robot ? (
         <Button
           disabled={disabled}

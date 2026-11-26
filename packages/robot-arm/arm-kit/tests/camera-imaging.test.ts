@@ -2323,6 +2323,75 @@ describe('camera imaging', () => {
     }
   }, 10_000);
 
+  it('raises exposure for a dark capture ROI that is not classified as extreme', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
+    const control = new FakeCameraControl();
+    control.values.exposure = {
+      ...control.values.exposure,
+      value: -6,
+      mode: 'manual',
+    };
+    const stream = {
+      getInfo: () => ({ state: 'running', fps: 30 }),
+      getFrame: async () => ({
+        id: 1,
+        capturedAt: Date.now(),
+        jpeg: Buffer.alloc(0),
+      }),
+    };
+    const imaging = new CameraImagingController(
+      { id: 'camera', name: 'Camera', backend: 'dshow' },
+      stream as never,
+      directory,
+      control,
+    );
+    const dark = {
+      mean: 64,
+      stddev: 14,
+      brightRatio: 0.999,
+      darkRatio: 0.0068,
+      p95: 94,
+      p99: 101,
+      overExposedRatio: 0,
+      underExposedRatio: 0,
+      hiTileRatio: 0,
+      hiComponentCount: 0,
+      hiComponentLargestShare: 0,
+    };
+    const target = {
+      ...dark,
+      mean: 150,
+      p95: 180,
+      p99: 200,
+    };
+    expect(classifyExposureExtreme(dark)).toBeUndefined();
+    const controller = imaging as unknown as {
+      applied: boolean;
+      currentExposureReading(): Promise<{
+        selected: typeof dark;
+        updatedAt: number;
+      }>;
+    };
+    controller.applied = true;
+    let readings = 0;
+    controller.currentExposureReading = async () => {
+      readings++;
+      return {
+        selected: control.values.gain.value === 0 ? dark : target,
+        updatedAt: Date.now(),
+      };
+    };
+    try {
+      await imaging.beforeCapture();
+      expect(readings).toBeGreaterThanOrEqual(3);
+      expect(control.values.exposure.value).toBe(-5);
+      expect(control.values.gain.value).toBe(1);
+    } finally {
+      await imaging.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
+
   it('converges capture exposure from the current frame without scanning', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'camera-imaging-'));
     const control = new FakeCameraControl();
