@@ -229,6 +229,14 @@ const calibrationZh: Record<string, string> = {
   'The service has no MIDSCENE_ROBOT_CALIBRATION_MODEL_* configuration. Set it on the calibration host, or switch on a custom model for this session.':
     '服务端未配置标定模型，可设置标定服务的环境变量，或为当前会话开启自定义模型。',
   'Clear Model Settings': '清除模型设置',
+  'Model configuration': '模型配置',
+  'Model configuration saved': '模型配置已保存',
+  'Stored model settings cleared': '已清除已保存的模型设置',
+  Provider: '供应商',
+  'Select a provider': '选择供应商',
+  'Select or enter a model name': '选择或直接输入模型名称',
+  'Model presets fill the family and base URL only. You can clear any field and enter it manually. Settings and the API key stay in this browser.':
+    '模型预设只会自动填写模型系列和基础 URL，所有字段都可以清除后手工填写；配置和 API Key 仅保存在当前浏览器。',
 
   Calibration: '标定',
   'Tool Settings': '工具配置',

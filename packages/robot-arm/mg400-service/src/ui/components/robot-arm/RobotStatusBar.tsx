@@ -31,6 +31,7 @@ import type {
 } from '../../robot-arm-api';
 
 import { JointGuide } from './JointGuide';
+import { VlmModelSettings } from './VlmModelSettings';
 import './RobotStatusBar.less';
 
 type Action =
@@ -485,6 +486,7 @@ export function RobotStatusBar({
               </Button>
             )}
           {settings}
+          <VlmModelSettings />
           <Badge count={faults.length}>
             <Button
               icon={<TriangleAlert size={16} />}
