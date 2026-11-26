@@ -8,6 +8,7 @@ import { JpegProcessCameraSource } from './jpeg-process-camera-source.js';
 import type {
   CameraBackend,
   CameraBackendName,
+  CameraCaptureMode,
   CameraDevice,
   CameraHardwareControl,
   ResolvedCameraStreamOptions,
@@ -43,16 +44,86 @@ const toCameraDevice = ({
   name,
   backend,
   controlIndex,
+  captureModes,
+  defaultCaptureSettings,
 }: DeviceDescriptor): CameraDevice => ({
   id,
   name,
   backend,
   kind: 'color',
   ...(controlIndex !== undefined ? { controlIndex } : {}),
+  ...(captureModes?.length ? { captureModes } : {}),
+  ...(defaultCaptureSettings ? { defaultCaptureSettings } : {}),
 });
 
 const removeFfmpegPrefix = (line: string): string =>
   line.replace(/^\[[^\]]+\]\s*/u, '').trim();
+
+const COMMON_DSHOW_FRAME_RATES = [
+  2, 5, 10, 15, 20, 24, 25, 30, 50, 60,
+] as const;
+const MAX_1080P_PIXELS = 1920 * 1080;
+const MAX_HIGH_RESOLUTION_PROBES = 6;
+
+/**
+ * FFmpeg's DirectShow SDK probe reports a supported resolution together with
+ * its FPS range. Convert those ranges into integer frame rates accepted by the
+ * camera settings and stream manager.
+ */
+export function parseDshowCaptureModes(output: string): CameraCaptureMode[] {
+  const ranges = new Map<
+    string,
+    { width: number; height: number; rates: [number, number][] }
+  >();
+  for (const line of output.split(/\r?\n/u)) {
+    const match = removeFfmpegPrefix(line.trim()).match(
+      /^(?:pixel_format|vcodec)=\S+\s+min s=(\d+)x(\d+) fps=([\d.]+) max s=(\d+)x(\d+) fps=([\d.]+)$/u,
+    );
+    if (!match) continue;
+    const minWidth = Number(match[1]);
+    const minHeight = Number(match[2]);
+    const minFps = Number(match[3]);
+    const maxWidth = Number(match[4]);
+    const maxHeight = Number(match[5]);
+    const maxFps = Number(match[6]);
+    if (
+      minWidth !== maxWidth ||
+      minHeight !== maxHeight ||
+      minFps < 1 ||
+      maxFps < minFps
+    )
+      continue;
+    const key = `${minWidth}x${minHeight}`;
+    const entry = ranges.get(key) ?? {
+      width: minWidth,
+      height: minHeight,
+      rates: [],
+    };
+    entry.rates.push([minFps, maxFps]);
+    ranges.set(key, entry);
+  }
+
+  const modes: CameraCaptureMode[] = [];
+  for (const { width, height, rates } of ranges.values()) {
+    for (const fps of COMMON_DSHOW_FRAME_RATES) {
+      if (rates.some(([min, max]) => fps >= min && fps <= max))
+        modes.push({ width, height, fps });
+    }
+  }
+  return modes.sort(
+    (left, right) =>
+      right.width - left.width ||
+      right.height - left.height ||
+      right.fps - left.fps,
+  );
+}
+
+/** Capability metadata only; startup defaults remain owned by saved profiles. */
+export function dshowCaptureMetadata(
+  modes: readonly CameraCaptureMode[],
+): Pick<CameraDevice, 'captureModes'> {
+  return modes.length ? { captureModes: [...modes] } : {};
+}
 
 export function parseDshowDevices(output: string): DeviceDescriptor[] {
   const devices: DeviceDescriptor[] = [];
@@ -260,6 +331,8 @@ export class FfmpegCameraBackend implements CameraBackend {
     const physicalDevices = filterPhysicalCameras(devices, {
       includeVirtual: this.includeVirtualDevices,
     }).filter((device) => !isRealsenseCaptureEndpointName(device.name));
+    if (this.platform === 'win32')
+      await this.attachDshowCaptureModes(physicalDevices);
     this.deviceCache = new Map(
       physicalDevices.map((device) => [device.id, device]),
     );
@@ -440,6 +513,118 @@ export class FfmpegCameraBackend implements CameraBackend {
     return Promise.all(
       videoEntries.map((entry) => this.describeLinuxDevice(entry)),
     );
+  }
+
+  /**
+   * DirectShow reports the supported FPS ranges through FFmpeg's format probe.
+   * The profile editor can then list only combinations this camera advertises.
+   */
+  private async attachDshowCaptureModes(
+    devices: readonly DeviceDescriptor[],
+  ): Promise<void> {
+    await Promise.all(
+      devices.map(async (device) => {
+        if (device.backend !== 'dshow') return;
+        try {
+          const output = await this.runProbe([
+            '-hide_banner',
+            '-list_options',
+            'true',
+            '-f',
+            'dshow',
+            '-i',
+            `video=${device.input}`,
+          ]);
+          const modes = await this.validateDshowCaptureModes(
+            device,
+            parseDshowCaptureModes(output),
+          );
+          if (!modes.length) return;
+          Object.assign(device, dshowCaptureMetadata(modes));
+        } catch {
+          // Device listing must remain available when a driver rejects the
+          // DirectShow capability probe. The UI falls back to manual fields.
+        }
+      }),
+    );
+  }
+
+  /**
+   * Some UVC drivers advertise interpolated modes above 1080p that DirectShow
+   * fails to start. Verify those larger resolutions once at the lowest FPS and
+   * remove a resolution entirely when the capture graph cannot run.
+   */
+  private async validateDshowCaptureModes(
+    device: DeviceDescriptor,
+    modes: CameraCaptureMode[],
+  ): Promise<CameraCaptureMode[]> {
+    const highResolutionModes = new Map<string, CameraCaptureMode>();
+    for (const mode of modes) {
+      if (mode.width * mode.height <= MAX_1080P_PIXELS) continue;
+      const key = `${mode.width}x${mode.height}`;
+      const current = highResolutionModes.get(key);
+      if (!current || mode.fps < current.fps)
+        highResolutionModes.set(key, mode);
+    }
+    const rejected = new Set<string>();
+    for (const [key, mode] of [...highResolutionModes].slice(
+      0,
+      MAX_HIGH_RESOLUTION_PROBES,
+    )) {
+      if (!(await this.canOpenDshowMode(device, mode))) rejected.add(key);
+    }
+    return modes.filter(
+      (mode) =>
+        mode.width * mode.height <= MAX_1080P_PIXELS ||
+        !rejected.has(`${mode.width}x${mode.height}`),
+    );
+  }
+
+  private canOpenDshowMode(
+    device: DeviceDescriptor,
+    mode: CameraCaptureMode,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      const child = this.spawnProcess(
+        this.ffmpegPath,
+        [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-f',
+          'dshow',
+          '-framerate',
+          String(mode.fps),
+          '-video_size',
+          `${mode.width}x${mode.height}`,
+          '-i',
+          `video=${device.input}`,
+          '-frames:v',
+          '1',
+          '-f',
+          'null',
+          '-',
+        ],
+        {
+          stdio: ['ignore', 'ignore', 'ignore'],
+          windowsHide: true,
+        },
+      );
+      let settled = false;
+      const finish = (supported: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(supported);
+      };
+      const timeout = setTimeout(() => {
+        child.kill('SIGKILL');
+        finish(false);
+      }, 10_000);
+      timeout.unref();
+      child.once('error', () => finish(false));
+      child.once('close', (code) => finish(code === 0));
+    });
   }
 
   /**

@@ -631,3 +631,38 @@ details {
   gap: 4px;
   grid-column: 1 / -1;
 }
+
+.robot-capture-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+}
+
+.robot-capture-fields.is-manual {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.robot-capture-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.robot-capture-field-label {
+  color: inherit;
+  font-size: 12px;
+  opacity: 0.65;
+}
+
+.robot-capture-field .ant-select,
+.robot-capture-field .ant-input-number {
+  width: 100%;
+}
+
+@media (max-width: 520px) {
+  .robot-capture-fields,
+  .robot-capture-fields.is-manual {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

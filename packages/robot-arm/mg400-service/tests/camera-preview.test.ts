@@ -11,6 +11,9 @@ import {
   type CameraEntry,
   cameraRailEntries,
   cameraScreenNeedsCalibration,
+  captureFrameRates,
+  captureResolutions,
+  resolveSupportedCaptureSettings,
   selectCameraScreen,
   useCameras,
 } from '../src/ui/cameras';
@@ -122,6 +125,42 @@ test('depth fusion folds the paired RGB endpoint into one rail entry', () => {
     color,
   ]);
   assert.deepEqual(cameraRailEntries([depth, color], depth, true), [depth]);
+});
+
+test('C922 capture modes cascade from resolution to supported frame rates', () => {
+  const modes = [
+    { width: 1920, height: 1080, fps: 30 },
+    { width: 1920, height: 1080, fps: 15 },
+    { width: 1920, height: 1080, fps: 5 },
+    { width: 1280, height: 720, fps: 60 },
+    { width: 1280, height: 720, fps: 30 },
+    { width: 1280, height: 720, fps: 5 },
+    { width: 640, height: 480, fps: 30 },
+  ];
+
+  assert.deepEqual(
+    captureResolutions(modes).map(({ width, height }) => [width, height]),
+    [
+      [1920, 1080],
+      [1280, 720],
+      [640, 480],
+    ],
+  );
+  assert.deepEqual(
+    captureFrameRates(modes, { width: 1920, height: 1080 }),
+    [30, 15, 5],
+  );
+  assert.deepEqual(
+    captureFrameRates(modes, { width: 1280, height: 720 }),
+    [60, 30, 5],
+  );
+  assert.deepEqual(
+    resolveSupportedCaptureSettings(
+      { width: 1920, height: 1080, fps: 60 },
+      modes,
+    ),
+    { width: 1920, height: 1080, fps: 30 },
+  );
 });
 
 test('keeps a legacy camera response distinct from a detached or matching installation', async () => {

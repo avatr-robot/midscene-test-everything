@@ -1246,6 +1246,7 @@ export const zh: Record<string, string> = {
   'The camera is offline; the profile is kept for the next connection.':
     '相机已离线，配置将保留至下次连接。',
   'Capture Settings': '采集设置',
+  'Capture Resolution': '分辨率',
   'Capture Width': '采集宽度',
   'Capture Height': '采集高度',
   'Capture Frame Rate': '采集帧率',

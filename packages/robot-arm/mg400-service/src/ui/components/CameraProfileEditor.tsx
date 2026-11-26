@@ -197,86 +197,115 @@ export function CameraProfileEditor({
           <Form.Item
             extra={
               language === 'zh'
-                ? '保存后会立即重启正在运行的相机。'
+                ? '仅列出当前相机实际支持的采集模式，保存后会立即重启正在运行的相机。'
                 : 'Saving restarts the running camera immediately.'
             }
             label={t('Capture Settings')}
           >
-            <Space className="robot-capture-fields" size={8} wrap>
+            <div
+              className={`robot-capture-fields${
+                resolutions.length ? '' : ' is-manual'
+              }`}
+            >
               {resolutions.length ? (
                 <>
-                  <Select
-                    aria-label={t('Capture Resolution')}
-                    onChange={(key) => {
-                      const resolution = resolutions.find(
-                        (candidate) => candidate.key === key,
-                      );
-                      if (!resolution) return;
-                      const availableFrameRates = captureFrameRates(
-                        camera?.captureModes,
-                        resolution,
-                      );
-                      update({
-                        width: resolution.width,
-                        height: resolution.height,
-                        fps: availableFrameRates.includes(values.fps)
-                          ? values.fps
-                          : (availableFrameRates[0] ?? values.fps),
-                      });
-                    }}
-                    options={resolutions.map((resolution) => ({
-                      label: `${resolution.width} × ${resolution.height}`,
-                      value: resolution.key,
-                    }))}
-                    popupClassName="robot-select-menu"
-                    value={captureResolutionKey(values)}
-                  />
-                  <Select
-                    aria-label={t('Capture Frame Rate')}
-                    onChange={(fps) => update({ fps })}
-                    options={frameRates.map((fps) => ({
-                      label: `${fps} FPS`,
-                      value: fps,
-                    }))}
-                    popupClassName="robot-select-menu"
-                    value={values.fps}
-                  />
+                  <div className="robot-capture-field">
+                    <span className="robot-capture-field-label">
+                      {t('Capture Resolution')}
+                    </span>
+                    <Select
+                      aria-label={t('Capture Resolution')}
+                      onChange={(key) => {
+                        const resolution = resolutions.find(
+                          (candidate) => candidate.key === key,
+                        );
+                        if (!resolution) return;
+                        const availableFrameRates = captureFrameRates(
+                          camera?.captureModes,
+                          resolution,
+                        );
+                        update({
+                          width: resolution.width,
+                          height: resolution.height,
+                          fps: availableFrameRates.includes(values.fps)
+                            ? values.fps
+                            : (availableFrameRates[0] ?? values.fps),
+                        });
+                      }}
+                      options={resolutions.map((resolution) => ({
+                        label: `${resolution.width} × ${resolution.height}`,
+                        value: resolution.key,
+                      }))}
+                      popupClassName="robot-select-menu"
+                      value={captureResolutionKey(values)}
+                    />
+                  </div>
+                  <div className="robot-capture-field">
+                    <span className="robot-capture-field-label">
+                      {t('Capture Frame Rate')}
+                    </span>
+                    <Select
+                      aria-label={t('Capture Frame Rate')}
+                      onChange={(fps) => update({ fps })}
+                      options={frameRates.map((fps) => ({
+                        label: `${fps} FPS`,
+                        value: fps,
+                      }))}
+                      popupClassName="robot-select-menu"
+                      value={values.fps}
+                    />
+                  </div>
                 </>
               ) : (
                 <>
-                  <InputNumber
-                    addonAfter={t('Width')}
-                    aria-label={t('Capture Width')}
-                    max={WIDTH_RANGE.max}
-                    min={WIDTH_RANGE.min}
-                    onChange={(width) =>
-                      update({ width: width ?? fallbackSettings.width })
-                    }
-                    value={values.width}
-                  />
-                  <InputNumber
-                    addonAfter={t('Height')}
-                    aria-label={t('Capture Height')}
-                    max={HEIGHT_RANGE.max}
-                    min={HEIGHT_RANGE.min}
-                    onChange={(height) =>
-                      update({ height: height ?? fallbackSettings.height })
-                    }
-                    value={values.height}
-                  />
-                  <InputNumber
-                    addonAfter="fps"
-                    aria-label={t('Capture Frame Rate')}
-                    max={FPS_RANGE.max}
-                    min={FPS_RANGE.min}
-                    onChange={(fps) =>
-                      update({ fps: fps ?? fallbackSettings.fps })
-                    }
-                    value={values.fps}
-                  />
+                  <div className="robot-capture-field">
+                    <span className="robot-capture-field-label">
+                      {t('Capture Width')}
+                    </span>
+                    <InputNumber
+                      addonAfter="px"
+                      aria-label={t('Capture Width')}
+                      max={WIDTH_RANGE.max}
+                      min={WIDTH_RANGE.min}
+                      onChange={(width) =>
+                        update({ width: width ?? fallbackSettings.width })
+                      }
+                      value={values.width}
+                    />
+                  </div>
+                  <div className="robot-capture-field">
+                    <span className="robot-capture-field-label">
+                      {t('Capture Height')}
+                    </span>
+                    <InputNumber
+                      addonAfter="px"
+                      aria-label={t('Capture Height')}
+                      max={HEIGHT_RANGE.max}
+                      min={HEIGHT_RANGE.min}
+                      onChange={(height) =>
+                        update({ height: height ?? fallbackSettings.height })
+                      }
+                      value={values.height}
+                    />
+                  </div>
+                  <div className="robot-capture-field">
+                    <span className="robot-capture-field-label">
+                      {t('Capture Frame Rate')}
+                    </span>
+                    <InputNumber
+                      addonAfter="fps"
+                      aria-label={t('Capture Frame Rate')}
+                      max={FPS_RANGE.max}
+                      min={FPS_RANGE.min}
+                      onChange={(fps) =>
+                        update({ fps: fps ?? fallbackSettings.fps })
+                      }
+                      value={values.fps}
+                    />
+                  </div>
                 </>
               )}
-            </Space>
+            </div>
           </Form.Item>
           <Form.Item
             extra={t(
