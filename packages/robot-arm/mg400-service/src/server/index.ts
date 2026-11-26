@@ -45,6 +45,7 @@ import {
   PreviewPerspectives,
   phoneFingerprint,
 } from './preview-perspectives.js';
+import { verifyReferenceObservation } from './reference-observation.js';
 import { screenConnectPage } from './screen-connect-page.js';
 import { ScreenControl } from './screen-control.js';
 import type {
@@ -833,6 +834,83 @@ export async function startPlaygroundHost({
             : devices.markerCalibration.markerAction(input)),
         );
       }
+      if (
+        url.pathname === '/api/camera-screen-associations' ||
+        url.pathname === '/api/camera-screen-associations/preview'
+      ) {
+        const registry = devices;
+        if (!registry) return send(409, { error: 'Connect the arm first' });
+        const overheadId = url.searchParams.get('camera') ?? '';
+        if (!overheadId) return send(400, { error: 'Camera id is required' });
+        const association = registry.dualCameraScreens;
+        if (url.pathname.endsWith('/preview')) {
+          if (req.method !== 'GET')
+            return send(405, { error: 'Method not allowed' });
+          const side = await association.sideCamera(overheadId);
+          if (!side || side.id !== url.searchParams.get('side'))
+            return send(409, { error: 'The eye-level camera changed.' });
+          await streamStandalonePreview(
+            res,
+            cameraManager,
+            side.id,
+            'raw',
+            undefined,
+            url.searchParams.get('client') ?? undefined,
+            'screen-association-side',
+          );
+          return;
+        }
+        if (req.method === 'GET')
+          return send(200, await association.read(overheadId));
+        if (req.method !== 'POST')
+          return send(405, { error: 'Method not allowed' });
+        const input = await readBody(req);
+        const screenIds: unknown = input?.screenIds;
+        if (
+          !Array.isArray(screenIds) ||
+          !screenIds.length ||
+          screenIds.some((id) => typeof id !== 'string' || !id)
+        )
+          return send(400, {
+            error: 'Select at least one mapped screen to associate.',
+          });
+        const assertIdle = () => {
+          if (registry !== devices || registry.closed)
+            throw new RobotArmError(
+              'STALE_CONTEXT',
+              'Device connection changed',
+              409,
+            );
+          registry.assertBatchIdle();
+          if (
+            registry.hasActiveScreenCalibration ||
+            screenControl?.busy ||
+            controllerRuntime(registry.arm).current()?.status === 'running'
+          )
+            throw new RobotArmError(
+              'BUSY',
+              'Stop robot motion before associating the screens.',
+              409,
+            );
+        };
+        const abort = new AbortController();
+        const cancel = () => abort.abort();
+        res.once('close', cancel);
+        try {
+          if (res.destroyed) cancel();
+          return send(
+            200,
+            await association.associate(
+              overheadId,
+              screenIds,
+              abort.signal,
+              assertIdle,
+            ),
+          );
+        } finally {
+          res.off('close', cancel);
+        }
+      }
       if (url.pathname === '/api/calibration-batch') {
         if (!devices) return send(409, { error: 'Connect the arm first' });
         if (req.method === 'GET')
@@ -864,6 +942,14 @@ export async function startPlaygroundHost({
           return send(200, await batch.screens(input.cameraId));
         if (input.action === 'start')
           return send(200, await batch.start(input));
+        if (input.action === 'check-model')
+          return send(
+            200,
+            await batch.checkReferenceModel(
+              input.cameraId,
+              input.referenceModel,
+            ),
+          );
         if (otherCamera && input.action !== 'delete-calibration')
           return send(409, { error: 'Batch belongs to a different camera' });
         if (input.action === 'clear') {
@@ -884,6 +970,7 @@ export async function startPlaygroundHost({
             input.revision,
             input.action === 'command' ? input.command : input.action,
             input.id,
+            input.referenceModel,
           ),
         );
       }
@@ -1053,6 +1140,95 @@ export async function startPlaygroundHost({
           return send(200, configuration);
         }
         if (req.method === 'POST') await host.prepare(false);
+        if (action === 'reference/locate' && req.method === 'POST') {
+          const input = await readBody(req, 65536);
+          const model = input?.model;
+          if (
+            input?.confirmed !== true ||
+            typeof input.sessionId !== 'string' ||
+            !input.sessionId ||
+            !model ||
+            typeof model !== 'object' ||
+            ![
+              'provider',
+              'modelName',
+              'modelFamily',
+              'baseUrl',
+              'apiKey',
+            ].every(
+              (key) => typeof model[key] === 'string' && model[key].trim(),
+            )
+          )
+            return send(400, {
+              error:
+                'Confirm the workspace is clear and complete the VLM model settings.',
+            });
+          const attempt = req.headers['x-calibration-attempt'];
+          const assertCurrent = () => {
+            if (registry !== devices || registry.entries.get(id)?.host !== host)
+              throw new RobotArmError(
+                'STALE_CONTEXT',
+                'Device connection changed',
+                409,
+              );
+            registry.assertBatchIdle();
+            registry.assertCalibrationRunning(
+              id,
+              typeof attempt === 'string' ? attempt : '',
+            );
+          };
+          assertCurrent();
+          const abort = new AbortController();
+          const cancel = () => abort.abort();
+          res.once('close', cancel);
+          try {
+            const candidates = await listCameras({
+              cachedOnly: true,
+              includeBuiltIn: true,
+            });
+            const [overhead, sideCameras] = await Promise.all([
+              cameraManager.cameraPreferences(host.cameraId),
+              Promise.all(
+                candidates
+                  .filter(
+                    ({ id, kind }) => id !== host.cameraId && kind !== 'depth',
+                  )
+                  .map(async ({ id }) =>
+                    (await cameraManager.cameraPreferences(id))?.label ===
+                    'front'
+                      ? id
+                      : undefined,
+                  ),
+              ).then((ids) => ids.filter((id) => id !== undefined)),
+            ]);
+            if (overhead?.label !== 'top' || sideCameras.length !== 1)
+              throw new RobotArmError(
+                'VISION_UNAVAILABLE',
+                'Set the screen camera to Overhead and assign exactly one Eye-level camera.',
+                409,
+              );
+            const sideId = sideCameras[0]!;
+            const owner = `reference-positioning:${randomUUID()}`;
+            abort.signal.throwIfAborted();
+            const sideCamera = await cameraManager.acquire(sideId, owner);
+            let session: Awaited<ReturnType<typeof host.locateReference>>;
+            try {
+              assertCurrent();
+              abort.signal.throwIfAborted();
+              session = await host.locateReference(
+                input.sessionId,
+                sideCamera,
+                (observation) => verifyReferenceObservation(observation, model),
+                abort.signal,
+              );
+            } finally {
+              await cameraManager.release(sideId, owner);
+            }
+            return send(200, { session });
+          } finally {
+            res.off('close', cancel);
+          }
+        }
         if (
           url.pathname.endsWith('/calibration/camera/preview') &&
           req.method === 'GET'

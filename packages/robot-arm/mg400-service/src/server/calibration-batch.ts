@@ -6,6 +6,7 @@ import {
   RobotArmError,
   type SharedParkingEvidence,
   calibrationAccepted,
+  isRobotArmError,
   semanticJson,
 } from '@midscene/arm-kit';
 import type { CalibrationHost } from '@midscene/arm-kit/internal/calibration-server/host';
@@ -14,6 +15,7 @@ import {
   confirmVisibilityPages,
   verifyScreenVisibility,
 } from '@midscene/arm-kit/internal/calibration/camera/visibility';
+import { screenPoseMm } from '@midscene/arm-kit/internal/calibration/geometry';
 import {
   type ScreenPlaneSource,
   calibrationQuad,
@@ -31,11 +33,26 @@ import type {
   CalibrationBatchPlan,
   CalibrationBatchSamplingMode,
   CalibrationBatchState,
+  ReferenceObservationDebug,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
 import type { PlaygroundDevices } from './devices.js';
+import { modelFailure } from './model-failure.js';
+import { verifyReferenceObservation } from './reference-observation.js';
+import {
+  type ViewpointModelConfig,
+  type VisionTrace,
+  classifyCameraViewpoints,
+  requireViewpointModel,
+} from './viewpoint-classifier.js';
 
 const terminal = (status: string) => ['completed', 'skipped'].includes(status);
+const withoutTimestamp = ({ at: _at, ...rest }: ReferenceObservationDebug) =>
+  rest;
+const isReferenceModelFailure = (error: unknown) =>
+  isRobotArmError(error) &&
+  error.code === 'VISION_UNAVAILABLE' &&
+  typeof error.details?.modelFailure === 'string';
 type SharedParkingDebug = NonNullable<
   CalibrationBatchState['sharedParkingDebug']
 >;
@@ -57,6 +74,10 @@ export class CalibrationBatch {
   private writes: Promise<unknown> = Promise.resolve();
   private stopRevision?: number;
   private activeAttempt?: { host: CalibrationHost; id: string };
+  private referenceModel?: ViewpointModelConfig;
+  /** Set once the eye-level model fails, so later screens skip the search. */
+  private referenceModelFailed = false;
+  private verifiedReferenceStart?: CartesianPose;
   constructor(private readonly devices: PlaygroundDevices) {}
   get active() {
     return Boolean(this.task || this.starting || this.stopping || this.busy);
@@ -713,7 +734,7 @@ export class CalibrationBatch {
     if (!teaching)
       throw new RobotArmError(
         'INSTALLATION_TEACHING_REQUIRED',
-        'Record installation teaching for the current robot, tool and camera',
+        'Save the installation safe start and camera-side boundary.',
         409,
       );
     if (!entries.length)
@@ -810,6 +831,7 @@ export class CalibrationBatch {
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual' | 'automatic';
     drawLogo?: boolean;
+    referenceModel?: ViewpointModelConfig;
   }) {
     if (this.active)
       throw new RobotArmError(
@@ -846,11 +868,26 @@ export class CalibrationBatch {
           409,
         );
       const selected = this.selection(input.cameraId);
+      const referenceModel =
+        input.referenceModel === undefined
+          ? undefined
+          : requireViewpointModel(input.referenceModel);
+      if (referenceModel) {
+        if (!(await this.devices.dualCameraScreens.sideCamera(input.cameraId)))
+          throw new RobotArmError(
+            'VISION_UNAVAILABLE',
+            'Set the screen camera to Overhead and assign exactly one Eye-level camera.',
+            409,
+          );
+      }
       await this.runtime.assertCalibrationMotionReady(selected.toolProfileId);
       const contextVersion = this.contextVersion(input.cameraId);
       const sharedSafePosition = this.savedSharedPosition(input.cameraId);
       this.assertLaunchCurrent(launchRevision);
       this.stopRevision = this.runtime.stopRevision;
+      this.referenceModel = referenceModel;
+      this.referenceModelFailed = false;
+      this.verifiedReferenceStart = undefined;
       this.state = {
         id: randomUUID(),
         revision: 0,
@@ -860,6 +897,7 @@ export class CalibrationBatch {
         status: 'running',
         currentIndex: 0,
         samplingMode,
+        automaticReference: referenceModel ? true : undefined,
         compliantSetupConfirmed: samplingMode === 'slide' ? true : undefined,
         usesSharedSafePosition: true,
         sharedSafePosition,
@@ -882,6 +920,62 @@ export class CalibrationBatch {
     } finally {
       this.starting = false;
     }
+  }
+  /**
+   * One real two-image call before the batch owns the workstation. A broken
+   * key, model name or endpoint must stop the run here, not on screen three.
+   */
+  async checkReferenceModel(cameraId: string, value: unknown) {
+    if (this.active)
+      throw new RobotArmError(
+        'BUSY',
+        'Stop the batch before checking the model.',
+        409,
+      );
+    const model = requireViewpointModel(value);
+    const side = await this.devices.dualCameraScreens.sideCamera(cameraId);
+    if (!side)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Assign exactly one Eye-level camera before checking the model.',
+        409,
+      );
+    const frames: { cameraId: string; jpeg: Buffer }[] = [];
+    for (const id of [cameraId, side.id]) {
+      const owner = `model-check:${randomUUID()}`;
+      const camera = await this.devices.cameras.acquire(id, owner);
+      try {
+        frames.push({ cameraId: id, jpeg: await camera.rawFrame() });
+      } finally {
+        await this.devices.cameras.release(id, owner);
+      }
+    }
+    try {
+      await classifyCameraViewpoints({
+        frames,
+        model,
+        onTrace: (trace) => this.logReferenceModel(cameraId, trace),
+      });
+      return { ok: true as const };
+    } catch (error) {
+      throw modelFailure(error);
+    }
+  }
+  private logReferenceModel(screenId: string, trace: VisionTrace) {
+    const parts = [
+      `[reference-model] batch=${this.state?.id ?? '-'} screen=${screenId}`,
+      `model=${trace.model}`,
+      `endpoint=${trace.endpoint}`,
+      `duration=${trace.durationMs}ms`,
+    ];
+    if (trace.status !== undefined) parts.push(`status=${trace.status}`);
+    if (trace.finishReason) parts.push(`finish=${trace.finishReason}`);
+    if (trace.responseChars !== undefined)
+      parts.push(`chars=${trace.responseChars}`);
+    if (trace.error) {
+      parts.push(`error=${trace.error.replace(/\s+/g, ' ').slice(0, 300)}`);
+      console.warn(parts.join(' '));
+    } else console.info(parts.join(' '));
   }
   private assertLaunchCurrent(revision: number) {
     if (revision !== this.launchRevision)
@@ -1111,6 +1205,211 @@ export class CalibrationBatch {
       await this.devices.calibrateCameraImaging(cameraId, missing);
   }
 
+  private async locateReference(
+    host: CalibrationHost,
+    attemptId: string,
+    signal: AbortSignal,
+  ) {
+    const state = this.state!;
+    const cameraId = state.cameraId!;
+    const model = requireViewpointModel(this.referenceModel);
+    const selection = this.selection(cameraId);
+    const store = this.runtime.profileStore;
+    const teaching = store.installationTeaching(selection);
+    if (!teaching)
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'Save the installation safe start and camera-side boundary.',
+        409,
+      );
+    const deviceId = host.deviceId;
+    const correction = this.devices.entries
+      .get(deviceId)
+      ?.camera.getCorrection();
+    if (!correction)
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'Apply the screen perspective results first',
+        409,
+      );
+    const entries = this.entries(cameraId);
+    const entry = entries.find(({ target }) => target.id === deviceId);
+    const tool = store.getTool(selection.toolProfileId);
+    const saved = entry?.calibration &&
+      entry.screen && {
+        centerContact: screenPoseMm(
+          entry.calibration,
+          tool,
+          {
+            x: entry.screen.physicalWidthMm / 2,
+            y: entry.screen.physicalHeightMm / 2,
+          },
+          0,
+        ),
+        widthMm: entry.screen.physicalWidthMm,
+        heightMm: entry.screen.physicalHeightMm,
+      };
+    const startPositions = [
+      teaching.referencePose,
+      state.sharedSafePosition,
+      this.verifiedReferenceStart,
+      ...entries.map(({ calibration }) => calibration?.observationPose),
+    ].filter((pose) => pose !== undefined);
+    const firstFit = entries.find(
+      ({ calibration }) => calibration,
+    )?.calibration;
+    const estimate =
+      !saved && firstFit ? this.estimates(cameraId).get(deviceId) : undefined;
+    const estimated =
+      estimate &&
+      firstFit &&
+      (() => {
+        const [tl, tr, br, bl] = estimate.quad;
+        const length = (a: typeof tl, b: typeof tl) =>
+          Math.hypot(a.x - b.x, a.y - b.y);
+        return {
+          centerContact: flangePose(
+            { ...estimate.center, z: firstFit.origin.z },
+            teaching.referencePose.orientation,
+            tool.offsetMm,
+          ),
+          widthMm: (length(tl, tr) + length(bl, br)) / 2,
+          heightMm: (length(tl, bl) + length(tr, br)) / 2,
+        };
+      })();
+    const source =
+      saved ??
+      (estimated || {
+        outline: pageOrderedQuad(correction.points, correction.rotation).map(
+          ({ x, y }) => ({
+            x: (1000 * x) / correction.sourceWidth,
+            y: (1000 * y) / correction.sourceHeight,
+          }),
+        ),
+      });
+    const geometryKey = semanticJson(correction);
+    const associations = this.devices.dualCameraScreens;
+    let views = await associations.read(cameraId);
+    if (
+      !views.screens.some(
+        (screen) =>
+          screen.screenId === deviceId && screen.status === 'associated',
+      )
+    )
+      views = await associations.associate(cameraId, [deviceId], signal, () =>
+        this.check(signal),
+      );
+    this.check(signal);
+    const observed = views.screens.find(
+      ({ screenId }) => screenId === deviceId,
+    );
+    if (!views.sideCamera || observed?.status !== 'associated')
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'The screen needs a verified eye-level association before locating its reference.',
+        409,
+        { screenId: deviceId, association: observed?.status },
+      );
+    const sideId = views.sideCamera.id;
+    const owner = `batch-reference:${state.id}:${attemptId}`;
+    const side = await this.devices.cameras.acquire(sideId, owner);
+    /*
+     * The eye-level reading drives the search, but it is also the only evidence
+     * of what the model saw. Keep the latest attempt for the live preview so a
+     * failure can be read from the image it judged instead of a bare message.
+     */
+    const inspect = async (
+      observation: Parameters<typeof verifyReferenceObservation>[0],
+    ) => {
+      try {
+        const outcome = await verifyReferenceObservation(
+          observation,
+          model,
+          observed.region,
+          fetch,
+          (trace) => this.logReferenceModel(deviceId, trace),
+        );
+        await this.recordReferenceDebug(deviceId, outcome.debug);
+        return outcome;
+      } catch (error) {
+        if (!signal.aborted) {
+          const debug = isRobotArmError(error)
+            ? (error.details?.referenceObservation as
+                | ReferenceObservationDebug
+                | undefined)
+            : undefined;
+          await this.recordReferenceDebug(
+            deviceId,
+            debug ?? {
+              at: new Date().toISOString(),
+              model: model.modelName,
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          );
+        }
+        throw error;
+      }
+    };
+    try {
+      return await host.locateReference(
+        attemptId,
+        side,
+        inspect,
+        signal,
+        () => {
+          this.check(signal);
+          if (
+            semanticJson(
+              this.devices.entries.get(deviceId)?.camera.getCorrection(),
+            ) !== geometryKey
+          )
+            return undefined;
+          return { ...source, key: geometryKey, startPositions };
+        },
+      );
+    } catch (error) {
+      /*
+       * A model outage must not fail a screen the operator can place by hand.
+       * Keep the attempt, wait at the existing placement step, and let the
+       * rest of the batch skip the visual search.
+       */
+      if (!state.automaticReference || !isReferenceModelFailure(error))
+        throw error;
+      this.referenceModelFailed = true;
+      await this.update(() => {
+        const fallback = this.state!.items[this.state!.currentIndex];
+        fallback.status = 'awaiting-placement';
+        fallback.note =
+          'Automatic reference positioning is unavailable. Place the stylus above the screen and confirm.';
+        this.state!.status = 'waiting';
+      });
+      const current = host.service.status();
+      if (!current) throw error;
+      return current;
+    } finally {
+      await this.devices.cameras.release(sideId, owner);
+    }
+  }
+  /** Publish the latest eye-level model reading without spamming identical ones. */
+  private async recordReferenceDebug(
+    deviceId: string,
+    debug: ReferenceObservationDebug,
+  ) {
+    if (!this.state) return;
+    const next = { ...debug, screenId: deviceId };
+    const previous = this.state.referenceDebug;
+    if (
+      previous &&
+      semanticJson(withoutTimestamp(previous)) ===
+        semanticJson(withoutTimestamp(next))
+    )
+      return;
+    await this.update(() => {
+      if (this.state) this.state.referenceDebug = next;
+    });
+  }
+
   private async run(
     signal: AbortSignal,
     operatorConfirmedParking: boolean,
@@ -1136,6 +1435,7 @@ export class CalibrationBatch {
             row.progress = undefined;
             row.note = undefined;
             row.error = undefined;
+            state.referenceDebug = undefined;
           });
           const host = await this.devices.ensureHost(row.deviceId);
           let attemptId: string | undefined;
@@ -1195,6 +1495,7 @@ export class CalibrationBatch {
             let session = await host.service.create({
               batch: true,
               drawLogo: state.drawLogo,
+              automaticReference: state.automaticReference,
             });
             attemptId = session.id;
             this.activeAttempt = { host, id: attemptId };
@@ -1212,7 +1513,12 @@ export class CalibrationBatch {
             if (state.usesSharedSafePosition)
               host.service.setBatchParking(state.id);
             const selection = this.selection(state.cameraId!);
-            if (!session.referencePosition) {
+            if (state.automaticReference && !this.referenceModelFailed) {
+              await this.update(() => {
+                row.note = 'Finding the screen reference position';
+              });
+              session = await this.locateReference(host, session.id, signal);
+            } else if (!session.referencePosition) {
               const estimate = this.estimates(state.cameraId!).get(
                 row.deviceId,
               );
@@ -1283,6 +1589,11 @@ export class CalibrationBatch {
               const current = readAttempt();
               if (current.stage === 'completed' && current.result) {
                 last = current.result;
+                if (state.automaticReference)
+                  this.verifiedReferenceStart =
+                    await this.runtime.assertCalibrationMotionReady(
+                      selection.toolProfileId,
+                    );
                 await this.update(() => {
                   row.status = 'completed';
                   row.calibrationProfileId = current.result!.id;
@@ -1662,7 +1973,12 @@ export class CalibrationBatch {
       });
     return this.stopping;
   }
-  async command(revision: number, action: string, id?: string) {
+  async command(
+    revision: number,
+    action: string,
+    id?: string,
+    referenceModel?: unknown,
+  ) {
     const state = this.read();
     if (!state || (id && state.id !== id))
       throw new RobotArmError(
@@ -1768,6 +2084,13 @@ export class CalibrationBatch {
         } else {
           await this.assertResumeContext();
           this.assertLaunchCurrent(launchRevision);
+          if (!parkingOnly && state.automaticReference) {
+            this.referenceModel = requireViewpointModel(
+              referenceModel ?? this.referenceModel,
+            );
+            // A retry is the operator's explicit second chance for the model.
+            this.referenceModelFailed = false;
+          }
           await this.update(() => {
             if (!parkingOnly)
               row.status = action === 'skip' ? 'skipped' : 'pending';
@@ -1860,6 +2183,9 @@ export class CalibrationBatch {
         409,
       );
     this.state = undefined;
+    this.referenceModel = undefined;
+    this.referenceModelFailed = false;
+    this.verifiedReferenceStart = undefined;
     this.sharedParkingDebug = undefined;
     await this.runtime.profileStore.clearCalibrationBatch();
   }

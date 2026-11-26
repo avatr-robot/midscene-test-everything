@@ -1,9 +1,30 @@
+import { RobotArmError } from '@midscene/arm-kit';
+
 export interface ViewpointModelConfig {
   provider: string;
   modelName: string;
   modelFamily: string;
   baseUrl: string;
   apiKey: string;
+}
+
+export function requireViewpointModel(value: unknown): ViewpointModelConfig {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    !(
+      ['provider', 'modelName', 'modelFamily', 'baseUrl', 'apiKey'] as const
+    ).every((key) => {
+      const field = (value as Partial<ViewpointModelConfig>)[key];
+      return typeof field === 'string' && field.trim();
+    })
+  )
+    throw new RobotArmError(
+      'VISION_UNAVAILABLE',
+      'Complete the VLM model settings first.',
+      409,
+    );
+  return value as ViewpointModelConfig;
 }
 
 export interface ViewpointFrame {
@@ -26,21 +47,66 @@ export async function classifyCameraViewpoints({
   frames,
   model,
   fetchImpl = fetch,
+  onTrace,
 }: {
   frames: readonly ViewpointFrame[];
   model: ViewpointModelConfig;
   fetchImpl?: FetchLike;
+  onTrace?: (trace: VisionTrace) => void;
 }): Promise<CameraViewpointClassification> {
   if (
     frames.length !== 2 ||
     new Set(frames.map((frame) => frame.cameraId)).size !== 2
   )
     throw new Error('Exactly two distinct camera frames are required');
+  const source = await requestVisionText({
+    frames,
+    prompt: viewpointPrompt(frames),
+    model,
+    fetchImpl,
+    onTrace,
+  });
+  return parseViewpointClassification(
+    source,
+    frames.map((frame) => frame.cameraId),
+  );
+}
+
+export interface VisionTrace {
+  model: string;
+  endpoint: string;
+  status?: number;
+  durationMs: number;
+  finishReason?: string;
+  responseChars?: number;
+  error?: string;
+}
+
+export async function requestVisionText({
+  frames,
+  prompt,
+  model,
+  signal = AbortSignal.timeout(45_000),
+  fetchImpl = fetch,
+  jsonMode = false,
+  maxTokens = 800,
+  onTrace,
+}: {
+  frames: readonly Pick<ViewpointFrame, 'jpeg'>[];
+  prompt: string;
+  model: ViewpointModelConfig;
+  signal?: AbortSignal;
+  fetchImpl?: FetchLike;
+  /** Ask OpenAI-compatible chat endpoints for one bare JSON object. */
+  jsonMode?: boolean;
+  /** Visible output budget; reasoning models spend it before the answer. */
+  maxTokens?: number;
+  onTrace?: (trace: VisionTrace) => void;
+}): Promise<string> {
   const baseUrl = new URL(model.baseUrl);
   if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:')
     throw new Error('The model base URL must use HTTP or HTTPS');
 
-  const prompt = viewpointPrompt(frames);
   const isAnthropic =
     model.provider.toLowerCase().includes('anthropic') ||
     baseUrl.hostname === 'api.anthropic.com';
@@ -59,53 +125,54 @@ export async function classifyCameraViewpoints({
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  let body: unknown;
-  if (isAnthropic) {
-    headers['x-api-key'] = model.apiKey;
-    headers['anthropic-version'] = '2023-06-01';
-    body = {
-      model: model.modelName,
-      max_tokens: 300,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            ...frames.map((frame) => ({
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/jpeg',
-                data: frame.jpeg.toString('base64'),
-              },
-            })),
-          ],
-        },
-      ],
-    };
-  } else if (isOpenAIResponses) {
+  const body = (useJsonMode: boolean): unknown => {
+    if (isAnthropic) {
+      headers['x-api-key'] = model.apiKey;
+      headers['anthropic-version'] = '2023-06-01';
+      return {
+        model: model.modelName,
+        max_tokens: maxTokens,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              ...frames.map((frame) => ({
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/jpeg',
+                  data: frame.jpeg.toString('base64'),
+                },
+              })),
+            ],
+          },
+        ],
+      };
+    }
+    if (isOpenAIResponses) {
+      headers.Authorization = `Bearer ${model.apiKey}`;
+      return {
+        model: model.modelName,
+        max_output_tokens: maxTokens,
+        input: [
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: prompt },
+              ...frames.map((frame) => ({
+                type: 'input_image',
+                image_url: jpegDataUrl(frame.jpeg),
+              })),
+            ],
+          },
+        ],
+      };
+    }
     headers.Authorization = `Bearer ${model.apiKey}`;
-    body = {
+    return {
       model: model.modelName,
-      max_output_tokens: 300,
-      input: [
-        {
-          role: 'user',
-          content: [
-            { type: 'input_text', text: prompt },
-            ...frames.map((frame) => ({
-              type: 'input_image',
-              image_url: jpegDataUrl(frame.jpeg),
-            })),
-          ],
-        },
-      ],
-    };
-  } else {
-    headers.Authorization = `Bearer ${model.apiKey}`;
-    body = {
-      model: model.modelName,
-      max_tokens: 300,
+      max_tokens: maxTokens,
       messages: [
         { role: 'system', content: prompt },
         {
@@ -116,65 +183,106 @@ export async function classifyCameraViewpoints({
           })),
         },
       ],
+      ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
     };
-  }
+  };
 
   const dispatcher =
     fetchImpl === fetch && !bypassesProxy(baseUrl)
       ? await getProxyDispatcher()
       : undefined;
-  let response: Response;
+  const send = async (useJsonMode: boolean) => {
+    signal.throwIfAborted();
+    let response: Response;
+    try {
+      response = await fetchImpl(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body(useJsonMode)),
+        signal,
+        ...(dispatcher ? { dispatcher } : {}),
+      } as RequestInit & { dispatcher?: ProxyAgent });
+    } catch (error) {
+      const cause =
+        error && typeof error === 'object' && 'cause' in error
+          ? (error as { cause?: { code?: string; message?: string } }).cause
+          : undefined;
+      throw new Error(
+        [
+          `Could not reach the VLM endpoint ${baseUrl.origin}.`,
+          cause?.code,
+          cause?.message ??
+            (error instanceof Error ? error.message : String(error)),
+          dispatcher
+            ? 'The system proxy was used.'
+            : 'No system proxy was detected.',
+        ]
+          .filter(Boolean)
+          .join(' '),
+      );
+    }
+    const text = await response.text();
+    if (!response.ok)
+      throw new Error(
+        `VLM request failed (HTTP ${response.status}): ${text.slice(0, 400)}`,
+      );
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error('The VLM response was not valid JSON');
+    }
+    return {
+      status: response.status,
+      text: extractResponseText(payload),
+      finishReason: finishReasonOf(payload),
+    };
+  };
+
+  const startedAt = Date.now();
   try {
-    response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(45_000),
-      ...(dispatcher ? { dispatcher } : {}),
-    } as RequestInit & { dispatcher?: ProxyAgent });
+    const result = await send(jsonMode);
+    onTrace?.({
+      model: model.modelName,
+      endpoint,
+      status: result.status,
+      durationMs: Date.now() - startedAt,
+      ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+      responseChars: result.text.length,
+    });
+    return result.text;
   } catch (error) {
-    const cause =
-      error && typeof error === 'object' && 'cause' in error
-        ? (error as { cause?: { code?: string; message?: string } }).cause
-        : undefined;
-    throw new Error(
-      [
-        `Could not reach the VLM endpoint ${baseUrl.origin}.`,
-        cause?.code,
-        cause?.message ??
-          (error instanceof Error ? error.message : String(error)),
-        dispatcher
-          ? 'The system proxy was used.'
-          : 'No system proxy was detected.',
-      ]
-        .filter(Boolean)
-        .join(' '),
-    );
+    const detail = error instanceof Error ? error.message : String(error);
+    onTrace?.({
+      model: model.modelName,
+      endpoint,
+      durationMs: Date.now() - startedAt,
+      error: detail.slice(0, 400),
+    });
+    /*
+     * Some OpenAI-compatible gateways reject response_format outright, and a
+     * rejected format field must not take the whole calibration down. The
+     * prompt already asks for JSON, so one retry without it is still useful.
+     */
+    if (jsonMode && /\(HTTP (400|422)\)/.test(detail))
+      return requestVisionText({
+        frames,
+        prompt,
+        model,
+        signal,
+        fetchImpl,
+        maxTokens,
+        onTrace,
+      });
+    throw error;
   }
-  const text = await response.text();
-  if (!response.ok)
-    throw new Error(
-      `VLM request failed (HTTP ${response.status}): ${text.slice(0, 400)}`,
-    );
-  const payload: unknown = JSON.parse(text);
-  return parseViewpointClassification(
-    extractResponseText(payload),
-    frames.map((frame) => frame.cameraId),
-  );
 }
 
 export function parseViewpointClassification(
   source: string,
   cameraIds: readonly string[],
 ): CameraViewpointClassification {
-  const start = source.indexOf('{');
-  const end = source.lastIndexOf('}');
-  if (start < 0 || end <= start)
-    throw new Error('The VLM response did not contain a JSON object');
-  const value: unknown = JSON.parse(source.slice(start, end + 1));
-  if (!value || typeof value !== 'object')
-    throw new Error('The VLM response was not a JSON object');
-  const result = value as Record<string, unknown>;
+  const result = parseVisionObject(source);
   const overheadCameraId = result.overheadCameraId;
   const eyeLevelCameraId = result.eyeLevelCameraId;
   if (
@@ -201,6 +309,17 @@ export function parseViewpointClassification(
   };
 }
 
+export function parseVisionObject(source: string): Record<string, unknown> {
+  const start = source.indexOf('{');
+  const end = source.lastIndexOf('}');
+  if (start < 0 || end <= start)
+    throw new Error('The VLM response did not contain a JSON object');
+  const value: unknown = JSON.parse(source.slice(start, end + 1));
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('The VLM response was not a JSON object');
+  return value as Record<string, unknown>;
+}
+
 function viewpointPrompt(frames: readonly ViewpointFrame[]) {
   return [
     'You are comparing two live still frames from the same workstation.',
@@ -215,6 +334,31 @@ function viewpointPrompt(frames: readonly ViewpointFrame[]) {
 
 function jpegDataUrl(jpeg: Buffer) {
   return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+}
+
+/** Reported so a truncated answer is visible in the trace/log. */
+function finishReasonOf(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object') return;
+  const value = payload as Record<string, unknown>;
+  if (Array.isArray(value.choices)) {
+    const choice = value.choices[0];
+    if (choice && typeof choice === 'object') {
+      const reason = (choice as Record<string, unknown>).finish_reason;
+      if (typeof reason === 'string') return reason;
+    }
+  }
+  if (typeof value.stop_reason === 'string') return value.stop_reason;
+  if (typeof value.status === 'string') {
+    const incomplete = value.incomplete_details;
+    const reason =
+      incomplete && typeof incomplete === 'object'
+        ? (incomplete as Record<string, unknown>).reason
+        : undefined;
+    return typeof reason === 'string'
+      ? `${value.status}: ${reason}`
+      : value.status;
+  }
+  return;
 }
 
 function extractResponseText(payload: unknown): string {

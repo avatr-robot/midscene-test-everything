@@ -372,6 +372,25 @@ export interface CalibrationPreviewPositions {
   cameraBoundaryLine?: { start: WebPoint; end: WebPoint; allowed: WebPoint };
   safe?: WebPoint;
 }
+export interface SideScreenRegion {
+  sourceWidth: number;
+  sourceHeight: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+export type ScreenAssociationResult = { screenId: string } & (
+  | { status: 'associated'; region: SideScreenRegion }
+  | { status: 'overhead-mismatch'; patternMatch?: number }
+  | {
+      status: 'pending' | 'phone-offline' | 'side-not-visible' | 'ambiguous';
+    }
+);
+export interface DualCameraScreenAssociations {
+  sideCamera?: { id: string; name: string };
+  screens: ScreenAssociationResult[];
+}
 /** Configuration prepared before any calibration task exists. */
 export interface AssistedCalibrationSetup {
   selection?: Pick<
@@ -453,6 +472,7 @@ export interface AssistedCalibrationState {
   stage:
     | 'positioning-boundary'
     | 'avoiding-camera'
+    | 'locating-reference'
     | 'ready'
     | 'positioning-safe'
     | 'boundary-review'
@@ -656,6 +676,27 @@ export type CalibrationBatchSamplingMode = Extract<
   'standard' | 'slide'
 >;
 
+/**
+ * Latest eye-level model reading during the batch reference search. The booleans
+ * mirror the model prompt so the operator can see what it saw and decided.
+ */
+export interface ReferenceObservationDebug {
+  /** Screen whose reference the reading belongs to. */
+  screenId?: string;
+  at: string;
+  model?: string;
+  ok: boolean;
+  targetVisible?: boolean;
+  tipVisible?: boolean;
+  viewClear?: boolean;
+  visibleGapAboveTarget?: boolean;
+  confidence?: number;
+  /** Model-reported stylus tip in the overhead frame, 0–1000 image coordinates. */
+  overheadTip?: { x: number; y: number };
+  /** Technical reason when the call or the response could not be used. */
+  error?: string;
+}
+
 export interface CalibrationBatchState {
   id: string;
   revision: number;
@@ -670,6 +711,7 @@ export interface CalibrationBatchState {
   robotProfileId?: string;
   toolProfileId?: string;
   samplingMode?: CalibrationBatchSamplingMode;
+  automaticReference?: true;
   compliantSetupConfirmed?: true;
   usesSharedSafePosition?: true;
   /** Live while the batch searches for the shared Safe Position automatically. */
@@ -681,6 +723,8 @@ export interface CalibrationBatchState {
     visibility?: import('./contracts.js').ScreenVisibilityEvidence;
     error?: string;
   };
+  /** Latest eye-level model reading while the batch locates a screen reference. */
+  referenceDebug?: ReferenceObservationDebug;
   sharedSafePosition?: CartesianPose;
   sharedSafePositionVerified?: boolean;
   sharedVisibility?: import('./contracts.js').ScreenVisibilityEvidence;

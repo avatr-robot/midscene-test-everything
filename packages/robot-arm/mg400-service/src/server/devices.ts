@@ -10,6 +10,7 @@ import { calibrationPreviewPositions } from '@midscene/arm-kit/internal/calibrat
 import { controllerRuntime } from '@midscene/arm-kit/internal/controller-runtime';
 import { RobotArmDevice } from '@midscene/arm-kit/internal/device';
 import { CalibrationBatch } from './calibration-batch.js';
+import { DualCameraScreens } from './dual-camera-screens.js';
 import type { PhonePairings } from './phone-pairings.js';
 import { ScreenCalibration, nextScreenName } from './screen-calibration.js';
 
@@ -39,6 +40,7 @@ type PhoneLinks = (token: string) => { name: string; url: string }[];
 export class PlaygroundDevices {
   readonly batch = new CalibrationBatch(this);
   readonly markerCalibration = new ScreenCalibration(this);
+  readonly dualCameraScreens = new DualCameraScreens(this);
   entries = new Map<string, DeviceEntry>();
   readonly cameras: CameraSessionManager;
   private ownsCameras: boolean;
