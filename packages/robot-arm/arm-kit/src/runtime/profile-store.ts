@@ -50,18 +50,23 @@ import { validateScreenMotionSettings } from '../screen-interaction/motion-polic
 import { backupPreviousFile, robotDataRoot } from '../storage/layout.js';
 
 export function sharedCalibrationTool(
-  profiles: Pick<ProfileData, 'calibrationSetups' | 'robots' | 'screenTargets'>,
+  profiles: Pick<
+    ProfileData,
+    'calibrationTools' | 'calibrationSetups' | 'robots' | 'screenTargets'
+  >,
   adapterId: string,
   connectionIdentity: string,
 ): Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'> | undefined {
-  const matching = (profiles.calibrationSetups ?? []).filter((setup) =>
+  const matchesRobot = (selection: Pick<ProfileBinding, 'robotProfileId'>) =>
     profiles.robots.some(
       (robot) =>
-        robot.id === setup.robotProfileId &&
+        robot.id === selection.robotProfileId &&
         robot.adapterId === adapterId &&
         robot.connectionIdentity === connectionIdentity,
-    ),
-  );
+    );
+  const selected = profiles.calibrationTools?.find(matchesRobot);
+  if (selected) return { ...selected };
+  const matching = (profiles.calibrationSetups ?? []).filter(matchesRobot);
   const active = matching.filter(
     (setup) =>
       !profiles.screenTargets?.some(
@@ -70,19 +75,27 @@ export function sharedCalibrationTool(
   );
   // Retiring a screen does not retire the physical tool on the arm.
   const candidates = active.length ? active : matching;
-  const first = candidates[0];
-  if (
-    first &&
-    candidates.every(
-      (setup) =>
-        setup.robotProfileId === first.robotProfileId &&
-        setup.toolProfileId === first.toolProfileId,
+  const agreedTool = (setups: typeof candidates) => {
+    const first = setups[0];
+    if (
+      !first ||
+      !setups.every(
+        (setup) =>
+          setup.robotProfileId === first.robotProfileId &&
+          setup.toolProfileId === first.toolProfileId,
+      )
     )
-  )
+      return undefined;
     return {
       robotProfileId: first.robotProfileId,
       toolProfileId: first.toolProfileId,
     };
+  };
+  // Older batches used the camera's own setup ahead of its child screens.
+  return (
+    agreedTool(candidates) ??
+    agreedTool(active.filter(({ deviceId, cameraId }) => deviceId === cameraId))
+  );
 }
 
 export function validateScreen(s: ProfileInput<ScreenProfile>): void {
@@ -182,6 +195,35 @@ function geometry(value: VersionedProfile): string {
   const r = rest as unknown as RobotArmProfile;
   return semanticJson([r.adapterId, r.connectionIdentity, r.installation]);
 }
+/**
+ * Screen profiles that something still uses: a device binding, the workstation,
+ * an unfinished calibration session, a teaching draft, or a pending batch item.
+ * Everything else is history left behind by a superseded calibration run.
+ */
+export function referencedScreenIds(data: ProfileData): Set<string> {
+  const referenced = new Set<string>();
+  for (const device of data.devices ?? [])
+    referenced.add(device.screenProfileId);
+  if (data.workstation) referenced.add(data.workstation.screenProfileId);
+  for (const session of data.sessions ?? [])
+    if (session.status === 'active' || session.status === 'interrupted')
+      referenced.add(session.screenProfileId);
+  for (const teaching of data.installationTeachingDrafts ?? [])
+    referenced.add(teaching.screenProfileId);
+  for (const item of data.calibrationBatch?.items ?? [])
+    if (item.screenProfileId) referenced.add(item.screenProfileId);
+  return referenced;
+}
+
+function freezeProfileSnapshot(value: object): void {
+  if (Object.isFrozen(value)) return;
+  Object.freeze(value);
+  for (const child of Object.values(value)) {
+    if (child !== null && typeof child === 'object')
+      freezeProfileSnapshot(child);
+  }
+}
+
 export class ProfileStore {
   private data: ProfileData = {
     format: 'midscene.robot-arm.profiles',
@@ -193,6 +235,15 @@ export class ProfileStore {
     sessions: [],
   };
   private serial: Promise<unknown> = Promise.resolve();
+  /**
+   * Read-only snapshot for `list()`. Callers rebuild whole response trees on
+   * every poll, and cloning a multi-megabyte profile each time (several times
+   * per request) blocked the event loop long enough to stall camera frames.
+   * The snapshot is replaced only when a transaction commits.
+   */
+  private snapshot?: ProfileData;
+  private snapshotRevision = 0;
+  private revision = 0;
   constructor(
     private location = path.join(
       robotDataRoot(),
@@ -511,7 +562,30 @@ export class ProfileStore {
     for (const setup of parsed.calibrationSetups ?? []) {
       if (setup.motion) validateScreenMotionSettings(setup.motion);
     }
+    const selections = parsed.calibrationTools;
+    if (
+      selections !== undefined &&
+      (!Array.isArray(selections) ||
+        selections.some(
+          (selection) =>
+            !selection ||
+            !parsed.robots.some(
+              (robot: RobotArmProfile) => robot.id === selection.robotProfileId,
+            ) ||
+            !parsed.tools.some(
+              (tool: ToolProfile) => tool.id === selection.toolProfileId,
+            ),
+        ) ||
+        new Set(selections.map((selection) => selection.robotProfileId))
+          .size !== selections.length)
+    )
+      throw new RobotArmError(
+        'INVALID_PROFILE_FILE',
+        'Invalid shared calibration tool',
+        500,
+      );
     this.data = parsed;
+    this.revision += 1;
     await this.transaction((d) => {
       for (const s of d.sessions ?? []) {
         if (calibrationSessionStatus(s) === 'active') {
@@ -563,8 +637,18 @@ export class ProfileStore {
         d.pendingOperation = undefined;
     }, guard);
   }
+  /**
+   * The current profile data, deeply frozen and shared until the next write.
+   * Copy any data that needs to be edited before saving it.
+   */
   list(): ProfileData {
-    return structuredClone(this.data);
+    if (!this.snapshot || this.snapshotRevision !== this.revision) {
+      const snapshot = structuredClone(this.data);
+      freezeProfileSnapshot(snapshot);
+      this.snapshot = snapshot;
+      this.snapshotRevision = this.revision;
+    }
+    return this.snapshot;
   }
   contextKey(
     binding: ProfileBinding,
@@ -741,6 +825,101 @@ export class ProfileStore {
       );
     });
   }
+  /**
+   * Screen profiles are created per calibration run, not per console screen, so
+   * abandoned or superseded runs leave profiles behind. A profile is in use
+   * while a device, the workstation, an unfinished session, a teaching draft or
+   * a calibration batch still points at it; everything else is history, and its
+   * calibrations and sessions go with it.
+   *
+   * Only the profiles named in `ids` are considered, so a caller can retire the
+   * screen a device just left without touching calibrated screens that are
+   * waiting for their first acceptance.
+   */
+  private removeScreenProfiles(draft: ProfileData, ids: Iterable<string>) {
+    const referenced = referencedScreenIds(draft);
+    const known = new Set(draft.screens.map((screen) => screen.id));
+    const removed = new Set(
+      [...ids].filter((id) => known.has(id) && !referenced.has(id)),
+    );
+    if (!removed.size) return { screens: 0, calibrations: 0, sessions: 0 };
+    const calibrations = draft.calibrations.filter((calibration) =>
+      removed.has(calibration.screenProfileId),
+    );
+    const sessions = (draft.sessions ?? []).filter((session) =>
+      removed.has(session.screenProfileId),
+    );
+    draft.screens = draft.screens.filter((screen) => !removed.has(screen.id));
+    draft.calibrations = draft.calibrations.filter(
+      (calibration) => !removed.has(calibration.screenProfileId),
+    );
+    draft.sessions = (draft.sessions ?? []).filter(
+      (session) => !removed.has(session.screenProfileId),
+    );
+    return {
+      screens: removed.size,
+      calibrations: calibrations.length,
+      sessions: sessions.length,
+    };
+  }
+  private removeUnreferencedScreens(draft: ProfileData) {
+    return this.removeScreenProfiles(
+      draft,
+      draft.screens.map((screen) => screen.id),
+    );
+  }
+  /** Keep only the screen profiles that are still in use. */
+  pruneUnreferencedScreens() {
+    return this.transaction((draft) => this.removeUnreferencedScreens(draft));
+  }
+  /**
+   * Remove one screen profile with its calibrations and sessions. Deleting a
+   * screen from the console passes `release`: the device and workstation
+   * bindings that point at it are dropped in the same transaction. Without
+   * `release` a live binding makes the call fail instead of leaving a dangling
+   * reference behind.
+   */
+  deleteScreenProfile(screenId: string, options: { release?: boolean } = {}) {
+    return this.transaction((draft) => {
+      if (!draft.screens.some((screen) => screen.id === screenId))
+        return { screens: 0, calibrations: 0, sessions: 0 };
+      if (options.release) {
+        draft.devices = (draft.devices ?? []).filter(
+          (device) => device.screenProfileId !== screenId,
+        );
+        if (draft.workstation?.screenProfileId === screenId)
+          draft.workstation = undefined;
+      }
+      const used =
+        (draft.devices ?? []).some(
+          (device) => device.screenProfileId === screenId,
+        ) || draft.workstation?.screenProfileId === screenId;
+      if (used)
+        throw new RobotArmError(
+          'SCREEN_IN_USE',
+          'The screen is still bound to a device or the workstation',
+          409,
+        );
+      const calibrations = draft.calibrations.filter(
+        (calibration) => calibration.screenProfileId === screenId,
+      );
+      const sessions = (draft.sessions ?? []).filter(
+        (session) => session.screenProfileId === screenId,
+      );
+      draft.screens = draft.screens.filter((screen) => screen.id !== screenId);
+      draft.calibrations = draft.calibrations.filter(
+        (calibration) => calibration.screenProfileId !== screenId,
+      );
+      draft.sessions = (draft.sessions ?? []).filter(
+        (session) => session.screenProfileId !== screenId,
+      );
+      return {
+        screens: 1,
+        calibrations: calibrations.length,
+        sessions: sessions.length,
+      };
+    });
+  }
   saveCalibrationBatch(
     state: import('../assisted-contracts.js').CalibrationBatchState,
   ) {
@@ -846,16 +1025,50 @@ export class ProfileStore {
     );
     return setup && structuredClone(setup);
   }
+  sharedCalibrationTool(adapterId: string, connectionIdentity: string) {
+    return sharedCalibrationTool(this.data, adapterId, connectionIdentity);
+  }
+
+  assertCurrentCalibrationTool(
+    binding: Pick<ProfileBinding, 'robotProfileId' | 'toolProfileId'>,
+    includeLegacy = false,
+  ) {
+    if (!includeLegacy && !this.data.calibrationTools?.length) return;
+    const robot = this.getRobot(binding.robotProfileId);
+    const active = sharedCalibrationTool(
+      includeLegacy
+        ? this.data
+        : {
+            robots: this.data.robots,
+            calibrationTools: this.data.calibrationTools,
+          },
+      robot.adapterId,
+      robot.connectionIdentity,
+    );
+    if (
+      active &&
+      (active.robotProfileId !== binding.robotProfileId ||
+        active.toolProfileId !== binding.toolProfileId)
+    )
+      throw new RobotArmError(
+        'CALIBRATION_REQUIRED',
+        'Recalibrate this screen for the current touch tool',
+        409,
+      );
+  }
+
   saveCalibrationSetup(
     input: NonNullable<ProfileData['calibrationSetups']>[number],
+    selectSharedTool = false,
   ) {
     const setup = structuredClone(input);
     if (setup.motion) validateScreenMotionSettings(setup.motion);
     return this.transaction((draft) => {
+      const robot = draft.robots.find(({ id }) => id === setup.robotProfileId);
       if (
         !setup.deviceId ||
         !setup.cameraId ||
-        !draft.robots.some((robot) => robot.id === setup.robotProfileId) ||
+        !robot ||
         !draft.tools.some((tool) => tool.id === setup.toolProfileId) ||
         ![setup.width, setup.height].every(
           (value) => Number.isInteger(value) && value >= 180 && value <= 4096,
@@ -872,6 +1085,23 @@ export class ProfileStore {
         ),
         setup,
       ];
+      if (selectSharedTool) {
+        const installations = new Set(
+          draft.robots
+            .filter(
+              (entry) =>
+                entry.adapterId === robot.adapterId &&
+                entry.connectionIdentity === robot.connectionIdentity,
+            )
+            .map(({ id }) => id),
+        );
+        draft.calibrationTools = [
+          ...(draft.calibrationTools ?? []).filter(
+            (selection) => !installations.has(selection.robotProfileId),
+          ),
+          { robotProfileId: robot.id, toolProfileId: setup.toolProfileId },
+        ];
+      }
     });
   }
   calibrationMapping(deviceId: string) {
@@ -965,6 +1195,7 @@ export class ProfileStore {
         'VISION_BINDING_CHANGED',
         'Camera confirmation does not match the calibrated screen',
       );
+    const previousScreen = current?.screenProfileId;
     const value = { ...candidate, revision: (current?.revision ?? 0) + 1 };
     draft.devices ??= [];
     const index = draft.devices.findIndex(
@@ -972,6 +1203,11 @@ export class ProfileStore {
     );
     if (index < 0) draft.devices.push(value);
     else draft.devices[index] = value;
+    // Acceptance is where a Device moves to a new screen profile. Retire the
+    // profile it left; screens whose calibration is still waiting for a first
+    // acceptance must stay, so this never sweeps every unreferenced profile.
+    if (previousScreen && previousScreen !== candidate.screenProfileId)
+      this.removeScreenProfiles(draft, [previousScreen]);
     return structuredClone(value);
   }
   putWorkstation(input: WorkstationBinding): Promise<WorkstationBinding> {
@@ -1167,6 +1403,7 @@ export class ProfileStore {
         throw e;
       }
       this.data = draft;
+      this.revision += 1;
       return structuredClone(result);
     });
     this.serial = operation.catch(() => undefined);

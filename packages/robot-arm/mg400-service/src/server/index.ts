@@ -1020,6 +1020,34 @@ export async function startPlaygroundHost({
             phase: session?.phase,
           });
         const registry = devices;
+        if (action === 'configuration' && req.method === 'POST') {
+          const assertToolEditable = () => {
+            if (registry !== devices || registry.entries.get(id)?.host !== host)
+              throw new RobotArmError(
+                'STALE_CONTEXT',
+                'Device connection changed',
+                409,
+              );
+            registry.assertBatchIdle();
+            if (registry.hasActiveScreenCalibration)
+              throw new RobotArmError(
+                'BUSY',
+                'Finish the current calibration operation first',
+                409,
+              );
+          };
+          const input = await readBody(req);
+          assertToolEditable();
+          const configuration = await registry.arm.configureForDevice(
+            'calibration-tool',
+            () => {
+              assertToolEditable();
+              return host.configure(input);
+            },
+          );
+          return send(200, configuration);
+        }
+        if (req.method === 'POST') await host.prepare(false);
         if (
           url.pathname.endsWith('/calibration/camera/preview') &&
           req.method === 'GET'
@@ -1140,7 +1168,9 @@ export async function startPlaygroundHost({
         });
         const deviceSession = registry ? setup.session : null;
         const screens = registry?.screens(true);
-        const controlScreens = screenControl?.screens();
+        // Reuse the screen list: rebuilding it here would repeat the profile
+        // read and geometry for every camera poll.
+        const controlScreens = screenControl?.screens(screens);
         const entries = await Promise.all(
           cameras.map(async (camera) => {
             const entry = registry?.entries.get(camera.id);
@@ -1452,12 +1482,18 @@ export async function startPlaygroundHost({
           if (!entry || (screen && entry.cameraId !== id))
             return send(404, { error: 'Camera or screen is not running' });
           const frame = await entry.camera.rawFrame();
+          // Twin textures used to be rectified on the main thread, which
+          // stalled camera frames while the 3D view was open. Use the worker
+          // pool (and its per-frame cache) when the session supports it.
+          const previewOptions = { maxSide: 480, sampling: 'nearest' as const };
           jpeg =
             view === 'corrected'
-              ? await entry.camera.rectifiedFrame(frame, {
-                  maxSide: 480,
-                  sampling: 'nearest',
-                })
+              ? typeof entry.camera.rectifiedPreviewFrame === 'function'
+                ? await entry.camera.rectifiedPreviewFrame(
+                    frame,
+                    previewOptions,
+                  )
+                : await entry.camera.rectifiedFrame(frame, previewOptions)
               : frame;
         } else {
           if (view === 'corrected')

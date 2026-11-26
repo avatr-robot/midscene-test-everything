@@ -141,6 +141,16 @@ export class CameraSession implements CalibrationVision {
   private target?: PerspectiveTarget;
   private writeChain = Promise.resolve();
   private readonly transformer = new PerspectiveTransformer();
+  /**
+   * One in-flight rectification per (frame buffer, output). A new frame brings
+   * new buffers, so this never grows beyond the frames still held by the stream.
+   */
+  private readonly rectifiedFrames = new WeakMap<
+    Buffer,
+    Map<string, Promise<Buffer>>
+  >();
+  /** Bumped whenever the applied perspective changes. */
+  private correctionVersion = 0;
   /** Supplied by the calibration host for this screen while its phone is paired. */
   referenceFrame?: () => PerspectiveReferenceFrame | undefined;
   private readonly perspective = new PerspectiveMonitor({
@@ -177,6 +187,7 @@ export class CameraSession implements CalibrationVision {
     this.savedPerspective = true;
     if (stored.applied === false) return;
     this.correction = stored.correction;
+    this.correctionVersion += 1;
     if (stored.target) this.target = stored.target;
     if (SCREEN_DRIFT_DETECTION_ENABLED) await this.perspective.load();
   }
@@ -252,6 +263,7 @@ export class CameraSession implements CalibrationVision {
       if (!this.correction) return;
       await this.persistPerspective(this.correction, this.target, false);
       this.correction = undefined;
+      this.correctionVersion += 1;
       this.target = undefined;
       await this.perspective.reset();
     });
@@ -285,6 +297,7 @@ export class CameraSession implements CalibrationVision {
       await this.persistPerspective(correction, target, true);
       this.savedPerspective = true;
       this.correction = correction;
+      this.correctionVersion += 1;
       this.target = target;
       await this.perspective.reset();
     });
@@ -318,6 +331,7 @@ export class CameraSession implements CalibrationVision {
       await rm(this.correctionFile, { force: true });
       this.savedPerspective = false;
       this.correction = undefined;
+      this.correctionVersion += 1;
       this.target = undefined;
       await this.perspective.reset();
     });
@@ -504,15 +518,43 @@ export class CameraSession implements CalibrationVision {
     const request = this.rectifiedPreviewRequest(options);
     return transformRectifiedPreview(jpeg, request, this.transformer);
   }
-  /** Move CPU-bound live preview rectification off the HTTP event-loop thread. */
+  /**
+   * Move CPU-bound live preview rectification off the HTTP event-loop thread.
+   *
+   * Several consumers (stage preview, calibration preview, 3D twin) rectify the
+   * same frame for the same screen. They share one in-flight job per
+   * (frame, output) pair: the cache is keyed by the JPEG buffer itself, so it
+   * follows the frame through the stream and is released with it.
+   */
   async rectifiedPreviewFrame(
     jpeg: Buffer,
     options: RectifiedPreviewOptions = {},
   ): Promise<Buffer> {
-    return rectifiedPreviewPool.transform(
-      jpeg,
-      this.rectifiedPreviewRequest(options),
-    );
+    const request = this.rectifiedPreviewRequest(options);
+    const key = [
+      // A correction can change between frames; a rectification computed with
+      // the previous corners must not be reused for the new outline.
+      this.correctionVersion,
+      request.target.width,
+      request.target.height,
+      request.target.rotation,
+      options.maxSide ?? '',
+      options.maxPixels ?? '',
+      options.sampling ?? '',
+    ].join(':');
+    let byKey = this.rectifiedFrames.get(jpeg);
+    if (!byKey) {
+      byKey = new Map();
+      this.rectifiedFrames.set(jpeg, byKey);
+    }
+    const pending = byKey.get(key);
+    if (pending) return pending;
+    const job = rectifiedPreviewPool.transform(jpeg, request);
+    byKey.set(key, job);
+    job.catch(() => {
+      if (byKey.get(key) === job) byKey.delete(key);
+    });
+    return job;
   }
   private rectifiedPreviewRequest(options: RectifiedPreviewOptions = {}) {
     const correction = this.correction;
