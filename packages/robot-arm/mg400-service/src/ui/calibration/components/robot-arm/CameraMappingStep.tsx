@@ -1,10 +1,20 @@
 import {
+  type DualCameraScreenAssociations,
   type WebCalibrationMapping,
   mappingQualityWarnings,
 } from '@midscene/robotics-shared/assisted-contracts';
 import { measuredPerspectiveTarget } from '@midscene/robotics-shared/camera/vision-geometry';
 import type { CameraCorrection } from '@midscene/robotics-shared/contracts';
-import { Alert, Button, Modal, Select, Space, Tag, Typography } from 'antd';
+import {
+  Alert,
+  Button,
+  Modal,
+  Select,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+} from 'antd';
 import { Check, CircleSlash, ScanLine } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -52,6 +62,7 @@ export function CameraMappingStep({
   mappingReady = true,
   mapping,
   mappingError,
+  screenAssociation,
   footer,
   busy,
   perspectiveOpen,
@@ -84,6 +95,11 @@ export function CameraMappingStep({
   mappingReady?: boolean;
   mapping?: WebCalibrationMapping;
   mappingError?: string;
+  screenAssociation?: {
+    data?: DualCameraScreenAssociations;
+    error?: string;
+    busy: boolean;
+  };
   footer: HTMLElement | null;
   busy?: boolean;
   /**
@@ -122,6 +138,10 @@ export function CameraMappingStep({
     mapped && phoneConnected && phoneFullscreen && validity !== 'invalid';
   const verified = canConfirm && mappingReady && !mappingError;
   const notice = error ?? mappingError;
+  const associationResults = screenAssociation?.data?.screens ?? [];
+  const associatedCount = associationResults.filter(
+    ({ status }) => status === 'associated',
+  ).length;
   useEffect(() => speakCalibration('cameraSetup'), [screenId]);
   const apply = async (
     updates: ReadonlyArray<{
@@ -167,6 +187,7 @@ export function CameraMappingStep({
               }
               placeholder={t('Select a screen for calibration')}
               style={{ width: 170 }}
+              disabled={screenAssociation?.busy}
               options={screens.map((entry) => ({
                 value: entry.id,
                 label: entry.name,
@@ -175,7 +196,11 @@ export function CameraMappingStep({
             />
           )}
           {onAddScreen && (
-            <Button size="small" onClick={onAddScreen}>
+            <Button
+              size="small"
+              disabled={screenAssociation?.busy}
+              onClick={onAddScreen}
+            >
               {t('Add Screen')}
             </Button>
           )}
@@ -193,7 +218,11 @@ export function CameraMappingStep({
           : t('Keep each screen page visible and in fullscreen.'),
       done: phoneConnected && phoneFullscreen,
       action: (
-        <Button size="small" onClick={onPair}>
+        <Button
+          size="small"
+          disabled={screenAssociation?.busy}
+          onClick={onPair}
+        >
           {t(phoneConnected ? 'View Phone Page' : 'Connect Phone')}
         </Button>
       ),
@@ -238,17 +267,30 @@ export function CameraMappingStep({
         ? t('Camera mapping confirmed')
         : t('Confirm that the corrected image matches the screen.'),
       done: verified,
-      action:
-        onConfirm && !verified ? (
-          <Button
-            size="small"
-            type="primary"
-            disabled={!canConfirm || busy}
-            onClick={() => void confirm()}
-          >
-            {t('Confirm Camera Mapping')}
-          </Button>
-        ) : undefined,
+      action: (
+        <Space size={8} wrap>
+          {onConfirm && !verified && (
+            <Button
+              size="small"
+              type="primary"
+              disabled={!canConfirm || busy}
+              onClick={() => void confirm()}
+            >
+              {t('Confirm Camera Mapping')}
+            </Button>
+          )}
+          {screenAssociation?.busy && (
+            <output>
+              <Space size={6}>
+                <Spin size="small" />
+                <Typography.Text type="secondary">
+                  {t('Associating screens across cameras…')}
+                </Typography.Text>
+              </Space>
+            </output>
+          )}
+        </Space>
+      ),
     },
   ];
   return (
@@ -271,6 +313,59 @@ export function CameraMappingStep({
           </li>
         ))}
       </ol>
+      {screenAssociation?.error ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={calibrationErrorText(screenAssociation.error)}
+        />
+      ) : screenAssociation?.data && !screenAssociation.data.sideCamera ? (
+        <Typography.Text type="secondary">
+          {t(
+            'Set the screen camera to Overhead and assign exactly one Eye-level camera.',
+          )}
+        </Typography.Text>
+      ) : associationResults.some(({ status }) => status !== 'pending') ? (
+        <Space size={4} wrap>
+          <Tag
+            color={
+              associatedCount === associationResults.length
+                ? 'success'
+                : 'warning'
+            }
+          >
+            {t('Associated {0}/{1} screens', [
+              associatedCount,
+              associationResults.length,
+            ])}
+          </Tag>
+          {associationResults.map((result) => {
+            const { screenId, status } = result;
+            if (
+              status === 'associated' ||
+              (status === 'pending' && screenAssociation?.busy)
+            )
+              return null;
+            const name = screens.find(({ id }) => id === screenId)?.name;
+            if (!name) return null;
+            const detail = {
+              pending: 'Waiting for the phone calibration page',
+              'phone-offline': 'Phone page unavailable',
+              'overhead-mismatch': 'Overhead outline could not be verified',
+              'side-not-visible': 'Screen not visible from eye level',
+              ambiguous: 'Eye-level match uncertain',
+            }[status];
+            return (
+              <Tag key={screenId} color="warning">
+                {name} · {t(detail)}
+                {result.status === 'overhead-mismatch' &&
+                  result.patternMatch !== undefined &&
+                  ` · ${t('Pattern match {0}%', [Math.round(result.patternMatch * 100)])}`}
+              </Tag>
+            );
+          })}
+        </Space>
+      ) : null}
       {phoneConnected && !phoneFullscreen && (
         <Alert
           type="warning"
@@ -324,6 +419,7 @@ export function CameraMappingStep({
             danger
             size="small"
             type="link"
+            disabled={screenAssociation?.busy}
             onClick={() => {
               setClearError(undefined);
               setClearOpen(true);

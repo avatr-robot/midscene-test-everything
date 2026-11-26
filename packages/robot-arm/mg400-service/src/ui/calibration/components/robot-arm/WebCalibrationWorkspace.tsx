@@ -1,4 +1,4 @@
-import { Button, Checkbox, Popconfirm, Space, Typography } from 'antd';
+import { App, Button, Checkbox, Popconfirm, Space, Typography } from 'antd';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CalibrationRequestError } from '../../client';
@@ -19,6 +19,7 @@ export function WebCalibrationWorkspace({
   readyToStart = true,
   cameraCheckRequired = false,
   prepareFromTeaching = false,
+  autoReferenceAvailable = false,
   screenName,
   showSessionCancel = true,
   footer,
@@ -42,6 +43,7 @@ export function WebCalibrationWorkspace({
   readyToStart?: boolean;
   cameraCheckRequired?: boolean;
   prepareFromTeaching?: boolean;
+  autoReferenceAvailable?: boolean;
   screenName?: string;
   showSessionCancel?: boolean;
   footer: HTMLElement | null;
@@ -57,6 +59,7 @@ export function WebCalibrationWorkspace({
   onConnectPhone?(): void;
 }) {
   useCalibrationLanguage((state) => state.language);
+  const { message } = App.useApp();
   const { session, setup, busy, error } = controller;
   const s = completedAttempt && session?.stage !== 'completed' ? null : session;
   const [confirmed, setConfirmed] = useState(false);
@@ -75,6 +78,7 @@ export function WebCalibrationWorkspace({
   const activeMotion =
     recovering ||
     finishingAutomatically ||
+    stage === 'locating-reference' ||
     stage === 'collecting' ||
     stage === 'safety' ||
     stage === 'returning' ||
@@ -429,6 +433,32 @@ export function WebCalibrationWorkspace({
           {t('Previous Step')}
         </Button>
       )}
+      {!reviewing &&
+        autoReferenceAvailable &&
+        (stage === 'ready' || stage === 'locating-reference') && (
+          <Popconfirm
+            title={t('Move above the selected screen?')}
+            description={t(
+              'Start at the saved Safe Position and confirm that the phone, tool and cameras are fixed and the entire arm path is clear.',
+            )}
+            disabled={
+              busy || !readyToCapture || !s?.phoneConnected || activeMotion
+            }
+            onConfirm={() =>
+              controller.locateReference().then(
+                () => void message.success(t('Reference position recorded')),
+                () => undefined,
+              )
+            }
+          >
+            <Button
+              disabled={busy || !readyToCapture || !s?.phoneConnected}
+              loading={stage === 'locating-reference'}
+            >
+              {t('Find reference position automatically')}
+            </Button>
+          </Popconfirm>
+        )}
       {reviewing ? (
         <Button
           onClick={() =>
@@ -626,6 +656,13 @@ export function WebCalibrationWorkspace({
                 </>
               )}
               {s && <ExplorationProgress session={s} />}
+              {stage === 'locating-reference' && (
+                <Typography.Paragraph>
+                  {t(
+                    'Checking both cameras and locating the reference position…',
+                  )}
+                </Typography.Paragraph>
+              )}
               {(stage === 'safety' || stage === 'returning') && (
                 <Typography.Paragraph>
                   {t(

@@ -2,6 +2,7 @@ import type { CalibrationPreviewPositions } from '@midscene/robotics-shared/assi
 import type {
   CalibrationBatchState,
   DebugLogoDrawingStatus,
+  ReferenceObservationDebug,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
 import {
@@ -65,12 +66,17 @@ import { CameraMappingStep } from './components/robot-arm/CameraMappingStep';
 import { ExplorationProgress } from './components/robot-arm/ExplorationProgress';
 import { InstallationTeaching } from './components/robot-arm/InstallationTeaching';
 import { PhoneConnectDialog } from './components/robot-arm/PhoneConnectDialog';
+import {
+  ReferenceModelReading,
+  ReferenceTipMarker,
+} from './components/robot-arm/ReferenceModelReading';
 import { ScreenOutlines } from './components/robot-arm/ScreenOutlines';
 import { SetupIllustration } from './components/robot-arm/SetupIllustration';
 import { TeachingDiagram } from './components/robot-arm/TeachingDiagram';
 import { WebCalibrationWorkspace } from './components/robot-arm/WebCalibrationWorkspace';
 import { useAssistedCalibration } from './hooks/useAssistedCalibration';
 import { useCameraPhoneReadiness } from './hooks/useCameraPhoneReadiness';
+import { useDualCameraScreens } from './hooks/useDualCameraScreens';
 import { usePerspectiveValidity } from './hooks/usePerspectiveValidity';
 import {
   CalibrationLanguageProvider,
@@ -92,7 +98,7 @@ import {
 } from './marker-client';
 import { hasMultipleCalibrationTargets } from './multi-screen-review';
 import { selectOnlineCalibrationScreens } from './online-calibration-screens';
-import { rawCameraPreviewUrl } from './preview-url';
+import { rawCameraPreviewUrl, sideScreenPreviewUrl } from './preview-url';
 import {
   shouldHideSelectedScreenOutline,
   shouldShowScreenOutlines,
@@ -189,6 +195,7 @@ function GuidedContent({
     setRequestedId(next);
   }, []);
   const [step, setStep] = useState<number>(initialStep);
+  const [previewTab, setPreviewTab] = useState('camera');
   const initialStepPending = useRef(true);
   const resumeCalibration = useRef<string>();
   const restoringMapping = useRef<string>();
@@ -245,6 +252,9 @@ function GuidedContent({
   }>();
   const [applying, setApplying] = useState(false);
   const [batch, setBatch] = useState<CalibrationBatchState | null>();
+  /** Pushed by the batch panel; it polls the state the preview needs. */
+  const [referenceReading, setReferenceReading] =
+    useState<ReferenceObservationDebug>();
   const batchRunning = Boolean(
     batch && ['running', 'waiting', 'stopping'].includes(batch.status),
   );
@@ -787,6 +797,58 @@ function GuidedContent({
     perspective.summary ?? activeConfig?.perspectiveValidity
   )?.state;
   const outlineBlocked = perspectiveState === 'invalid';
+  const dualCameraScreens = useDualCameraScreens({
+    cameraId,
+    // The screen step only watches the eye-level camera; the batch owns it there.
+    active: (step === 1 || step === 3) && !closing,
+    readOnly: step === 3,
+    pollMs: step === 3 ? 5_000 : undefined,
+    ready:
+      Boolean(
+        config?.camera.online &&
+          config.correction &&
+          (config.mappingReady || controller.setup.mapping),
+      ) &&
+      !switching &&
+      !phonesOpen &&
+      !markerOpen &&
+      !reviewOpen &&
+      !perspectiveEditor &&
+      !applying &&
+      !controller.busy &&
+      !batchActive &&
+      !singleBusy &&
+      !logoDrawingBusy &&
+      !config?.armState?.state.moving &&
+      !config?.armState?.state.dragMode &&
+      !mappingError &&
+      !outlineBlocked,
+    screenRevision: JSON.stringify(
+      savedScreens
+        .map(({ id, pageKey, correction }) => ({
+          id,
+          pageKey,
+          correction,
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    ),
+    readyScreenIds: savedScreens
+      .filter((screen) =>
+        phoneReadiness.readyPhones.some(
+          (page) =>
+            !page.awaitingOriginTap &&
+            isRequiredPhonePage(page, cameraId, [screen]),
+        ),
+      )
+      .map(({ id }) => id)
+      .sort(),
+  });
+  const sideCamera =
+    step === 1 || step === 3 ? dualCameraScreens.data?.sideCamera : undefined;
+  const activePreviewTab =
+    previewTab === 'side' && !sideCamera ? 'camera' : previewTab;
+  const associatingScreens =
+    dualCameraScreens.busy || dualCameraScreens.waiting;
   /*
    * Every screen with a saved perspective is drawn on the live preview at
    * once; the selected one carries the freshest correction and the verdict.
@@ -830,6 +892,40 @@ function GuidedContent({
         ];
       })
     : [];
+  const sideOutlines = (dualCameraScreens.data?.screens ?? []).flatMap(
+    (match) => {
+      const screen = knownScreens.find(({ id }) => id === match.screenId);
+      if (match.status !== 'associated' || !screen) return [];
+      const { sourceWidth, sourceHeight, left, top, right, bottom } =
+        match.region;
+      return [
+        {
+          id: screen.id,
+          name: screen.name,
+          active: screen.id === selectedId,
+          correction: {
+            sourceWidth,
+            sourceHeight,
+            rotation: 0 as const,
+            points: {
+              topLeft: { x: left, y: top },
+              topRight: { x: right, y: top },
+              bottomRight: { x: right, y: bottom },
+              bottomLeft: { x: left, y: bottom },
+            },
+          },
+        },
+      ];
+    },
+  );
+  /*
+   * The batch stores the latest eye-level model reading so a failed reference
+   * search can be read against the frame the model judged. The tip point lives
+   * in overhead 0–1000 coordinates; both previews share one camera frame.
+   */
+  const modelReading = step === 3 ? referenceReading : undefined;
+  const overheadCorrection =
+    activeConfig?.correction ?? activeScreen?.correction;
   const progressClient = useMemo(
     () =>
       createCalibrationClient({
@@ -1158,6 +1254,7 @@ function GuidedContent({
     )
       return;
     if (config.mappingReady) {
+      if (associatingScreens) return;
       resumeCalibration.current = undefined;
       setStep(config.installationTaught && !reviewInstallationOnOpen ? 3 : 2);
       return;
@@ -1186,6 +1283,7 @@ function GuidedContent({
     selectedId,
     perspectiveState,
     awaitingOriginTap,
+    associatingScreens,
     phoneFullscreen,
     base,
     client,
@@ -1419,7 +1517,7 @@ function GuidedContent({
     !config?.armState?.state.dragMode &&
     (next === 0 || Boolean(config?.input)) &&
     (next < 2 || Boolean(config?.correction && controller.setup.mapping)) &&
-    (next < 2 || !outlineBlocked) &&
+    (next < 2 || (!outlineBlocked && !associatingScreens)) &&
     (next < 3 || Boolean(config?.installationTaught));
   const screenOptions = step === 1 ? knownScreens : savedScreens;
   const showScreenPicker = shouldShowScreenPicker({
@@ -1710,6 +1808,7 @@ function GuidedContent({
                     logoDrawingBusy
                   }
                   onChanged={refresh}
+                  onReferenceReading={setReferenceReading}
                 />
               </div>
             )}
@@ -1827,7 +1926,8 @@ function GuidedContent({
                       mapping={controller.setup.mapping}
                       mappingError={mappingError}
                       footer={footer}
-                      busy={controller.busy}
+                      busy={controller.busy || associatingScreens}
+                      screenAssociation={dualCameraScreens}
                       key={selectedId}
                       onAddScreen={async () => {
                         if (
@@ -1931,6 +2031,7 @@ function GuidedContent({
                       api={teaching}
                       binding={teaching.binding}
                       screenName={selected?.name}
+                      safeStartOnly={multipleScreens}
                       disabled={
                         Boolean(config.armState?.state.moving) || outlineBlocked
                       }
@@ -2018,6 +2119,11 @@ function GuidedContent({
                         onCheckCamera={checkCameraBeforeCalibration}
                         cameraCheckRequired={outlineBlocked}
                         prepareFromTeaching
+                        autoReferenceAvailable={
+                          Boolean(
+                            config.result && calibrationAccepted(config.result),
+                          ) && Boolean(config.installationTaught)
+                        }
                         screenName={selected?.name}
                         readyToCapture={config.ready && !outlineBlocked}
                         readyToStart={config.ready && !outlineBlocked}
@@ -2100,20 +2206,27 @@ function GuidedContent({
             <aside className="guided-camera" aria-label={camera.name}>
               <Tabs
                 size="small"
-                defaultActiveKey="camera"
+                activeKey={activePreviewTab}
+                onChange={setPreviewTab}
                 tabBarExtraContent={
                   <Typography.Text
                     type="secondary"
                     className="guided-camera-name"
-                    title={camera.name}
+                    title={
+                      activePreviewTab === 'side'
+                        ? sideCamera?.name
+                        : camera.name
+                    }
                   >
-                    {camera.name}
+                    {activePreviewTab === 'side'
+                      ? sideCamera?.name
+                      : camera.name}
                   </Typography.Text>
                 }
                 items={[
                   {
                     key: 'camera',
-                    label: t('Live Preview'),
+                    label: t(sideCamera ? 'Overhead Preview' : 'Live Preview'),
                     forceRender: true,
                     children: (
                       <div className="guided-preview-content">
@@ -2137,6 +2250,12 @@ function GuidedContent({
                                 : asideOutlines
                             }
                           />
+                          {modelReading?.overheadTip && overheadCorrection && (
+                            <ReferenceTipMarker
+                              correction={overheadCorrection}
+                              point={modelReading.overheadTip}
+                            />
+                          )}
                         </div>
                         {step === 1 && (
                           <Typography.Text type="secondary">
@@ -2157,6 +2276,31 @@ function GuidedContent({
                       </div>
                     ),
                   },
+                  ...(sideCamera
+                    ? [
+                        {
+                          key: 'side',
+                          label: t('Eye-level Preview'),
+                          children:
+                            activePreviewTab === 'side' ? (
+                              <div className="guided-preview-frame">
+                                <img
+                                  className="calibration-preview"
+                                  src={sideScreenPreviewUrl(
+                                    cameraId,
+                                    sideCamera.id,
+                                  )}
+                                  alt={sideCamera.name}
+                                />
+                                <ScreenOutlines outlines={sideOutlines} />
+                                {modelReading && (
+                                  <ReferenceModelReading debug={modelReading} />
+                                )}
+                              </div>
+                            ) : null,
+                        },
+                      ]
+                    : []),
                   {
                     key: 'illustration',
                     label: t(

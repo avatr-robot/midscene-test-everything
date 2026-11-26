@@ -2,6 +2,89 @@ import { assistedCalibrationZh } from './assisted-calibration-zh';
 import { depthZh } from './depth-zh';
 import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
+  'Installation Safe Start': '安装安全起点',
+  'Safe start height — side view': '安全起点高度 · 侧视',
+  'Record a safe start clear of the screens at a height that lets the tip pass above them and leaves room for the first probe.':
+    '在屏幕外记录安全起点。该高度应让笔尖从屏幕上方通过，并留有首触下探的空间。',
+  'Recording a new safe start clears the draft boundary points.':
+    '重新记录安全起点会清除草稿中的边界点。',
+  'Free travel stays at or above the safe start height and on the allowed side of the boundary.':
+    '自由通行高度不低于安全起点，机械臂保持在边界允许的一侧。',
+  'The batch locates the screen reference before probing.':
+    '批量标定会在采点前自动定位屏幕参考位。',
+  'Finding the screen reference position': '正在自动寻找屏幕参考位',
+  'Save the installation safe start and camera-side boundary.':
+    '请先保存安装安全起点和相机侧边界。',
+  'Automatic reference positioning requires a valid screen target and saved installation safety settings.':
+    '自动寻找参考位需要有效的屏幕目标和已保存的安装安全设置。',
+  'Automatic reference positioning requires current screen calibration and saved installation teaching.':
+    '单屏参考位入口需要当前屏幕的有效标定和已保存的安装示教。未标定的屏幕可使用多屏流程。',
+  'Start at the installation safe start or a verified batch position.':
+    '请从已保存的安装安全起点或本批次已核验的位置开始。',
+  'The model could not locate the stylus tip in the overhead image.':
+    '大模型未能在俯视画面中定位笔尖。',
+  'Visual reference search reached the installation travel limit.':
+    '视觉找位已到达安装通行边界或本次搜索距离上限。',
+  'There is no room for the reference search at the safe start.':
+    '安全起点附近没有足够空间进行小步定位。',
+  'The cameras could not measure how the stylus moved.':
+    '相机未能稳定测出笔尖的图像位移。',
+  'The cameras could not distinguish the robot X and Y directions.':
+    '相机未能区分机械臂 X 和 Y 方向的图像位移。',
+  'The cameras could not confirm a hover over the selected screen.':
+    '双相机未能确认笔尖悬停在所选屏幕上方。',
+  'The stylus did not move closer to the selected screen.':
+    '笔尖没有持续接近所选屏幕，找位已停止。',
+  'The screen needs a verified eye-level association before locating its reference.':
+    '请先核验该屏幕的平视对应区域，再寻找参考位。',
+  'The eye-level frame no longer matches the screen association.':
+    '平视画面已与屏幕关联时不一致，请重新关联。',
+  'Associating screens across cameras…': '正在关联双相机屏幕…',
+  'Associated {0}/{1} screens': '已关联 {0}/{1} 块屏幕',
+  'Waiting for the phone calibration page': '等待手机标定页',
+  'Pattern match {0}%': '图案匹配 {0}%',
+  'Overhead Preview': '俯视预览',
+  'Eye-level Preview': '平视预览',
+  'Eye-level model reading': '平视模型判读',
+  'Confidence {0}%': '置信度 {0}%',
+  'Selected screen visible': '选屏可见',
+  'Stylus tip visible': '笔尖可见',
+  'View clear': '视野清晰',
+  'Gap above the screen': '屏上方有间隙',
+  'The model did not answer in time. Check the network and retry.':
+    '模型未在限定时间内返回。请检查网络后重试。',
+  'Could not reach the model endpoint. Check the network and proxy settings.':
+    '无法连接模型端点。请检查网络和代理设置。',
+  'The model rejected the API key. Check the model settings.':
+    '模型拒绝了 API Key。请检查模型配置。',
+  'The model endpoint or model name was not found. Check the model settings.':
+    '找不到模型端点或模型名称。请检查模型配置。',
+  'The model is rate limited. Wait a moment and retry.':
+    '模型触发限流。请稍后再试。',
+  'The model rejected the request. Check that it supports two images.':
+    '模型拒绝了请求。请确认该模型支持双图输入。',
+  'The model service failed. Retry later.': '模型服务异常。请稍后重试。',
+  'The model did not return usable JSON. Check that it supports vision JSON output.':
+    '模型返回的不是可用 JSON。请确认该模型支持视觉 JSON 输出。',
+  'Assign exactly one Eye-level camera before checking the model.':
+    '请先指定唯一的平视相机再检查模型。',
+  'Stop the batch before checking the model.': '请先停止标定队列再检查模型。',
+  'Automatic reference positioning is unavailable. Place the stylus above the screen and confirm.':
+    '自动寻找参考位不可用。请把触控笔放到屏幕上方后确认。',
+  'Phone page unavailable': '手机标定页未就绪',
+  'Overhead outline could not be verified': '俯视轮廓未通过核验',
+  'Screen not visible from eye level': '平视未看到屏幕图案',
+  'Eye-level match uncertain': '平视对应待确认',
+  'Screen association is already running.': '正在关联双相机屏幕。',
+  'Save at least one overhead screen outline before associating the cameras.':
+    '请先保存至少一块屏幕的俯视轮廓，再关联双相机屏幕。',
+  'Cameras or screen mappings changed during association.':
+    '关联期间相机设置或屏幕映射发生变化，请重试。',
+  'Camera dimensions changed during screen association.':
+    '关联期间相机画面尺寸发生变化，请重试。',
+  'Stop robot motion before associating the screens.':
+    '请等机械臂停止后再关联屏幕。',
+  'Could not associate the two camera views.': '双相机屏幕关联失败。',
   'The preview phone does not match this screen’s saved binding. Use the bound phone or release the binding first.':
     '预览手机与此屏幕保存的配对信息不一致。请使用已绑定的手机，或先解除原绑定。',
   'Open the page on the phone, then select the device below.':

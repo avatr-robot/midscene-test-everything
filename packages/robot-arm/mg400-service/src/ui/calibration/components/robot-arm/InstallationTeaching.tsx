@@ -41,6 +41,7 @@ export function InstallationTeaching({
   api,
   binding,
   screenName,
+  safeStartOnly = false,
   disabled,
   onSaved,
   onPointRecorded,
@@ -54,6 +55,7 @@ export function InstallationTeaching({
   binding: ProfileBinding;
   /** Screen the reference is recorded above, named in the placement prompt. */
   screenName?: string;
+  safeStartOnly?: boolean;
   disabled: boolean;
   footer?: HTMLElement | null;
   preview?: ReactNode;
@@ -76,9 +78,14 @@ export function InstallationTeaching({
   const [dragging, setDragging] = useState(false);
   const [moving, setMoving] = useState(false);
   const [error, setError] = useState<string>();
+  const pointLabel = (point: InstallationTeachingPoint) =>
+    point === 'reference' && safeStartOnly
+      ? 'Installation Safe Start'
+      : labels[point];
   useEffect(() => {
-    if (loaded) speakCalibration(teachingVoice[stage]);
-  }, [loaded, stage]);
+    if (loaded && !(safeStartOnly && stage === 'reference'))
+      speakCalibration(teachingVoice[stage]);
+  }, [loaded, stage, safeStartOnly]);
   useEffect(() => {
     let alive = true;
     setSaved(null);
@@ -236,6 +243,7 @@ export function InstallationTeaching({
                 binding,
                 draftId: draft!.id,
                 corridorConfirmed: confirmed,
+                safeStartOnly,
               });
               setSaved(teaching);
               speakCalibration('teachingSaved');
@@ -277,28 +285,34 @@ export function InstallationTeaching({
               }}
             >
               {draft?.poses[point] ? '✓ ' : ''}
-              {t(labels[point])}
+              {t(pointLabel(point))}
             </Button>
           ))}
         </Space>
         {error && <Alert type="error" message={t(error)} />}
         <Typography.Title level={4}>
           {t(
-            stage === 'review' ? 'Review Installation Teaching' : labels[stage],
+            stage === 'review'
+              ? 'Review Installation Teaching'
+              : pointLabel(stage),
           )}
         </Typography.Title>
         {stage !== 'review' ? (
           <>
             <Typography.Paragraph>
-              {stage === 'reference' && screenName
+              {safeStartOnly && stage === 'reference'
                 ? t(
-                    'Hold the tip 2–5 cm above the centre of "{0}". Free travel stays at this height or above.',
-                    [screenName],
+                    'Record a safe start clear of the screens at a height that lets the tip pass above them and leaves room for the first probe.',
                   )
-                : t(prompts[stage])}
+                : stage === 'reference' && screenName
+                  ? t(
+                      'Hold the tip 2–5 cm above the centre of "{0}". Free travel stays at this height or above.',
+                      [screenName],
+                    )
+                  : t(prompts[stage])}
             </Typography.Paragraph>
             {illustrationContainer === undefined && (
-              <TeachingDiagram stage={stage} />
+              <TeachingDiagram stage={stage} safeStartOnly={safeStartOnly} />
             )}
             <Typography.Paragraph type="secondary">
               {t('Hold still, then record. Drag Mode can stay on.')}
@@ -307,7 +321,9 @@ export function InstallationTeaching({
               <Alert
                 type="info"
                 message={t(
-                  'Recording a new reference clears the other taught points. Saved installation remains unchanged until you save.',
+                  safeStartOnly
+                    ? 'Recording a new safe start clears the draft boundary points.'
+                    : 'Recording a new reference clears the other taught points. Saved installation remains unchanged until you save.',
                 )}
               />
             )}
@@ -323,7 +339,9 @@ export function InstallationTeaching({
             )}
             <Typography.Paragraph>
               {t(
-                'Free travel stays above the reference height and on the screen side of the boundary.',
+                safeStartOnly
+                  ? 'Free travel stays at or above the safe start height and on the allowed side of the boundary.'
+                  : 'Free travel stays above the reference height and on the screen side of the boundary.',
               )}
             </Typography.Paragraph>
             <Checkbox
@@ -338,7 +356,9 @@ export function InstallationTeaching({
               <summary>{t('Learn more')}</summary>
               <Typography.Paragraph type="secondary">
                 {t(
-                  'Contact search remains limited to 60 mm below the reference. Other directions are not constrained by a taught box.',
+                  safeStartOnly
+                    ? 'The batch locates the screen reference before probing.'
+                    : 'Contact search remains limited to 60 mm below the reference. Other directions are not constrained by a taught box.',
                 )}
               </Typography.Paragraph>
             </details>
@@ -348,6 +368,7 @@ export function InstallationTeaching({
           createPortal(
             <TeachingDiagram
               stage={stage === 'review' ? 'cameraBoundary' : stage}
+              safeStartOnly={safeStartOnly}
             />,
             illustrationContainer,
           )}
@@ -400,13 +421,7 @@ export function InstallationTeaching({
                         })
                       }
                     >
-                      {t('Go to {0}', [
-                        t(
-                          point === 'reference'
-                            ? 'Reference Position'
-                            : labels[point],
-                        ),
-                      ])}
+                      {t('Go to {0}', [t(pointLabel(point))])}
                     </Button>
                   ))}
               </Space>

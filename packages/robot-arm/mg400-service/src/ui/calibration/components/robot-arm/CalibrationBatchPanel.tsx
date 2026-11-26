@@ -2,6 +2,7 @@ import type {
   CalibrationBatchCommand,
   CalibrationBatchPlan,
   CalibrationBatchState,
+  ReferenceObservationDebug,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
 import {
@@ -23,6 +24,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { loadVlmModelSettings } from '../../../components/robot-arm/vlm-model-settings';
 import type { BatchClient as RobotArmApi } from '../../batch-client';
 import { calibrationErrorText, t } from '../../i18n';
 import { batchAnnouncements, speakCalibration } from '../../voice/calibration';
@@ -176,6 +178,8 @@ export const CalibrationBatchPanel = forwardRef<
     disabled: boolean;
     onChanged?: () => void | Promise<void>;
     onActiveChange?: (active: boolean) => void;
+    /** Latest eye-level model reading, for the live preview overlay. */
+    onReferenceReading?: (debug?: ReferenceObservationDebug) => void;
     debugDrawing?: ReactNode;
   }
 >(function CalibrationBatchPanel(
@@ -187,6 +191,7 @@ export const CalibrationBatchPanel = forwardRef<
     disabled,
     onChanged,
     onActiveChange,
+    onReferenceReading,
     debugDrawing,
   },
   ref,
@@ -203,9 +208,10 @@ export const CalibrationBatchPanel = forwardRef<
   const [deletedCalibrations, setDeletedCalibrations] = useState<string[]>([]);
   const [horizontalConfirmed, setHorizontalConfirmed] = useState(false);
   const [manualAcceptance, setManualAcceptance] = useState(false);
-  const latest = useRef({ onChanged, onActiveChange });
-  latest.current = { onChanged, onActiveChange };
+  const latest = useRef({ onChanged, onActiveChange, onReferenceReading });
+  latest.current = { onChanged, onActiveChange, onReferenceReading };
   const signature = useRef('');
+  const readingSignature = useRef('');
   const mounted = useRef(true);
   const busyBatch = active(batch) || debugging;
   useEffect(() => {
@@ -231,6 +237,12 @@ export const CalibrationBatchPanel = forwardRef<
         if (signature.current !== next) {
           signature.current = next;
           await latest.current.onChanged?.();
+        }
+        /* The reading changes without a status change: push it for the overlay. */
+        const reading = JSON.stringify(result?.referenceDebug ?? null);
+        if (readingSignature.current !== reading) {
+          readingSignature.current = reading;
+          latest.current.onReferenceReading?.(result?.referenceDebug);
         }
       } catch (cause) {
         if (!disposed) setError(describeCause(cause));
@@ -314,6 +326,11 @@ export const CalibrationBatchPanel = forwardRef<
         throw new Error(
           t('Review the calibration plan again before starting.'),
         );
+      const referenceModel = loadVlmModelSettings();
+      if (!referenceModel)
+        throw new Error(t('Complete the VLM model settings first.'));
+      // Verify the model end to end before the batch owns the workstation.
+      await api.checkReferenceModel(referenceModel);
       speakCalibration('batchNext', 2);
       await api.startCalibrationBatch({
         planVersion: plan.version,
@@ -323,6 +340,7 @@ export const CalibrationBatchPanel = forwardRef<
         compliantSetupConfirmed: true,
         samplingMode: 'slide',
         drawLogo,
+        referenceModel,
         ...(manualAcceptance ? { acceptance: 'manual' as const } : {}),
       });
       setPlan(undefined);
@@ -344,10 +362,13 @@ export const CalibrationBatchPanel = forwardRef<
           batch.items[batch.currentIndex]?.status === 'awaiting-placement')
       )
         speakCalibration('batchNext', 2);
-      return api.calibrationBatchCommand(batch.id, {
-        action,
-        revision: batch.revision,
-      });
+      return api.calibrationBatchCommand(
+        batch.id,
+        { action, revision: batch.revision },
+        batch.automaticReference && (action === 'retry' || action === 'skip')
+          ? loadVlmModelSettings()
+          : undefined,
+      );
     });
   };
   const row = batch?.items[batch.currentIndex];
@@ -501,7 +522,8 @@ export const CalibrationBatchPanel = forwardRef<
                     </div>
                   )}
                 {index === batch.currentIndex &&
-                  item.status.startsWith('awaiting-') &&
+                  (item.status.startsWith('awaiting-') ||
+                    item.status === 'preparing') &&
                   item.note && <div>{t(item.note)}</div>}
                 {item.error && (
                   <Typography.Paragraph type="danger">
@@ -849,6 +871,13 @@ export const CalibrationBatchPanel = forwardRef<
         title={t('Calibrate multiple screens')}
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {error && (
+            <Alert
+              type="error"
+              showIcon
+              message={calibrationErrorText(error)}
+            />
+          )}
           <Typography.Text>{t('Calibration Order')}</Typography.Text>
           <ol>
             {plan?.screens.map((screen) => {

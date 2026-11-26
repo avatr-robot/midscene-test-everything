@@ -33,3 +33,10 @@ export function rawCameraPreviewUrl(cameraId: string, viewer: string) {
   if (client) params.set('client', client);
   return `/api/cameras/preview?${params}`;
 }
+
+export function sideScreenPreviewUrl(overheadId: string, sideId: string) {
+  const params = new URLSearchParams({ camera: overheadId, side: sideId });
+  const client = previewClientId();
+  if (client) params.set('client', client);
+  return `/api/camera-screen-associations/preview?${params}`;
+}

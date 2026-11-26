@@ -47,10 +47,12 @@ export class TeachingClient {
     binding: TeachingBinding;
     draftId: string;
     corridorConfirmed: boolean;
+    safeStartOnly?: boolean;
   }) {
     return this.request<InstallationTeaching>('save', {
       draftId: input.draftId,
       corridorConfirmed: input.corridorConfirmed,
+      safeStartOnly: input.safeStartOnly,
     });
   }
   gotoTeachingPosition(

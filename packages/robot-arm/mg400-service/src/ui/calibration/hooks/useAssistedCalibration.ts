@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { createStore, useStore } from 'zustand';
+import { loadVlmModelSettings } from '../../components/robot-arm/vlm-model-settings';
 import { t } from '../i18n';
 import type {
   AssistedCalibrationAction,
@@ -121,6 +122,15 @@ export function useAssistedCalibration(
     run(() => api.mapAssistedCalibration(output));
   const releaseImaging = () => run(() => api.releaseCalibrationImaging());
   const create = () => run(() => api.createAssistedCalibration());
+  const locateReference = () =>
+    run(() => {
+      if (!session)
+        throw new Error('Start calibration in the Calibration step');
+      const model = loadVlmModelSettings();
+      if (!model) throw new Error('Complete the VLM model settings first.');
+      speakCalibration('autoStarted', 2);
+      return api.locateCalibrationReference(session.id, model);
+    });
   const command = (
     action: AssistedCalibrationAction,
     confirmed = false,
@@ -183,6 +193,7 @@ export function useAssistedCalibration(
     map,
     releaseImaging,
     create,
+    locateReference,
     command,
     safety,
   };

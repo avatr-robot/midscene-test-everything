@@ -5,7 +5,8 @@ import type {
   CalibrationBatchState,
   WorkstationScreenState,
 } from '@midscene/robotics-shared/assisted-contracts';
-import { markerRequest } from './marker-client';
+import type { VlmModelSettings } from '../components/robot-arm/vlm-model-settings';
+import { markerRequest, priorityMarkerRequest } from './marker-client';
 export class BatchClient {
   constructor(readonly cameraId: string) {}
   private async request<T>(
@@ -32,6 +33,21 @@ export class BatchClient {
   screens(signal?: AbortSignal) {
     return this.request<WorkstationScreenState[]>('screens', {}, signal);
   }
+  /**
+   * One real model call before the batch starts. It owns a longer timeout and
+   * skips the shared screen-request slot so a slow model cannot stall polling.
+   */
+  checkReferenceModel(referenceModel: VlmModelSettings) {
+    return priorityMarkerRequest<{ ok: true }>(
+      '/api/calibration-batch',
+      {
+        action: 'check-model',
+        cameraId: this.cameraId,
+        referenceModel,
+      },
+      60_000,
+    );
+  }
   startCalibrationBatch(input: {
     cameraId: string;
     planVersion: string;
@@ -41,14 +57,20 @@ export class BatchClient {
     samplingMode?: CalibrationBatchSamplingMode;
     acceptance?: 'manual';
     drawLogo?: boolean;
+    referenceModel?: VlmModelSettings;
   }) {
     return this.request<CalibrationBatchState>('start', input);
   }
-  calibrationBatchCommand(id: string, command: CalibrationBatchCommand) {
+  calibrationBatchCommand(
+    id: string,
+    command: CalibrationBatchCommand,
+    referenceModel?: VlmModelSettings,
+  ) {
     return this.request<CalibrationBatchState>('command', {
       id,
       command: command.action,
       revision: command.revision,
+      referenceModel,
     });
   }
   clearCalibrationBatches() {

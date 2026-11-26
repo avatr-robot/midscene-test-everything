@@ -18,13 +18,16 @@ export const teachingIllustrationCopyKeys = [
 /** Same editable, localized artwork and materials as the setup illustrations. */
 export function TeachingDiagram({
   stage,
-}: { stage: InstallationTeachingPoint }) {
+  safeStartOnly = false,
+}: { stage: InstallationTeachingPoint; safeStartOnly?: boolean }) {
   useLanguage();
   const id = useId().replace(/:/g, '');
   const boundary = stage !== 'reference';
   const title = boundary
     ? 'Camera-side boundary — top view'
-    : 'Reference travel height — side view';
+    : safeStartOnly
+      ? 'Safe start height — side view'
+      : 'Reference travel height — side view';
   return (
     <svg
       className="robot-setup-illustration"
@@ -183,7 +186,9 @@ export function TeachingDiagram({
           />
           <path d="M331 309H387" className="setup-art-ext" />
           <text x="395" y="314" className="setup-art-label">
-            {t('Reference Position')}
+            {t(
+              safeStartOnly ? 'Installation Safe Start' : 'Reference Position',
+            )}
           </text>
           <text x="352" y="167" className="setup-art-small">
             {t('Camera-side Boundary')}

@@ -158,6 +158,37 @@ export const assistedCalibrationZh: Record<string, string> = {
   'Record Reference Position': '记录参考位',
   'Set a calibration reference position': '设置标定参考位',
   'Reference position recorded': '参考位已记录',
+  'Find reference position automatically': '自动寻找参考位',
+  'Move above the selected screen?': '移动到所选屏幕上方？',
+  'Start at the saved Safe Position and confirm that the phone, tool and cameras are fixed and the entire arm path is clear.':
+    '请从已保存的安全位置开始，并确认手机、触控笔和相机均已固定，整条机械臂的运动路径无障碍。',
+  'Checking both cameras and locating the reference position…':
+    '正在核验两路相机画面并寻找参考位…',
+  'Complete the VLM model settings first.': '请先完成视觉大模型设置。',
+  'Set the screen camera to Overhead and assign exactly one Eye-level camera.':
+    '请将屏幕相机设为俯视，并指定一台平视相机。',
+  'Start at the selected screen’s saved Safe Position.':
+    '请从所选屏幕已保存的安全位置开始。',
+  'The robot moved after the reference positioning check.':
+    '机械臂在参考位检查后发生了移动。',
+  'The robot did not settle at the screen reference.':
+    '机械臂未在屏幕参考位停稳。',
+  'The taught travel corridor does not allow a reference 20–50 mm above this screen.':
+    '现有示教通道无法在屏幕上方 20–50 毫米内设置参考位。',
+  'Both cameras must provide live frames during reference positioning.':
+    '寻找参考位时，两路相机都需要提供实时画面。',
+  'The two cameras did not produce matching fresh frames.':
+    '两路相机未提供时间相近的新画面。',
+  'Reference positioning waited too long for the next motion step. Retry with fresh camera frames.':
+    '等待下一段运动超时，请用新的相机画面重试。',
+  'The selected phone no longer matches its saved overhead mapping.':
+    '所选手机的位置与保存的俯视映射不一致。',
+  'The side-view model did not return a usable observation. Check model settings and try again.':
+    '平视相机的模型未返回可用结果。请检查模型设置后重试。',
+  'The side view could not confirm a visible gap over the selected phone.':
+    '平视画面无法确认笔尖与所选手机屏幕之间的间隙。',
+  'The side view could not confirm a clear view of the selected phone and stylus tip.':
+    '平视画面无法清楚识别所选手机和笔尖。',
   'Change Reference Position': '重新记录参考位',
   'Point collection is complete. Separately record a safe position for normal actions, with clearance above the screen and outside the camera view. Release the robot before recording. Collected points are retained.':
     '采点已完成。请单独记录日常动作使用的安全位，保持与屏幕的安全间隙，并避开相机视线。松开机械臂后再记录，已有采点结果会保留。',

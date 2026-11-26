@@ -110,7 +110,7 @@ export function markerRequest<T>(
   );
 }
 
-function priorityMarkerRequest<T>(
+export function priorityMarkerRequest<T>(
   path: string,
   body?: unknown,
   timeoutMs = 30_000,

@@ -9,6 +9,7 @@ import type {
   CalibrationPhoneStatus,
   CalibrationSnapshot,
 } from '@midscene/robotics-shared/contracts';
+import type { VlmModelSettings } from '../components/robot-arm/vlm-model-settings';
 export interface CalibrationClientOptions {
   baseUrl: string;
   timeoutMs?: number;
@@ -130,6 +131,21 @@ export class CalibrationClient {
       await this.request<{
         session: AssistedCalibrationState;
       }>('/assisted-calibration', {})
+    ).session;
+  }
+  async locateCalibrationReference(
+    sessionId: string,
+    model: VlmModelSettings,
+  ): Promise<AssistedCalibrationState> {
+    return (
+      await this.request<{ session: AssistedCalibrationState }>(
+        '/reference/locate',
+        {
+          sessionId,
+          model,
+          confirmed: true,
+        },
+      )
     ).session;
   }
   async assistedCalibrationCommand(

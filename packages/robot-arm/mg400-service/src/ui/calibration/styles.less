@@ -955,6 +955,91 @@
   }
 }
 
+/* The eye-level model's tip point, projected onto the overhead frame. */
+.guided-reference-tip {
+  z-index: 2;
+
+  circle {
+    fill: rgb(250 173 20 / 16%);
+    stroke: #faad14;
+    stroke-width: 3;
+    vector-effect: non-scaling-stroke;
+  }
+
+  line {
+    stroke: #faad14;
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+  }
+}
+
+.guided-model-reading {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  display: grid;
+  gap: 4px;
+  max-width: min(72%, 420px);
+  padding: 6px 8px;
+  color: #fff;
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+  background: rgb(20 32 28 / 78%);
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 8px;
+
+  &[data-ok='false'] {
+    border-color: rgb(255 120 117 / 85%);
+  }
+}
+
+.guided-model-reading-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.guided-model-reading-confidence {
+  font-weight: 400;
+  color: rgb(255 255 255 / 78%);
+}
+
+.guided-model-reading-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+}
+
+.guided-reading-chip {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  color: rgb(255 255 255 / 88%);
+
+  &[data-state='yes'] {
+    color: #5dd39e;
+  }
+
+  &[data-state='no'] {
+    color: #ff9d9d;
+  }
+
+  &[data-state='unknown'] {
+    color: rgb(255 255 255 / 60%);
+  }
+}
+
+.guided-model-reading-error {
+  max-height: 48px;
+  overflow: hidden;
+  color: #ffb4b4;
+  overflow-wrap: anywhere;
+}
+
 .camera-mapping-applied {
   display: flex;
   flex-wrap: wrap;
