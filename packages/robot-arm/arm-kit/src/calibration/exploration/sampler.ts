@@ -1122,7 +1122,11 @@ export async function runAutoExploration(
         ),
       );
     } catch (error) {
-      if (!(error instanceof RobotArmError) || error.code !== 'TOUCH_NOT_FOUND')
+      if (
+        !(error instanceof RobotArmError) ||
+        error.code !== 'TOUCH_NOT_FOUND' ||
+        options.fixedFirstProbe
+      )
         throw error;
       for (let row = -2; row <= 2 && !first; row++)
         for (let column = -2; column <= 2 && !first; column++) {

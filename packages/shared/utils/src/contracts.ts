@@ -657,6 +657,7 @@ export interface InstallationTeaching {
   id: string;
   recordedAt: string;
   referenceDeviceId?: string;
+  referencePurpose?: 'safe-start';
   robotProfileId: string;
   toolProfileId: string;
   cameraId: string;
@@ -1028,6 +1029,8 @@ export interface ScreenVisibilityEvidence {
     assessment?: 'visible' | 'suspected-occlusion' | 'insufficient-evidence';
     reason?: 'glare' | 'weak-pattern' | 'connected-gap';
     patternReliable?: boolean;
+    /** Lower matching fraction of the two checkerboard polarities at tile centers. */
+    patternCenterMatch?: number;
     verifiedBy?: { attempts: number[]; recoveredGlareSamples?: number };
     glareSamples?: number;
     largestRegionWithoutGlare?: number;

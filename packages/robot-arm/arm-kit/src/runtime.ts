@@ -3907,6 +3907,7 @@ export class RobotArmRuntime extends RobotKernel {
     };
     draftId: string;
     corridorConfirmed: boolean;
+    safeStartOnly?: boolean;
   }) {
     return this.configure(async () => {
       const { binding } = input;
@@ -3956,7 +3957,9 @@ export class RobotArmRuntime extends RobotKernel {
         ...binding,
         id: randomUUID(),
         recordedAt: new Date().toISOString(),
-        referenceDeviceId: binding.screenProfileId,
+        ...(input.safeStartOnly
+          ? { referencePurpose: 'safe-start' as const }
+          : { referenceDeviceId: binding.screenProfileId }),
         robotGeometryRevision: this.profileStore.getRobot(
           binding.robotProfileId,
         ).geometryRevision,

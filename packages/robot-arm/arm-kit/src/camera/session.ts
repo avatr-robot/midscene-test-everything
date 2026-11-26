@@ -720,9 +720,10 @@ export class CameraSession implements CalibrationVision {
   async detectMarkersInSource(
     binding: VisionBinding,
     layout: CalibrationPageLayout,
+    source?: Buffer,
   ) {
     const correction = this.getCorrection();
-    const jpeg = await this.rawFrame();
+    const jpeg = source ?? (await this.rawFrame());
     if (!correction || !this.isBindingCurrent(binding))
       throw new RobotArmError(
         'VISION_BINDING_CHANGED',

@@ -15,6 +15,8 @@ import type {
   CalibrationPageReply,
   CalibrationPageUpdate,
   CalibrationPhoneStatus,
+  WebCalibrationMapping,
+  WebPoint,
   WebVerificationResult,
 } from '../assisted-contracts.js';
 import {
@@ -36,8 +38,10 @@ import {
   assertPose,
   contactPoint,
   distance,
+  flangePose,
   quaternionDistance,
   scale,
+  within,
 } from '../domain.js';
 import type { RobotArmRuntime } from '../runtime.js';
 import { verifyScreenVisibility } from './camera/visibility.js';
@@ -58,8 +62,12 @@ import {
 import { knownScreenTravelHeight, pageOrderedQuad } from './screen-position.js';
 import { CalibrationSetup, calibrationGeometryKey } from './setup.js';
 import { SAMPLED_SURFACE_LIMIT_MM } from './surface.js';
-import { moveToTaughtPosition } from './taught-position.js';
+import {
+  insideTaughtTravelSpace,
+  moveToTaughtPosition,
+} from './taught-position.js';
 import { assertSafeObservation } from './verification/safe-position.js';
+import { findVisualReference } from './visual-reference.js';
 
 const log = getDebug('robot-arm:web-calibration', { console: true });
 const debug = getDebug('robot-arm:web-calibration');
@@ -80,6 +88,8 @@ const recoverableSamplingErrors = new Set([
   'VISION_UNAVAILABLE',
 ]);
 const SAMPLING_RECOVERY_MS = 15_000;
+const REFERENCE_POSITION_TOLERANCE_MM = 0.5;
+const REFERENCE_ORIENTATION_TOLERANCE_RAD = (0.5 * Math.PI) / 180;
 
 type Fit = Pick<
   CalibrationProfile,
@@ -123,6 +133,20 @@ export interface AssistedCalibrationOptions {
   markerCodes?: readonly number[];
   /** Shows or clears the test pattern on every screen owned by this camera. */
   onImagingPattern?: (request?: string) => Promise<void>;
+}
+
+export type CalibrationReferenceSource = {
+  key: string;
+  startPositions: readonly CartesianPose[];
+} & (
+  | { centerContact: CartesianPose; widthMm: number; heightMm: number }
+  | { outline: readonly WebPoint[] }
+);
+
+export interface ReferenceInspection {
+  check(): void;
+  overheadTip?: WebPoint;
+  hovering?: boolean;
 }
 
 /** Coordinates an explicit calibration task; setup and phone requests have independent lifetimes. */
@@ -225,6 +249,7 @@ export class CalibrationWorkflow {
     this.automaticEvidence = undefined;
     this.persistedCalibrationId = undefined;
     this.captureOperationId = undefined;
+    this.fixedFirstProbe = false;
     this.receipt = undefined;
     this.receivingTarget = undefined;
     this.batchTravelTipZMm = undefined;
@@ -777,6 +802,7 @@ export class CalibrationWorkflow {
       !s ||
       s.stage === 'cancelled' ||
       s.stage === 'ready' ||
+      s.stage === 'locating-reference' ||
       (this.markerRequest && ['completed', 'interrupted'].includes(s.stage))
     )
       return {
@@ -1319,8 +1345,13 @@ export class CalibrationWorkflow {
     }
   }
   private batchAttempt?: string;
+  private fixedFirstProbe = false;
   async create(
-    options: { batch?: boolean; drawLogo?: boolean } = {},
+    options: {
+      batch?: boolean;
+      drawLogo?: boolean;
+      automaticReference?: boolean;
+    } = {},
   ): Promise<AssistedCalibrationState> {
     if (
       this.activeAction ||
@@ -1341,21 +1372,27 @@ export class CalibrationWorkflow {
       this.beginTask(mapping);
       this.state!.drawLogo = options.drawLogo;
       this.batchAttempt = options.batch ? this.state!.id : undefined;
+      this.fixedFirstProbe = false;
       const teaching = this.runtime.profileStore.installationTeaching(
         this.input!,
       );
       if (teaching) {
-        this.state!.referencePosition =
-          !teaching.referenceDeviceId ||
-          teaching.referenceDeviceId === this.options.deviceId
-            ? teaching.referencePose
-            : undefined;
+        if (
+          !options.automaticReference &&
+          teaching.referencePurpose !== 'safe-start'
+        )
+          this.state!.referencePosition =
+            !teaching.referenceDeviceId ||
+            teaching.referenceDeviceId === this.options.deviceId
+              ? teaching.referencePose
+              : undefined;
         this.state!.cameraBoundaryPosition = teaching.poses.cameraBoundary;
         this.state!.cameraBoundaryEndPosition =
           teaching.poses.cameraBoundaryEnd;
         this.state!.teachingId = teaching.id;
-        this.state!.referencePosition =
-          this.options.referencePosition?.() ?? this.state!.referencePosition;
+        if (!options.automaticReference)
+          this.state!.referencePosition =
+            this.options.referencePosition?.() ?? this.state!.referencePosition;
       }
       return this.status()!;
     } finally {
@@ -2623,6 +2660,7 @@ export class CalibrationWorkflow {
             tool,
             checkpoint,
             webToImage: s.mapping!.webToImage,
+            fixedFirstProbe: this.fixedFirstProbe,
             directTravel: allowDirectTravel
               ? {
                   teaching,
@@ -3273,6 +3311,328 @@ export class CalibrationWorkflow {
     if (this.ownsOperation()) await this.runtime.stopCalibrationOperation();
     await this.capture;
     await this.verification;
+  }
+  async locateReference(
+    id: string,
+    source: () => CalibrationReferenceSource | undefined,
+    observe: (
+      mapping: WebCalibrationMapping,
+      centered: boolean,
+      signal: AbortSignal,
+    ) => Promise<ReferenceInspection>,
+    signal: AbortSignal,
+    batch = false,
+  ) {
+    const s = this.require(id);
+    if (
+      s.stage !== 'ready' ||
+      this.activeAction ||
+      this.capture ||
+      this.verification ||
+      this.ownsOperation() ||
+      (this.batchAttempt === id) !== batch
+    )
+      throw new RobotArmError(
+        'BUSY',
+        'Finish the current calibration operation first',
+        409,
+      );
+
+    const input = this.input!;
+    const store = this.runtime.profileStore;
+    const tool = store.getTool(input.toolProfileId);
+    const teaching = store.installationTeaching(input);
+    const saved = source();
+    if (!saved || !teaching?.corridorConfirmed || s.teachingId !== teaching.id)
+      throw new RobotArmError(
+        'CALIBRATION_INVALID',
+        batch
+          ? 'Automatic reference positioning requires a valid screen target and saved installation safety settings.'
+          : 'Automatic reference positioning requires current screen calibration and saved installation teaching.',
+        409,
+      );
+
+    const center =
+      'centerContact' in saved
+        ? contactPoint(saved.centerContact, tool.offsetMm)
+        : undefined;
+    const floor = contactPoint(teaching.referencePose, tool.offsetMm).z;
+    const travelHeight = Math.max(
+      floor,
+      knownScreenTravelHeight(store.list(), input),
+    );
+    let target: CartesianPose | undefined;
+    if (center && 'centerContact' in saved) {
+      const clearance = Math.max(
+        30,
+        input.motion!.safeHeightMm,
+        travelHeight - center.z + REFERENCE_POSITION_TOLERANCE_MM,
+      );
+      target = flangePose(
+        { ...center, z: center.z + clearance },
+        saved.centerContact.orientation,
+        tool.offsetMm,
+      );
+      if (
+        clearance > 50 - REFERENCE_POSITION_TOLERANCE_MM ||
+        !insideTaughtTravelSpace(
+          contactPoint(target, tool.offsetMm),
+          teaching,
+          travelHeight,
+        )
+      )
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'The taught travel corridor does not allow a reference 20–50 mm above this screen.',
+          409,
+        );
+    }
+
+    const near = (pose: CartesianPose, expected: CartesianPose) =>
+      distance(pose.positionMm, expected.positionMm) <=
+        REFERENCE_POSITION_TOLERANCE_MM &&
+      quaternionDistance(pose.orientation, expected.orientation) <=
+        REFERENCE_ORIENTATION_TOLERANCE_RAD;
+    const revision = this.attemptRevision;
+    const stopRevision = this.runtime.stopRevision;
+    const check = () => {
+      signal.throwIfAborted();
+      this.assertAttempt(revision);
+      this.runtime.assertStopRevision(stopRevision);
+      if (
+        source()?.key !== saved.key ||
+        store.installationTeaching(input)?.id !== teaching.id
+      )
+        throw new RobotArmError(
+          'CALIBRATION_INVALID',
+          'The saved screen calibration or installation teaching changed.',
+          409,
+        );
+    };
+    const cancel = () => {
+      if (this.ownsOperation())
+        void this.runtime
+          .stopCalibrationOperation()
+          .catch((error) =>
+            log('Failed to stop reference positioning:', error),
+          );
+    };
+    this.beginAction();
+    let markerRequest: string | undefined;
+    let aligned = this.aligned;
+    try {
+      const mapping = await this.configuration.assertCurrent();
+      check();
+      const phone = this.phone.assertConnected();
+      s.stage = 'locating-reference';
+      this.changed();
+      const request = this.requestMarkerDisplay();
+      markerRequest = request;
+      const task = this.runtime.collectAutomaticPoints(input, async (host) => {
+        this.captureOperationId = this.runtime.current()?.requestId;
+        const observationSignal = AbortSignal.any([signal, host.signal]);
+        let checkCameras: (() => void) | undefined;
+        const guard = () => {
+          check();
+          host.check();
+          const current = this.phone.assertConnected();
+          if (
+            current.pageId !== phone.pageId ||
+            current.browserInstanceId !== phone.browserInstanceId ||
+            !sameLayout(mapping.layout, current.layout)
+          )
+            throw new RobotArmError(
+              'MAPPING_REQUIRED',
+              'The phone page changed during reference positioning.',
+              409,
+            );
+        };
+        const assertMarkers = () => {
+          guard();
+          if (!this.markerObservation(request))
+            throw new RobotArmError(
+              'VISION_UNAVAILABLE',
+              'Keep the selected phone markers visible during reference positioning.',
+              409,
+            );
+        };
+        const inspect = async (centered: boolean) => {
+          assertMarkers();
+          const inspection = await observe(
+            mapping,
+            centered,
+            observationSignal,
+          );
+          checkCameras = inspection.check;
+          assertMarkers();
+          return inspection;
+        };
+        const start = await this.runtime.assertCalibrationMotionReady(
+          input.toolProfileId,
+        );
+        guard();
+        const alreadyCentered = Boolean(target && near(start, target));
+        const minimumReferenceZ =
+          'outline' in saved
+            ? travelHeight - REFERENCE_POSITION_TOLERANCE_MM
+            : floor - REFERENCE_POSITION_TOLERANCE_MM;
+        if (
+          !insideTaughtTravelSpace(
+            contactPoint(start, tool.offsetMm),
+            teaching,
+            minimumReferenceZ,
+          ) ||
+          (!alreadyCentered &&
+            !saved.startPositions.some((pose) => near(start, pose)))
+        )
+          throw new RobotArmError(
+            'NOT_READY',
+            batch
+              ? 'Start at the installation safe start or a verified batch position.'
+              : 'Start at the selected screen’s saved Safe Position.',
+            409,
+          );
+        const deadline = Date.now() + 8_000;
+        while (!this.markerObservation(request) && Date.now() < deadline) {
+          guard();
+          await delay(80, undefined, { signal: observationSignal });
+        }
+        const motion = {
+          actionSpeed: { kind: 'ratio' as const, value: 0.05 },
+          actionAcceleration: { kind: 'ratio' as const, value: 0.05 },
+        };
+        const move: AutomaticCaptureHost['move'] = (pose, options) =>
+          host.move(pose, {
+            ...options,
+            beforeSubmit: () => {
+              assertMarkers();
+              checkCameras?.();
+            },
+            maximumPositionErrorMm: REFERENCE_POSITION_TOLERANCE_MM,
+          });
+        let expected = target;
+        if ('outline' in saved) {
+          const workspace = store.getRobot(input.robotProfileId).workspace;
+          expected = await findVisualReference({
+            start,
+            outline: saved.outline,
+            canMove: (pose) =>
+              (!workspace || within(pose.positionMm, workspace)) &&
+              insideTaughtTravelSpace(
+                contactPoint(pose, tool.offsetMm),
+                teaching,
+                minimumReferenceZ,
+              ),
+            observe: async () => {
+              const view = await inspect(false);
+              if (!view.overheadTip)
+                throw new RobotArmError(
+                  'VISION_UNAVAILABLE',
+                  'The model could not locate the stylus tip in the overhead image.',
+                  409,
+                );
+              return {
+                tip: view.overheadTip,
+                hovering: view.hovering === true,
+              };
+            },
+            move: async (pose, from) => {
+              const options = {
+                speed: motion.actionSpeed,
+                acceleration: motion.actionAcceleration,
+              };
+              assertMarkers();
+              if (!near(await host.read(), from))
+                throw new RobotArmError(
+                  'NOT_READY',
+                  'The robot moved after the reference positioning check.',
+                  409,
+                );
+              await host.preflight([pose], options);
+              const actual = await move(pose, options);
+              if (!actual)
+                throw new RobotArmError(
+                  'NOT_READY',
+                  'The robot did not settle at the screen reference.',
+                  409,
+                );
+              return actual;
+            },
+          });
+        } else if (target && center) {
+          await inspect(alreadyCentered);
+          if (!alreadyCentered)
+            await moveToTaughtPosition(
+              {
+                ...host,
+                read: async () => {
+                  const current = await host.read();
+                  if (!near(current, start))
+                    throw new RobotArmError(
+                      'NOT_READY',
+                      'The robot moved after the reference positioning check.',
+                      409,
+                    );
+                  return current;
+                },
+                move: async (pose, options) => {
+                  const actual = await move(pose, options);
+                  const tip = contactPoint(pose, tool.offsetMm);
+                  await inspect(
+                    Math.hypot(tip.x - center.x, tip.y - center.y) <=
+                      REFERENCE_POSITION_TOLERANCE_MM,
+                  );
+                  return actual;
+                },
+              },
+              teaching,
+              tool,
+              target,
+              motion,
+              travelHeight,
+            );
+        }
+        const actual = await this.runtime.assertCalibrationMotionReady(
+          input.toolProfileId,
+        );
+        assertMarkers();
+        checkCameras?.();
+        const actualTip = contactPoint(actual, tool.offsetMm);
+        if (
+          !expected ||
+          !near(actual, expected) ||
+          (center &&
+            (Math.hypot(actualTip.x - center.x, actualTip.y - center.y) > 1 ||
+              actualTip.z - center.z > 50)) ||
+          !insideTaughtTravelSpace(
+            actualTip,
+            teaching,
+            center ? travelHeight : minimumReferenceZ,
+          )
+        )
+          throw new RobotArmError(
+            'NOT_READY',
+            'The robot did not settle at the screen reference.',
+            409,
+          );
+        return actual;
+      });
+      signal.addEventListener('abort', cancel, { once: true });
+      if (signal.aborted) cancel();
+      const actual = await task;
+      check();
+      s.referencePosition = actual;
+      this.fixedFirstProbe = 'outline' in saved;
+      aligned = true;
+    } finally {
+      signal.removeEventListener('abort', cancel);
+      this.captureOperationId = undefined;
+      if (s.stage === 'locating-reference') s.stage = 'ready';
+      if (markerRequest) this.finishMarkerDisplay(markerRequest, aligned);
+      this.endAction();
+      this.changed();
+    }
+    return this.status()!;
   }
   setBatchReference(pose: CartesianPose) {
     const state = this.require();

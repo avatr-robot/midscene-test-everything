@@ -125,6 +125,8 @@ export interface SlideRecovery {
   switchedToVertical: boolean;
 }
 export interface AutoExplorationOptions {
+  /** With a visually confirmed XY, stop on an initial miss instead of sweeping nearby points. */
+  fixedFirstProbe?: boolean;
   startPose: CartesianPose;
   page?: ScreenCalibSessionSummary;
   mode?: 'standard' | 'fast-horizontal';

@@ -7,12 +7,17 @@ import {
   type CalibrationPageUpdate,
 } from '../assisted-contracts.js';
 import { screenPoseMm } from '../calibration/geometry.js';
+import { project } from '../calibration/phone/geometry.js';
 import {
   calibrationPhonePage,
   phoneMarkerElements,
 } from '../calibration/phone/page.js';
 import { sameLayout } from '../calibration/phone/session.js';
-import { CalibrationWorkflow } from '../calibration/workflow.js';
+import {
+  type CalibrationReferenceSource,
+  CalibrationWorkflow,
+  type ReferenceInspection,
+} from '../calibration/workflow.js';
 import {
   MARKER_CAPTURE_ATTEMPTS,
   captureScreenMarkers,
@@ -66,6 +71,21 @@ export interface CalibrationHostOptions {
   phoneLinks?: () => { name: string; url: string }[];
   onImagingPattern?: (request?: string) => Promise<void>;
 }
+
+interface ReferenceObservation {
+  overhead: CameraFrame;
+  side: CameraFrame;
+  targetOutline: CameraCorrection['points'];
+  centered: boolean;
+  trackOverheadTip: boolean;
+  signal: AbortSignal;
+}
+
+const REFERENCE_FRAME_MAX_AGE_MS = 1_000;
+const REFERENCE_FRAME_MAX_SKEW_MS = 300;
+const REFERENCE_SCREEN_DRIFT_MM = 2;
+const REFERENCE_OBSERVATION_MAX_AGE_MS = 25_000;
+
 /** One Device's calibration endpoints. Listening, origin checks and static assets belong to the host. */
 export class CalibrationHost {
   readonly service: CalibrationWorkflow;
@@ -92,28 +112,9 @@ export class CalibrationHost {
       onImagingPattern: options.onImagingPattern,
       onPhoneObservation: (update) => this.observePhone(update),
       referencePosition: () => {
-        const store = controllerRuntime(options.arm).profileStore;
-        const binding = store.deviceBinding(options.deviceId);
-        if (!binding || !this.input) return undefined;
-        const teaching = store.installationTeaching(this.input);
-        const calibration = store.getCalibration(binding.calibrationProfileId);
-        if (
-          !teaching ||
-          !calibrationAccepted(calibration) ||
-          binding.robotProfileId !== this.input.robotProfileId ||
-          binding.toolProfileId !== this.input.toolProfileId ||
-          calibration.robotGeometryRevision !==
-            store.getRobot(binding.robotProfileId).geometryRevision ||
-          calibration.toolGeometryRevision !==
-            store.getTool(binding.toolProfileId).geometryRevision ||
-          calibration.screenGeometryRevision !==
-            store.getScreen(binding.screenProfileId).geometryRevision ||
-          binding.vision.fingerprint !==
-            this.service.setup().mapping?.vision.fingerprint
-        )
-          return undefined;
-        const tool = store.getTool(binding.toolProfileId);
-        const screen = store.getScreen(binding.screenProfileId);
+        const saved = this.currentScreenCalibration();
+        if (!saved) return undefined;
+        const { calibration, screen, teaching, tool } = saved;
         const center = screenPoseMm(
           calibration,
           tool,
@@ -135,6 +136,161 @@ export class CalibrationHost {
       service: this.service,
       basePath: this.basePath,
     });
+  }
+  private currentScreenCalibration() {
+    const store = controllerRuntime(this.options.arm).profileStore;
+    const binding = store.deviceBinding(this.options.deviceId);
+    if (!binding || !this.input) return undefined;
+    const teaching = store.installationTeaching(this.input);
+    const calibration = store.getCalibration(binding.calibrationProfileId);
+    const screen = store.getScreen(binding.screenProfileId);
+    const tool = store.getTool(binding.toolProfileId);
+    if (
+      !teaching ||
+      !calibrationAccepted(calibration) ||
+      binding.robotProfileId !== this.input.robotProfileId ||
+      binding.toolProfileId !== this.input.toolProfileId ||
+      calibration.robotGeometryRevision !==
+        store.getRobot(binding.robotProfileId).geometryRevision ||
+      calibration.toolGeometryRevision !== tool.geometryRevision ||
+      calibration.screenGeometryRevision !== screen.geometryRevision ||
+      binding.vision.fingerprint !==
+        this.service.setup().mapping?.vision.fingerprint
+    )
+      return undefined;
+    return { calibration, screen, teaching, tool };
+  }
+  locateReference(
+    id: string,
+    sideCamera: CameraSession,
+    verifySide: (
+      observation: ReferenceObservation,
+    ) => Promise<Omit<ReferenceInspection, 'check'>>,
+    signal: AbortSignal,
+    batchSource?: () => CalibrationReferenceSource | undefined,
+  ) {
+    const overheadCamera = this.options.camera;
+    if (sideCamera.camera.id === overheadCamera.camera.id)
+      throw new RobotArmError(
+        'INVALID_MAPPING',
+        'Select two distinct cameras for reference positioning.',
+        409,
+      );
+    const source =
+      batchSource ??
+      (() => {
+        const saved = this.currentScreenCalibration();
+        if (!saved) return undefined;
+        const { calibration, screen, tool } = saved;
+        const centerContact = screenPoseMm(
+          calibration,
+          tool,
+          { x: screen.physicalWidthMm / 2, y: screen.physicalHeightMm / 2 },
+          0,
+        );
+        return {
+          key: `${calibration.id}:${calibration.revision}`,
+          centerContact,
+          startPositions: [calibration.observationPose],
+          widthMm: screen.physicalWidthMm,
+          heightMm: screen.physicalHeightMm,
+        };
+      });
+    const checkCameras = () => {
+      for (const camera of [overheadCamera, sideCamera]) {
+        const status = camera.stream.getInfo();
+        if (
+          status.state !== 'running' ||
+          (status.frameAgeMs ?? Number.POSITIVE_INFINITY) >
+            REFERENCE_FRAME_MAX_AGE_MS
+        )
+          throw new RobotArmError(
+            'VISION_UNAVAILABLE',
+            'Both cameras must provide live frames during reference positioning.',
+            409,
+          );
+      }
+    };
+    return this.service.locateReference(
+      id,
+      source,
+      async (mapping, centered, observationSignal) => {
+        await delay(250, undefined, { signal: observationSignal });
+        const startedAt = Date.now();
+        const [overhead, side] = await Promise.all(
+          [overheadCamera, sideCamera].map(({ stream }) =>
+            stream.getFrame({ fresh: true, timeoutMs: 3_000 }),
+          ),
+        );
+        observationSignal.throwIfAborted();
+        if (
+          Math.min(overhead.capturedAt, side.capturedAt) < startedAt ||
+          Math.abs(overhead.capturedAt - side.capturedAt) >
+            REFERENCE_FRAME_MAX_SKEW_MS
+        )
+          throw new RobotArmError(
+            'VISION_UNAVAILABLE',
+            'The two cameras did not produce matching fresh frames.',
+            409,
+          );
+        const correction = overheadCamera.getCorrection();
+        const saved = source();
+        if (!correction || !saved)
+          throw new RobotArmError(
+            'MAPPING_REQUIRED',
+            'Check camera mapping before starting calibration',
+            409,
+          );
+        const { webToImage } = await overheadCamera.detectMarkersInSource(
+          mapping.vision,
+          mapping.layout,
+          overhead.jpeg,
+        );
+        const trackOverheadTip = 'outline' in saved;
+        const scaleX =
+          (trackOverheadTip ? 1 : saved.widthMm) / (mapping.vision.width - 1);
+        const scaleY =
+          (trackOverheadTip ? 1 : saved.heightMm) / (mapping.vision.height - 1);
+        const driftLimit = trackOverheadTip ? 0.025 : REFERENCE_SCREEN_DRIFT_MM;
+        for (const marker of mapping.layout.markers) {
+          const expected = project(mapping.webToImage, marker);
+          const observed = project(webToImage, marker);
+          const drift = Math.hypot(
+            (expected.x - observed.x) * scaleX,
+            (expected.y - observed.y) * scaleY,
+          );
+          if (!Number.isFinite(drift) || drift > driftLimit)
+            throw new RobotArmError(
+              'CALIBRATION_MISMATCH',
+              'The selected phone no longer matches its saved overhead mapping.',
+              409,
+            );
+        }
+        observationSignal.throwIfAborted();
+        const observed = await verifySide({
+          overhead,
+          side,
+          targetOutline: correction.points,
+          centered,
+          trackOverheadTip,
+          signal: observationSignal,
+        });
+        observationSignal.throwIfAborted();
+        const checkObservation = () => {
+          checkCameras();
+          if (Date.now() - startedAt > REFERENCE_OBSERVATION_MAX_AGE_MS)
+            throw new RobotArmError(
+              'VISION_UNAVAILABLE',
+              'Reference positioning waited too long for the next motion step. Retry with fresh camera frames.',
+              409,
+            );
+        };
+        checkObservation();
+        return { ...observed, check: checkObservation };
+      },
+      signal,
+      Boolean(batchSource),
+    );
   }
   private reference?: {
     key: string;
@@ -918,6 +1074,7 @@ export class CalibrationHost {
                 binding,
                 draftId: input.draftId,
                 corridorConfirmed: input.corridorConfirmed,
+                safeStartOnly: input.safeStartOnly === true,
               }),
             );
             break;

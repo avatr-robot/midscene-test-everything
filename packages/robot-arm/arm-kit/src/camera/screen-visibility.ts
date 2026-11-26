@@ -17,6 +17,22 @@ import {
 
 const MAX_CONNECTED_GAP = 8;
 
+/** The two outer frames have the same checkerboard phase. */
+export function visibilityPixelResponse(
+  frames: readonly { data: Buffer }[],
+  offset: number,
+) {
+  const chroma = ({ data }: { data: Buffer }) =>
+    data[offset + 2] - data[offset];
+  const middle = chroma(frames[1]);
+  const first = chroma(frames[0]) - middle;
+  const last = chroma(frames[2]) - middle;
+  const threshold = Math.max(12, Math.abs(first - last));
+  if (first >= threshold && last >= threshold) return 1;
+  if (first <= -threshold && last <= -threshold) return -1;
+  return 0;
+}
+
 export interface VisibilityScreen {
   id: string;
   /** Full display corners in page order, in the raw camera image. */
@@ -225,6 +241,7 @@ export async function measureScreenVisibility(
     pattern?: ScreenVisibilityProbePattern;
     sharedParking?: boolean;
     retainMasks?: boolean;
+    reportPatternCenterMatch?: boolean;
   },
 ): Promise<ScreenVisibilityEvidence> {
   if (frames.length !== 3 || !screens.length)
@@ -298,21 +315,8 @@ export async function measureScreenVisibility(
           );
         return (py * width + px) * channels;
       };
-      const response = (offset: number) => {
-        // The blue tile has a greater blue-to-red difference than the other tile.
-        // Compare chroma across phases to reject brightness-only changes.
-        const blueMinusRed = decoded.map(
-          ({ data }) => data[offset + 2] - data[offset],
-        );
-        const first = blueMinusRed[0] - blueMinusRed[1];
-        const last = blueMinusRed[2] - blueMinusRed[1];
-        // The outer frames display the same color. A weaker reversal can still
-        // count if both transitions exceed the drift between those frames.
-        const threshold = Math.max(12, Math.abs(first - last));
-        if (first >= threshold && last >= threshold) return 1;
-        if (first <= -threshold && last <= -threshold) return -1;
-        return 0;
-      };
+      const response = (offset: number) =>
+        visibilityPixelResponse(decoded, offset);
       const viewportHeight = screen.layout?.height;
       const firstRow =
         screen.firstRowHeight === undefined
@@ -342,6 +346,8 @@ export async function measureScreenVisibility(
       );
       let visible = 0;
       let matchedCenters = 0;
+      let matchedPositiveCenters = 0;
+      let sampledPositiveCenters = 0;
       let sampledCenters = 0;
       const samplesPerSide = 6;
       const isCenter = (sample: number) =>
@@ -388,6 +394,10 @@ export async function measureScreenVisibility(
               if (center) {
                 sampledCenters++;
                 if (polarity === sign) matchedCenters++;
+                if (sign === 1) {
+                  sampledPositiveCenters++;
+                  if (polarity === 1) matchedPositiveCenters++;
+                }
               }
               const index = sampleRow * sampleColumns + sampleColumn;
               if (polarity === sign || (!center && polarity === -sign)) {
@@ -464,6 +474,15 @@ export async function measureScreenVisibility(
         minimumTileFraction,
         largestUnresponsiveRegion: regions.largest,
         clear,
+        ...(options?.reportPatternCenterMatch
+          ? {
+              patternCenterMatch: Math.min(
+                matchedPositiveCenters / sampledPositiveCenters,
+                (matchedCenters - matchedPositiveCenters) /
+                  (sampledCenters - sampledPositiveCenters),
+              ),
+            }
+          : {}),
       };
       if (!options?.sharedParking) return result;
 

@@ -178,6 +178,7 @@ export class AutomaticCapture {
       tool: ToolProfile;
       webToImage: number[];
       minimumTravelTipZMm?: number;
+      fixedFirstProbe?: boolean;
       directTravel?: ApplicationContext['directTravel'];
       checkpoint?: FastSamplingCheckpoint;
       onTiming?(event: string, elapsedMs: number): void;
@@ -448,6 +449,7 @@ export class AutomaticCapture {
         mode: this.mode === 'standard' ? 'standard' : 'fast-horizontal',
         collection: this.mode === 'slide' ? 'slide' : 'tap',
         horizontalConfirmed: this.mode !== 'standard',
+        fixedFirstProbe: config.fixedFirstProbe,
         onTiming: config.onTiming,
         onSlideRecovery: (recovery) => this.slideRecoveries.push(recovery),
       },
