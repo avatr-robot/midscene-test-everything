@@ -668,9 +668,18 @@ export interface InstallationTeaching {
     cameraBoundaryEnd?: CartesianPose;
   };
   cameraBoundary: { point: ScreenPoint; normal: ScreenPoint };
+  /** Two-sided keep-out derived from the calibrated screen group. */
+  cameraKeepOuts?: CameraKeepOut[];
   corridorConfirmed: true;
 }
 export type CameraImageEdge = 'top' | 'right' | 'bottom' | 'left';
+/** One camera-side half-plane the stylus tip must stay behind. */
+export interface CameraKeepOut {
+  cameraId?: string;
+  point: ScreenPoint;
+  normal: ScreenPoint;
+  source: 'taught' | 'derived-screen-group' | 'derived-camera-edge';
+}
 export interface CameraAvoidanceEstimate {
   direction: ScreenPoint;
   confidence: number;

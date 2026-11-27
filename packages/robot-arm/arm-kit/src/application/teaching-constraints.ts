@@ -63,8 +63,15 @@ export function cameraBoundaryExcessMm(
   tip: Vector3,
   teaching: InstallationTeaching,
 ) {
-  const { point, normal } = teaching.cameraBoundary;
-  return (tip.x - point.x) * normal.x + (tip.y - point.y) * normal.y;
+  const boundaries = teaching.cameraKeepOuts?.length
+    ? teaching.cameraKeepOuts
+    : [teaching.cameraBoundary];
+  return Math.max(
+    ...boundaries.map(
+      ({ point, normal }) =>
+        (tip.x - point.x) * normal.x + (tip.y - point.y) * normal.y,
+    ),
+  );
 }
 /** The reference side of the taught vertical plane is allowed. */
 export function assertCameraBoundary(
