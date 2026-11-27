@@ -469,6 +469,12 @@ export interface AssistedCalibrationState {
   cameraBoundaryPosition?: CartesianPose;
   cameraBoundaryEndPosition?: CartesianPose;
   teachingId?: string;
+  /**
+   * First-screen calibration before any installation teaching exists.
+   * The reference is captured after a supervised visual approach, and no
+   * camera-boundary half-plane is required until the screen is calibrated.
+   */
+  bootstrap?: boolean;
   stage:
     | 'positioning-boundary'
     | 'avoiding-camera'
@@ -690,6 +696,8 @@ export interface ReferenceObservationDebug {
   tipVisible?: boolean;
   viewClear?: boolean;
   visibleGapAboveTarget?: boolean;
+  /** The tip is clearly above every phone screen and can travel sideways. */
+  aboveScreens?: boolean;
   confidence?: number;
   /** Model-reported stylus tip in the overhead frame, 0–1000 image coordinates. */
   overheadTip?: { x: number; y: number };

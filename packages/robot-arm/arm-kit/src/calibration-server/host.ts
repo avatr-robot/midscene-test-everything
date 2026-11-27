@@ -13,6 +13,7 @@ import {
   phoneMarkerElements,
 } from '../calibration/phone/page.js';
 import { sameLayout } from '../calibration/phone/session.js';
+import { pageOrderedQuad } from '../calibration/screen-position.js';
 import {
   type CalibrationReferenceSource,
   CalibrationWorkflow,
@@ -74,10 +75,12 @@ export interface CalibrationHostOptions {
 
 interface ReferenceObservation {
   overhead: CameraFrame;
-  side: CameraFrame;
+  /** Absent for a tip-only observation: only the overhead camera is read. */
+  side?: CameraFrame;
   targetOutline: CameraCorrection['points'];
   centered: boolean;
   trackOverheadTip: boolean;
+  tipOnly: boolean;
   signal: AbortSignal;
 }
 
@@ -168,14 +171,8 @@ export class CalibrationHost {
     ) => Promise<Omit<ReferenceInspection, 'check'>>,
     signal: AbortSignal,
     batchSource?: () => CalibrationReferenceSource | undefined,
+    options: { bootstrap?: boolean } = {},
   ) {
-    const overheadCamera = this.options.camera;
-    if (sideCamera.camera.id === overheadCamera.camera.id)
-      throw new RobotArmError(
-        'INVALID_MAPPING',
-        'Select two distinct cameras for reference positioning.',
-        409,
-      );
     const source =
       batchSource ??
       (() => {
@@ -196,6 +193,76 @@ export class CalibrationHost {
           heightMm: screen.physicalHeightMm,
         };
       });
+    return this.runReferencePositioning(
+      id,
+      sideCamera,
+      verifySide,
+      signal,
+      source,
+      Boolean(batchSource),
+      options.bootstrap === true,
+    );
+  }
+  /**
+   * First-screen bootstrap: the target outline comes from the live camera
+   * correction, not from a saved calibration or teaching. The workflow lifts
+   * from the visible start and servos to the outline before recording the
+   * reference.
+   */
+  locateBootstrapReference(
+    id: string,
+    sideCamera: CameraSession,
+    verifySide: (
+      observation: ReferenceObservation,
+    ) => Promise<Omit<ReferenceInspection, 'check'>>,
+    signal: AbortSignal,
+  ) {
+    const overheadCamera = this.options.camera;
+    const source = () => {
+      const correction = overheadCamera.getCorrection();
+      if (!correction) return undefined;
+      return {
+        key: semanticJson({
+          cameraId: overheadCamera.camera.id,
+          correction,
+        }),
+        startPositions: [],
+        outline: pageOrderedQuad(correction.points, correction.rotation).map(
+          ({ x, y }) => ({
+            x: (1000 * x) / correction.sourceWidth,
+            y: (1000 * y) / correction.sourceHeight,
+          }),
+        ),
+      };
+    };
+    return this.runReferencePositioning(
+      id,
+      sideCamera,
+      verifySide,
+      signal,
+      source,
+      false,
+      true,
+    );
+  }
+  private runReferencePositioning(
+    id: string,
+    sideCamera: CameraSession,
+    verifySide: (
+      observation: ReferenceObservation,
+    ) => Promise<Omit<ReferenceInspection, 'check'>>,
+    signal: AbortSignal,
+    source: () => CalibrationReferenceSource | undefined,
+    batch: boolean,
+    bootstrap: boolean,
+  ) {
+    const overheadCamera = this.options.camera;
+    if (sideCamera.camera.id === overheadCamera.camera.id)
+      throw new RobotArmError(
+        'INVALID_MAPPING',
+        'Select two distinct cameras for reference positioning.',
+        409,
+      );
     const checkCameras = () => {
       for (const camera of [overheadCamera, sideCamera]) {
         const status = camera.stream.getInfo();
@@ -214,19 +281,24 @@ export class CalibrationHost {
     return this.service.locateReference(
       id,
       source,
-      async (mapping, centered, observationSignal) => {
-        await delay(250, undefined, { signal: observationSignal });
+      async (mapping, centered, observationSignal, tipOnly = false) => {
+        const captureStarted = performance.now();
         const startedAt = Date.now();
-        const [overhead, side] = await Promise.all(
-          [overheadCamera, sideCamera].map(({ stream }) =>
-            stream.getFrame({ fresh: true, timeoutMs: 3_000 }),
-          ),
-        );
+        const [overhead, side] = await Promise.all([
+          overheadCamera.stream.getFrame({ fresh: true, timeoutMs: 3_000 }),
+          tipOnly
+            ? Promise.resolve(undefined)
+            : sideCamera.stream.getFrame({ fresh: true, timeoutMs: 3_000 }),
+        ]);
         observationSignal.throwIfAborted();
+        const stale = side
+          ? Math.min(overhead.capturedAt, side.capturedAt) < startedAt
+          : overhead.capturedAt < startedAt;
         if (
-          Math.min(overhead.capturedAt, side.capturedAt) < startedAt ||
-          Math.abs(overhead.capturedAt - side.capturedAt) >
-            REFERENCE_FRAME_MAX_SKEW_MS
+          stale ||
+          (side &&
+            Math.abs(overhead.capturedAt - side.capturedAt) >
+              REFERENCE_FRAME_MAX_SKEW_MS)
         )
           throw new RobotArmError(
             'VISION_UNAVAILABLE',
@@ -267,14 +339,18 @@ export class CalibrationHost {
             );
         }
         observationSignal.throwIfAborted();
+        const captureMs = performance.now() - captureStarted;
+        const verifyStarted = performance.now();
         const observed = await verifySide({
           overhead,
           side,
           targetOutline: correction.points,
           centered,
           trackOverheadTip,
+          tipOnly,
           signal: observationSignal,
         });
+        const verifyMs = performance.now() - verifyStarted;
         observationSignal.throwIfAborted();
         const checkObservation = () => {
           checkCameras();
@@ -286,10 +362,15 @@ export class CalibrationHost {
             );
         };
         checkObservation();
-        return { ...observed, check: checkObservation };
+        return {
+          ...observed,
+          timing: { captureMs, verifyMs },
+          check: checkObservation,
+        };
       },
       signal,
-      Boolean(batchSource),
+      batch,
+      { bootstrap },
     );
   }
   private reference?: {

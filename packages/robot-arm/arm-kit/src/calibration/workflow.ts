@@ -67,7 +67,10 @@ import {
   moveToTaughtPosition,
 } from './taught-position.js';
 import { assertSafeObservation } from './verification/safe-position.js';
-import { findVisualReference } from './visual-reference.js';
+import {
+  type VisualReferenceStep,
+  findVisualReference,
+} from './visual-reference.js';
 
 const log = getDebug('robot-arm:web-calibration', { console: true });
 const debug = getDebug('robot-arm:web-calibration');
@@ -90,6 +93,17 @@ const recoverableSamplingErrors = new Set([
 const SAMPLING_RECOVERY_MS = 15_000;
 const REFERENCE_POSITION_TOLERANCE_MM = 0.5;
 const REFERENCE_ORIENTATION_TOLERANCE_RAD = (0.5 * Math.PI) / 180;
+/**
+ * First-screen bootstrap asks the eye-level model whether the tip is already
+ * above the screens. It lifts in small steps only when the model says no, so
+ * the fixed 40 mm lift is gone.
+ */
+const BOOTSTRAP_LIFT_STEP_MM = 10;
+const BOOTSTRAP_MAX_LIFT_MM = 60;
+/** Throwaway vertical round trip that absorbs a swallowed first command. */
+const BOOTSTRAP_WAKE_MM = 1;
+/** Waits between warm-up attempts: the adapter reconnects in 0.5–5 s. */
+const WARM_UP_RETRY_DELAYS_MS = [2_500, 5_000] as const;
 
 type Fit = Pick<
   CalibrationProfile,
@@ -143,10 +157,21 @@ export type CalibrationReferenceSource = {
   | { outline: readonly WebPoint[] }
 );
 
+/** Wall-clock split of one reference observation, filled in by the camera host. */
+export interface ReferenceObservationTiming {
+  /** Both fresh frames, the marker check and the drift comparison. */
+  captureMs: number;
+  /** The eye-level verification callback, which owns the model request. */
+  verifyMs: number;
+}
+
 export interface ReferenceInspection {
   check(): void;
   overheadTip?: WebPoint;
   hovering?: boolean;
+  /** The eye-level view sees the tip clear above every screen. */
+  aboveScreens?: boolean;
+  timing?: ReferenceObservationTiming;
 }
 
 /** Coordinates an explicit calibration task; setup and phone requests have independent lifetimes. */
@@ -2194,6 +2219,7 @@ export class CalibrationWorkflow {
     this.runtime.assertStopRevision(stopRevision);
     const input = this.input!;
     if (
+      s.bootstrap !== true &&
       this.runtime.profileStore.getTool(input.toolProfileId).contactFrame ===
         'flange' &&
       (!s.teachingId ||
@@ -2987,6 +3013,65 @@ export class CalibrationWorkflow {
     );
   }
 
+  /**
+   * Reference positioning is one model round trip per search step. Log the
+   * split per search, and the steps themselves, so a slow first screen can be
+   * attributed to the model, the frames or the motion without a re-run.
+   */
+  private logReferenceTiming(
+    attemptId: string,
+    bootstrap: boolean,
+    reading: {
+      totalMs: number;
+      markerWaitMs: number;
+      timing: ReadonlyMap<string, { count: number; ms: number }>;
+      steps: readonly VisualReferenceStep[];
+      /** Set when the search threw; a slow failure and a slow success differ. */
+      failure?: { code: string; message: string };
+    },
+  ) {
+    if (!reading.timing.size && !reading.steps.length) return;
+    const servo = (kind: VisualReferenceStep['kind']) =>
+      reading.steps.filter((step) => step.kind === kind);
+    const sum = (
+      steps: readonly VisualReferenceStep[],
+      pick: 'moveMs' | 'observeMs',
+    ) => Math.round(steps.reduce((total, step) => total + step[pick], 0));
+    debug(
+      `Reference positioning timing ${JSON.stringify({
+        attemptId,
+        deviceId: this.options.deviceId,
+        bootstrap,
+        ok: !reading.failure,
+        ...(reading.failure
+          ? { failure: `${reading.failure.code}: ${reading.failure.message}` }
+          : {}),
+        totalMs: Math.round(reading.totalMs),
+        markerWaitMs: Math.round(reading.markerWaitMs),
+        timing: Object.fromEntries(
+          [...reading.timing].map(([event, entry]) => [
+            event,
+            { count: entry.count, ms: Math.round(entry.ms) },
+          ]),
+        ),
+        servo: {
+          steps: reading.steps.length,
+          probeSteps: servo('probe-x').length + servo('probe-y').length,
+          servoSteps: servo('servo').length,
+          moveMs: sum(reading.steps, 'moveMs'),
+          observeMs: sum(reading.steps, 'observeMs'),
+        },
+        steps: reading.steps.map((step) => ({
+          index: step.index,
+          kind: step.kind,
+          moveMs: step.moveMs,
+          observeMs: step.observeMs,
+          error: step.error,
+        })),
+      })}`,
+    );
+  }
+
   private fitMeasurements() {
     const s = this.state!;
     const input = this.input!;
@@ -3319,10 +3404,14 @@ export class CalibrationWorkflow {
       mapping: WebCalibrationMapping,
       centered: boolean,
       signal: AbortSignal,
+      /** Only the overhead tip is needed; the eye-level view is skipped. */
+      tipOnly?: boolean,
     ) => Promise<ReferenceInspection>,
     signal: AbortSignal,
     batch = false,
+    options: { bootstrap?: boolean } = {},
   ) {
+    const bootstrap = options.bootstrap === true;
     const s = this.require(id);
     if (
       s.stage !== 'ready' ||
@@ -3343,12 +3432,19 @@ export class CalibrationWorkflow {
     const tool = store.getTool(input.toolProfileId);
     const teaching = store.installationTeaching(input);
     const saved = source();
-    if (!saved || !teaching?.corridorConfirmed || s.teachingId !== teaching.id)
+    if (
+      !saved ||
+      (bootstrap
+        ? !('outline' in saved)
+        : !teaching?.corridorConfirmed || s.teachingId !== teaching.id)
+    )
       throw new RobotArmError(
         'CALIBRATION_INVALID',
-        batch
-          ? 'Automatic reference positioning requires a valid screen target and saved installation safety settings.'
-          : 'Automatic reference positioning requires current screen calibration and saved installation teaching.',
+        bootstrap
+          ? 'First-screen calibration needs the mapped screen outline.'
+          : batch
+            ? 'Automatic reference positioning requires a valid screen target and saved installation safety settings.'
+            : 'Automatic reference positioning requires current screen calibration and saved installation teaching.',
         409,
       );
 
@@ -3356,11 +3452,12 @@ export class CalibrationWorkflow {
       'centerContact' in saved
         ? contactPoint(saved.centerContact, tool.offsetMm)
         : undefined;
-    const floor = contactPoint(teaching.referencePose, tool.offsetMm).z;
-    const travelHeight = Math.max(
-      floor,
-      knownScreenTravelHeight(store.list(), input),
-    );
+    const floor = teaching
+      ? contactPoint(teaching.referencePose, tool.offsetMm).z
+      : Number.NEGATIVE_INFINITY;
+    const travelHeight = teaching
+      ? Math.max(floor, knownScreenTravelHeight(store.list(), input))
+      : Number.NEGATIVE_INFINITY;
     let target: CartesianPose | undefined;
     if (center && 'centerContact' in saved) {
       const clearance = Math.max(
@@ -3377,7 +3474,7 @@ export class CalibrationWorkflow {
         clearance > 50 - REFERENCE_POSITION_TOLERANCE_MM ||
         !insideTaughtTravelSpace(
           contactPoint(target, tool.offsetMm),
-          teaching,
+          teaching!,
           travelHeight,
         )
       )
@@ -3401,7 +3498,7 @@ export class CalibrationWorkflow {
       this.runtime.assertStopRevision(stopRevision);
       if (
         source()?.key !== saved.key ||
-        store.installationTeaching(input)?.id !== teaching.id
+        (!bootstrap && store.installationTeaching(input)?.id !== teaching?.id)
       )
         throw new RobotArmError(
           'CALIBRATION_INVALID',
@@ -3420,6 +3517,21 @@ export class CalibrationWorkflow {
     this.beginAction();
     let markerRequest: string | undefined;
     let aligned = this.aligned;
+    /*
+     * One search is a fixed cost paid mostly in model round trips. Keep the
+     * split per search so a speed change can be read off one normal run.
+     */
+    const referenceStarted = performance.now();
+    const referenceTiming = new Map<string, { count: number; ms: number }>();
+    const referenceSteps: VisualReferenceStep[] = [];
+    let markerWaitMs = 0;
+    let referenceFailure: { code: string; message: string } | undefined;
+    const timeReference = (event: string, ms: number) => {
+      const entry = referenceTiming.get(event) ?? { count: 0, ms: 0 };
+      entry.count += 1;
+      entry.ms += ms;
+      referenceTiming.set(event, entry);
+    };
     try {
       const mapping = await this.configuration.assertCurrent();
       check();
@@ -3456,13 +3568,20 @@ export class CalibrationWorkflow {
               409,
             );
         };
-        const inspect = async (centered: boolean) => {
+        const inspect = async (centered: boolean, tipOnly = false) => {
           assertMarkers();
+          const started = performance.now();
           const inspection = await observe(
             mapping,
             centered,
             observationSignal,
+            tipOnly,
           );
+          timeReference('observe', performance.now() - started);
+          if (inspection.timing) {
+            timeReference('capture', inspection.timing.captureMs);
+            timeReference('verify', inspection.timing.verifyMs);
+          }
           checkCameras = inspection.check;
           assertMarkers();
           return inspection;
@@ -3471,58 +3590,240 @@ export class CalibrationWorkflow {
           input.toolProfileId,
         );
         guard();
+        const workspace = store.getRobot(input.robotProfileId).workspace;
         const alreadyCentered = Boolean(target && near(start, target));
-        const minimumReferenceZ =
-          'outline' in saved
+        const minimumReferenceZ = bootstrap
+          ? Number.NEGATIVE_INFINITY
+          : 'outline' in saved
             ? travelHeight - REFERENCE_POSITION_TOLERANCE_MM
             : floor - REFERENCE_POSITION_TOLERANCE_MM;
         if (
-          !insideTaughtTravelSpace(
-            contactPoint(start, tool.offsetMm),
-            teaching,
-            minimumReferenceZ,
-          ) ||
-          (!alreadyCentered &&
-            !saved.startPositions.some((pose) => near(start, pose)))
+          (workspace && !within(start.positionMm, workspace)) ||
+          (!bootstrap &&
+            (!insideTaughtTravelSpace(
+              contactPoint(start, tool.offsetMm),
+              teaching!,
+              minimumReferenceZ,
+            ) ||
+              (!alreadyCentered &&
+                !saved.startPositions.some((pose) => near(start, pose)))))
         )
           throw new RobotArmError(
             'NOT_READY',
-            batch
-              ? 'Start at the installation safe start or a verified batch position.'
-              : 'Start at the selected screen’s saved Safe Position.',
+            bootstrap
+              ? 'Start the first-screen calibration inside the robot workspace.'
+              : batch
+                ? 'Start at the installation safe start or a verified batch position.'
+                : 'Start at the selected screen’s saved Safe Position.',
             409,
           );
         const deadline = Date.now() + 8_000;
+        const markerWaitStarted = performance.now();
         while (!this.markerObservation(request) && Date.now() < deadline) {
           guard();
           await delay(80, undefined, { signal: observationSignal });
         }
+        markerWaitMs = performance.now() - markerWaitStarted;
+        /*
+         * The visual servo still uses short steps, but 5% moves can outlive a
+         * short screen motion-confirmation timeout. 10% keeps every step well
+         * inside the controller window while remaining gentle near the glass.
+         */
         const motion = {
-          actionSpeed: { kind: 'ratio' as const, value: 0.05 },
-          actionAcceleration: { kind: 'ratio' as const, value: 0.05 },
+          actionSpeed: { kind: 'ratio' as const, value: 0.1 },
+          actionAcceleration: { kind: 'ratio' as const, value: 0.1 },
         };
         const move: AutomaticCaptureHost['move'] = (pose, options) =>
           host.move(pose, {
             ...options,
+            /*
+             * The stalled-approach protection keys off referenceTravel: the
+             * adapter detects a submitted move that never starts and the
+             * runtime retries it once after a controlled stop. Keep the same
+             * evidence on the visual-search steps, not just the taught route.
+             */
+            referenceTravel: options?.referenceTravel ?? {
+              attemptId: s.id,
+              direction: 'approach',
+              leg: 'direct',
+            },
             beforeSubmit: () => {
               assertMarkers();
               checkCameras?.();
             },
             maximumPositionErrorMm: REFERENCE_POSITION_TOLERANCE_MM,
           });
+        let searchStart = start;
+        let bootstrapView: ReferenceInspection | undefined;
+        /** The last full reading already showed the tip hovering. */
+        let bootstrapHover = false;
+        if (bootstrap) {
+          /*
+           * The first command after the phone page settles can be swallowed by
+           * the controller; the stalled-approach protection then stops and
+           * retries it. Absorb that once with a throwaway vertical round trip at
+           * travel height, before an observation is spent on that pose.
+           */
+          const wakeMotion = {
+            actionSpeed: { kind: 'ratio' as const, value: 0.2 },
+            actionAcceleration: { kind: 'ratio' as const, value: 0.2 },
+          };
+          const wakeOptions = {
+            speed: wakeMotion.actionSpeed,
+            acceleration: wakeMotion.actionAcceleration,
+          };
+          const warmUp = async (from: CartesianPose) => {
+            const up = {
+              ...from,
+              positionMm: {
+                ...from.positionMm,
+                z: from.positionMm.z + BOOTSTRAP_WAKE_MM,
+              },
+            };
+            assertMarkers();
+            await host.preflight([up], wakeOptions);
+            await move(up, {
+              ...wakeOptions,
+              referenceTravel: {
+                attemptId: s.id,
+                direction: 'approach',
+                leg: 'lift',
+              },
+            });
+            await move(from, {
+              ...wakeOptions,
+              referenceTravel: {
+                attemptId: s.id,
+                direction: 'approach',
+                leg: 'lift',
+              },
+            });
+          };
+          /*
+           * A session's first command can be acknowledged without the arm
+           * moving; the adapter then drops both command channels and reconnects
+           * within a couple of seconds. Retry across that reconnect instead of
+           * continuing on a dead channel, where the next command fails as
+           * "belongs to an isolated channel" only after a timeout.
+           */
+          let warmed = false;
+          let wakeFailure: unknown;
+          for (const [attempt, pauseMs] of [
+            0,
+            ...WARM_UP_RETRY_DELAYS_MS,
+          ].entries()) {
+            if (pauseMs) await delay(pauseMs, undefined, { signal });
+            try {
+              // Re-read the pose: a failed attempt may have left the arm
+              // slightly off, and a repeated target would be deduplicated.
+              if (attempt > 0)
+                searchStart = await this.runtime.assertCalibrationMotionReady(
+                  input.toolProfileId,
+                );
+              await warmUp(searchStart);
+              warmed = true;
+              break;
+            } catch (error) {
+              wakeFailure = error;
+              log(
+                `Reference warm-up attempt ${attempt + 1} failed:`,
+                errorText(error),
+              );
+              // Only a lost or stalled channel is worth retrying.
+              if (!(error instanceof RobotArmError)) throw error;
+              if (
+                ![
+                  'CALIBRATION_MOTION_NOT_STARTED',
+                  'MOTION_INTERRUPTED',
+                  'QUERY_INTERRUPTED',
+                  'DISCONNECTED',
+                ].includes(error.code)
+              )
+                throw error;
+            }
+          }
+          if (!warmed)
+            throw new RobotArmError(
+              'NOT_READY',
+              'The first motion command was acknowledged but the arm did not move, and it still does not respond. Reconnect the robot arm, confirm it is idle, then retry this screen.',
+              409,
+              { warmUp: errorText(wakeFailure).slice(0, 300) },
+            );
+          searchStart = await this.runtime.assertCalibrationMotionReady(
+            input.toolProfileId,
+          );
+          /*
+           * The eye-level model decides whether the tip is already clear of
+           * every screen. Only lift when it says no, in small steps, and stop
+           * as soon as it confirms. This replaces the fixed 40 mm lift.
+           */
+          const liftMotion = {
+            actionSpeed: { kind: 'ratio' as const, value: 0.2 },
+            actionAcceleration: { kind: 'ratio' as const, value: 0.2 },
+          };
+          let liftedMm = 0;
+          for (;;) {
+            const view = await inspect(false);
+            bootstrapView = view;
+            if (view.aboveScreens === true) break;
+            if (liftedMm >= BOOTSTRAP_MAX_LIFT_MM)
+              throw new RobotArmError(
+                'VISION_UNAVAILABLE',
+                'The eye-level model could not confirm the tip above the screens. Move the tip above the screens and retry.',
+                409,
+              );
+            const lifted = {
+              ...searchStart,
+              positionMm: {
+                ...searchStart.positionMm,
+                z: searchStart.positionMm.z + BOOTSTRAP_LIFT_STEP_MM,
+              },
+            };
+            if (workspace && !within(lifted.positionMm, workspace))
+              throw new RobotArmError(
+                'NOT_READY',
+                'The visible start leaves no room to lift clear of the screens.',
+                409,
+              );
+            const options = {
+              speed: liftMotion.actionSpeed,
+              acceleration: liftMotion.actionAcceleration,
+            };
+            assertMarkers();
+            await host.preflight([lifted], options);
+            const actual = await move(lifted, {
+              ...options,
+              referenceTravel: {
+                attemptId: s.id,
+                direction: 'approach',
+                leg: 'lift',
+              },
+            });
+            if (!actual)
+              throw new RobotArmError(
+                'NOT_READY',
+                'The robot did not settle after lifting from the visible start.',
+                409,
+              );
+            searchStart = actual;
+            liftedMm += BOOTSTRAP_LIFT_STEP_MM;
+          }
+        }
         let expected = target;
         if ('outline' in saved) {
-          const workspace = store.getRobot(input.robotProfileId).workspace;
           expected = await findVisualReference({
-            start,
+            start: searchStart,
             outline: saved.outline,
+            initialTip: bootstrapView?.overheadTip,
+            onStep: (step) => referenceSteps.push(step),
             canMove: (pose) =>
               (!workspace || within(pose.positionMm, workspace)) &&
-              insideTaughtTravelSpace(
-                contactPoint(pose, tool.offsetMm),
-                teaching,
-                minimumReferenceZ,
-              ),
+              (bootstrap ||
+                insideTaughtTravelSpace(
+                  contactPoint(pose, tool.offsetMm),
+                  teaching!,
+                  minimumReferenceZ,
+                )),
             observe: async () => {
               const view = await inspect(false);
               if (!view.overheadTip)
@@ -3531,10 +3832,25 @@ export class CalibrationWorkflow {
                   'The model could not locate the stylus tip in the overhead image.',
                   409,
                 );
+              bootstrapHover = view.hovering === true;
               return {
                 tip: view.overheadTip,
                 hovering: view.hovering === true,
               };
+            },
+            /*
+             * Travel steps only need the tip, so they skip the eye-level frame
+             * and its checks. `observe` still decides that the tip is hovering.
+             */
+            observeTip: async () => {
+              const view = await inspect(false, true);
+              if (!view.overheadTip)
+                throw new RobotArmError(
+                  'VISION_UNAVAILABLE',
+                  'The model could not locate the stylus tip in the overhead image.',
+                  409,
+                );
+              return { tip: view.overheadTip, hovering: false };
             },
             move: async (pose, from) => {
               const options = {
@@ -3585,7 +3901,7 @@ export class CalibrationWorkflow {
                   return actual;
                 },
               },
-              teaching,
+              teaching!,
               tool,
               target,
               motion,
@@ -3604,17 +3920,23 @@ export class CalibrationWorkflow {
           (center &&
             (Math.hypot(actualTip.x - center.x, actualTip.y - center.y) > 1 ||
               actualTip.z - center.z > 50)) ||
-          !insideTaughtTravelSpace(
-            actualTip,
-            teaching,
-            center ? travelHeight : minimumReferenceZ,
-          )
+          (!bootstrap &&
+            !insideTaughtTravelSpace(
+              actualTip,
+              teaching!,
+              center ? travelHeight : minimumReferenceZ,
+            ))
         )
           throw new RobotArmError(
             'NOT_READY',
             'The robot did not settle at the screen reference.',
             409,
           );
+        if (bootstrap && !bootstrapHover) {
+          // The servo's last reading already confirmed the eye-level gap; only
+          // pay for a separate check when the search did not end on one.
+          await inspect(true);
+        }
         return actual;
       });
       signal.addEventListener('abort', cancel, { once: true });
@@ -3622,13 +3944,28 @@ export class CalibrationWorkflow {
       const actual = await task;
       check();
       s.referencePosition = actual;
+      s.bootstrap = bootstrap || undefined;
       this.fixedFirstProbe = 'outline' in saved;
       aligned = true;
+    } catch (error) {
+      referenceFailure = {
+        code:
+          error instanceof RobotArmError ? error.code : 'UNEXPECTED_FAILURE',
+        message: errorText(error).slice(0, 300),
+      };
+      throw error;
     } finally {
       signal.removeEventListener('abort', cancel);
       this.captureOperationId = undefined;
       if (s.stage === 'locating-reference') s.stage = 'ready';
       if (markerRequest) this.finishMarkerDisplay(markerRequest, aligned);
+      this.logReferenceTiming(s.id, bootstrap, {
+        totalMs: performance.now() - referenceStarted,
+        markerWaitMs,
+        timing: referenceTiming,
+        steps: referenceSteps,
+        failure: referenceFailure,
+      });
       this.endAction();
       this.changed();
     }
