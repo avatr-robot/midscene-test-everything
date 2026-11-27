@@ -64,7 +64,6 @@ import {
 import { ExplorationQualitySummary } from './components/robot-arm/CalibrationQualityWarnings';
 import { CameraMappingStep } from './components/robot-arm/CameraMappingStep';
 import { ExplorationProgress } from './components/robot-arm/ExplorationProgress';
-import { InstallationTeaching } from './components/robot-arm/InstallationTeaching';
 import { PhoneConnectDialog } from './components/robot-arm/PhoneConnectDialog';
 import {
   ReferenceModelReading,
@@ -133,21 +132,19 @@ interface SingleStatus {
   error?: string;
 }
 
-/** The original camera → teaching → calibration flow inside the host's wizard. */
+/** The camera mapping → screen calibration flow inside the host's wizard. */
 export function GuidedCalibrationWorkspace({
   id,
   cameraId,
   onClose,
   onScreenChange,
   initialStep = 0,
-  reviewInstallationOnOpen = false,
 }: {
   id: string;
   cameraId: string;
   onClose(screenId?: string): void;
   onScreenChange?(id: string): void;
   initialStep?: 0 | 1;
-  reviewInstallationOnOpen?: boolean;
 }) {
   const theme = useArmTheme();
   return (
@@ -160,7 +157,6 @@ export function GuidedCalibrationWorkspace({
             onClose={onClose}
             onScreenChange={onScreenChange}
             initialStep={initialStep}
-            reviewInstallationOnOpen={reviewInstallationOnOpen}
           />
         </CalibrationLanguageProvider>
       </App>
@@ -173,14 +169,12 @@ function GuidedContent({
   onClose,
   onScreenChange,
   initialStep,
-  reviewInstallationOnOpen,
 }: {
   id: string;
   cameraId: string;
   onClose(screenId?: string): void;
   onScreenChange?(id: string): void;
   initialStep: 0 | 1;
-  reviewInstallationOnOpen: boolean;
 }) {
   const language = useLanguage();
   const { message } = App.useApp();
@@ -216,8 +210,6 @@ function GuidedContent({
   const [loadError, setLoadError] = useState<string>();
   const [imagingSwitchError, setImagingSwitchError] = useState<string>();
   const [closing, setClosing] = useState(false);
-  const [illustrationContainer, setIllustrationContainer] =
-    useState<HTMLDivElement | null>(null);
   const [footer, setFooter] = useState<HTMLDivElement | null>(null);
   const [phonesOpen, setPhonesOpen] = useState(false);
   const [claimedBeforePairing, setClaimedBeforePairing] =
@@ -518,7 +510,7 @@ function GuidedContent({
             resumeCalibration.current = screenId;
           setStep(1);
         } else {
-          setStep(next.installationTaught && !reviewInstallationOnOpen ? 3 : 2);
+          setStep(3);
         }
       }
       if (running.status === 'fulfilled') setBatch(running.value);
@@ -539,26 +531,19 @@ function GuidedContent({
       if (
         busy ||
         inBatch ||
-        (completed &&
-          openingScreen &&
-          initialStep !== 1 &&
-          next.correction &&
-          next.installationTaught &&
-          !reviewInstallationOnOpen)
+        (completed && openingScreen && initialStep !== 1 && next.correction)
       )
         setStep(3);
       else if (
         currentStep.current === 3 &&
-        (!next.correction ||
-          !next.installationTaught ||
-          (!completed && next.mappingReady === false))
+        (!next.correction || (!completed && next.mappingReady === false))
       ) {
         if (!next.correction || next.mappingReady === false) {
           if (next.correction && next.perspectiveValidity?.state !== 'invalid')
             resumeCalibration.current = screenId;
           setStep(1);
         } else {
-          setStep(2);
+          setStep(1);
         }
       }
       setSingleFailure(
@@ -568,13 +553,7 @@ function GuidedContent({
           : undefined,
       );
     },
-    [
-      batchClient,
-      cameraId,
-      initialStep,
-      reviewInstallationOnOpen,
-      selectScreen,
-    ],
+    [batchClient, cameraId, initialStep, selectScreen],
   );
   const refresh = useCallback(
     (signal = AbortSignal.timeout(15000)) => refreshScreen(selectedId, signal),
@@ -902,7 +881,7 @@ function GuidedContent({
         {
           id: screen.id,
           name: screen.name,
-          active: screen.id === selectedId,
+          active: screen.id === activeId,
           correction: {
             sourceWidth,
             sourceHeight,
@@ -1256,7 +1235,7 @@ function GuidedContent({
     if (config.mappingReady) {
       if (associatingScreens) return;
       resumeCalibration.current = undefined;
-      setStep(config.installationTaught && !reviewInstallationOnOpen ? 3 : 2);
+      setStep(3);
       return;
     }
     if (!phoneFullscreen || restoringMapping.current === base) return;
@@ -1274,7 +1253,6 @@ function GuidedContent({
       });
   }, [
     step,
-    reviewInstallationOnOpen,
     markerOpen,
     perspectiveEditor,
     batchActive,
@@ -1404,10 +1382,6 @@ function GuidedContent({
   ]);
   const startSingle = useCallback(async () => {
     if (startingSingle.current || !hasCorrection || logoDrawingBusy) return;
-    if (!config?.installationTaught) {
-      setStep(2);
-      return;
-    }
     const opening = markerRequest<SingleStatus>(`${base}/start`, {});
     startingSingle.current = opening;
     ++refreshSequence.current;
@@ -1423,14 +1397,7 @@ function GuidedContent({
       startingSingle.current = undefined;
     }
     await refresh();
-  }, [
-    base,
-    config?.installationTaught,
-    hasCorrection,
-    logoDrawingBusy,
-    refresh,
-    selectedId,
-  ]);
+  }, [base, hasCorrection, logoDrawingBusy, refresh, selectedId]);
   const soleScreen =
     savedScreens.length === 1 && savedScreens[0].id === selectedId;
   useEffect(() => {
@@ -1448,7 +1415,6 @@ function GuidedContent({
       batchActive ||
       closing ||
       !config?.ready ||
-      !config.installationTaught ||
       outlineBlocked
     )
       return;
@@ -1469,7 +1435,6 @@ function GuidedContent({
     batchActive,
     closing,
     config?.ready,
-    config?.installationTaught,
     outlineBlocked,
     lease,
     startSingle,
@@ -1503,11 +1468,10 @@ function GuidedContent({
       }}
     />
   );
-  const titles = [
-    'Touch Tool',
-    'Camera Mapping',
-    'Teach Installation',
-    'Screen Calibration',
+  const navigationSteps = [
+    { title: 'Touch Tool', step: 0 },
+    { title: 'Camera Mapping', step: 1 },
+    { title: 'Screen Calibration', step: 3 },
   ];
   const canVisit = (next: number) =>
     !batchActive &&
@@ -1517,8 +1481,7 @@ function GuidedContent({
     !config?.armState?.state.dragMode &&
     (next === 0 || Boolean(config?.input)) &&
     (next < 2 || Boolean(config?.correction && controller.setup.mapping)) &&
-    (next < 2 || (!outlineBlocked && !associatingScreens)) &&
-    (next < 3 || Boolean(config?.installationTaught));
+    (next < 2 || (!outlineBlocked && !associatingScreens));
   const screenOptions = step === 1 ? knownScreens : savedScreens;
   const showScreenPicker = shouldShowScreenPicker({
     step,
@@ -1612,7 +1575,6 @@ function GuidedContent({
         closing ||
         !config?.ready ||
         !hasCorrection ||
-        !config.installationTaught ||
         outlineBlocked ||
         controller.busy ||
         singleBusy ||
@@ -1624,11 +1586,7 @@ function GuidedContent({
     </Button>
   );
   const singleActionDisabled =
-    logoDrawingBusy ||
-    !config?.ready ||
-    !hasCorrection ||
-    !config.installationTaught ||
-    singleQueued;
+    logoDrawingBusy || !config?.ready || !hasCorrection || singleQueued;
   const singleActionLabel = t('Calibrate {0}', [selected?.name ?? selectedId]);
   const openSingleCalibration = () => {
     if (outlineBlocked || !controller.setup.mapping)
@@ -1646,19 +1604,19 @@ function GuidedContent({
             {...(switching ? { inert: '' } : {})}
           >
             <ol className="guided-steps">
-              {titles.map((title, index) => (
+              {navigationSteps.map(({ title, step: target }, position) => (
                 <li key={title}>
                   <button
                     type="button"
-                    aria-current={index === step ? 'step' : undefined}
-                    disabled={!canVisit(index)}
+                    aria-current={target === step ? 'step' : undefined}
+                    disabled={!canVisit(target)}
                     onClick={() => {
                       resumeCalibration.current = undefined;
-                      setStep(index);
-                      if (index === 1) setMarkerOpen(false);
+                      setStep(target);
+                      if (target === 1) setMarkerOpen(false);
                     }}
                   >
-                    <span aria-hidden="true">{index + 1}</span>
+                    <span aria-hidden="true">{position + 1}</span>
                     {t(title)}
                   </button>
                 </li>
@@ -1666,8 +1624,6 @@ function GuidedContent({
             </ol>
           </nav>
           <Space className="guided-toolbar-actions">
-            {/* Step 2 has its own phone-page entry in the checklist; later
-                steps still need this toolbar shortcut. */}
             {step > 1 && (
               <Button disabled={switching} onClick={() => setPhonesOpen(true)}>
                 {t('View Phone Page')}
@@ -1747,9 +1703,11 @@ function GuidedContent({
               <Select
                 aria-label={t('Calibration Screen')}
                 value={
-                  screenOptions.some((screen) => screen.id === requestedId)
-                    ? requestedId
-                    : undefined
+                  batchRunning && current
+                    ? current.deviceId
+                    : screenOptions.some((screen) => screen.id === requestedId)
+                      ? requestedId
+                      : undefined
                 }
                 options={screenOptions.map(({ id, name }) => ({
                   value: id,
@@ -1758,6 +1716,7 @@ function GuidedContent({
                 placeholder={t('Select a screen for calibration')}
                 loading={switching || (!config && !loadError)}
                 disabled={
+                  batchRunning ||
                   closing ||
                   singleBusy ||
                   logoDrawingBusy ||
@@ -1794,6 +1753,7 @@ function GuidedContent({
                   ref={batchPanel}
                   api={batchClient}
                   cameraId={cameraId}
+                  firstScreenId={selectedId}
                   screens={states}
                   drawLogo={drawLogo}
                   debugDrawing={debugDrawing}
@@ -1801,7 +1761,6 @@ function GuidedContent({
                     closing ||
                     !config?.ready ||
                     !hasCorrection ||
-                    !config.installationTaught ||
                     outlineBlocked ||
                     controller.busy ||
                     singleBusy ||
@@ -1999,71 +1958,10 @@ function GuidedContent({
                         await refresh();
                       }}
                       onClear={clearCorrection}
-                      onContinue={() =>
-                        setStep(
-                          !config.input
-                            ? 0
-                            : config.installationTaught &&
-                                !reviewInstallationOnOpen
-                              ? 3
-                              : 2,
-                        )
-                      }
+                      onContinue={() => setStep(!config.input ? 0 : 3)}
                       refresh={refresh}
                     />
                   ))}
-                {step === 2 && teaching && (
-                  <>
-                    <Space wrap>
-                      {config.installationTaught && (
-                        <Button onClick={() => setStep(3)}>
-                          {t(
-                            reviewInstallationOnOpen
-                              ? 'Use Saved Teaching'
-                              : 'Next Step',
-                          )}
-                        </Button>
-                      )}
-                      {powerControl}
-                    </Space>
-                    <InstallationTeaching
-                      illustrationContainer={illustrationContainer}
-                      api={teaching}
-                      binding={teaching.binding}
-                      screenName={selected?.name}
-                      safeStartOnly={multipleScreens}
-                      disabled={
-                        Boolean(config.armState?.state.moving) || outlineBlocked
-                      }
-                      footer={footer}
-                      externalPreview
-                      boundaryPreviewAvailable={Boolean(
-                        config.previewPositions?.cameraBoundaryLine,
-                      )}
-                      onPointRecorded={() => {
-                        void refresh().catch((cause) => {
-                          if (requestedScreen.current === selectedId)
-                            setLoadError(
-                              cause instanceof Error
-                                ? cause.message
-                                : String(cause),
-                            );
-                        });
-                      }}
-                      onSaved={() => {
-                        setStep(3);
-                        void refresh().catch((cause) => {
-                          if (requestedScreen.current === selectedId)
-                            setLoadError(
-                              cause instanceof Error
-                                ? cause.message
-                                : String(cause),
-                            );
-                        });
-                      }}
-                    />
-                  </>
-                )}
                 {step === 3 && (
                   <>
                     {!batchActive && !config.ready && (
@@ -2142,7 +2040,7 @@ function GuidedContent({
                       <WizardFooter container={footer}>
                         <Button
                           disabled={singleQueued || logoDrawingBusy}
-                          onClick={() => setStep(2)}
+                          onClick={() => setStep(1)}
                         >
                           {t('Previous Step')}
                         </Button>
@@ -2266,13 +2164,6 @@ function GuidedContent({
                             )}
                           </Typography.Text>
                         )}
-                        {step === 2 && (
-                          <Typography.Text type="secondary">
-                            {t(
-                              'Check the whole arm directly before recording.',
-                            )}
-                          </Typography.Text>
-                        )}
                       </div>
                     ),
                   },
@@ -2310,9 +2201,7 @@ function GuidedContent({
                     ),
                     forceRender: true,
                     children:
-                      step === 2 ? (
-                        <div ref={setIllustrationContainer} />
-                      ) : step >= 2 ? (
+                      step >= 2 ? (
                         <TeachingDiagram stage="reference" />
                       ) : (
                         <SetupIllustration

@@ -50,6 +50,10 @@ export function ReferenceModelReading({
           label={t('Gap above the screen')}
           value={debug.visibleGapAboveTarget}
         />
+        <ReadingChip
+          label={t('Tip above screens')}
+          value={debug.aboveScreens}
+        />
       </div>
       {debug.error && (
         <div className="guided-model-reading-error">{debug.error}</div>

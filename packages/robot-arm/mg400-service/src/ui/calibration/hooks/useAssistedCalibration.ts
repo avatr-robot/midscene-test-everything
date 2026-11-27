@@ -131,6 +131,41 @@ export function useAssistedCalibration(
       speakCalibration('autoStarted', 2);
       return api.locateCalibrationReference(session.id, model);
     });
+  const locateBootstrapReference = () =>
+    run(() => {
+      if (!session)
+        throw new Error('Start calibration in the calibration step');
+      const model = loadVlmModelSettings();
+      if (!model) throw new Error('Complete the VLM model settings first.');
+      speakCalibration('autoStarted', 2);
+      return api.locateCalibrationReference(session.id, model, true);
+    });
+  /**
+   * One action for the first screen: create the session if needed, let the
+   * eye-level model lift/servo to the target outline, then start fast sampling.
+   * No installation teaching or camera-side half-plane is required.
+   */
+  const bootstrap = (drawLogo?: boolean) =>
+    run(async () => {
+      const current = session ?? (await api.createAssistedCalibration());
+      const model = loadVlmModelSettings();
+      if (!model) throw new Error('Complete the VLM model settings first.');
+      speakCalibration('autoStarted', 2);
+      const located = await api.locateCalibrationReference(
+        current.id,
+        model,
+        true,
+      );
+      if (!located.referencePosition)
+        throw new Error('The robot did not reach the first screen reference.');
+      return api.assistedCalibrationCommand(
+        located.id,
+        'start-fast',
+        true,
+        undefined,
+        drawLogo,
+      );
+    });
   const command = (
     action: AssistedCalibrationAction,
     confirmed = false,
@@ -194,6 +229,8 @@ export function useAssistedCalibration(
     releaseImaging,
     create,
     locateReference,
+    locateBootstrapReference,
+    bootstrap,
     command,
     safety,
   };

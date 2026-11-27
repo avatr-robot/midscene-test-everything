@@ -27,8 +27,11 @@ export class BatchClient {
   calibrationBatch(signal?: AbortSignal) {
     return this.request<CalibrationBatchState | null>('read', {}, signal);
   }
-  calibrationBatchPlan(cameraId: string) {
-    return this.request<CalibrationBatchPlan>('plan', { cameraId });
+  calibrationBatchPlan(cameraId: string, firstScreenId?: string) {
+    return this.request<CalibrationBatchPlan>('plan', {
+      cameraId,
+      ...(firstScreenId ? { firstScreenId } : {}),
+    });
   }
   screens(signal?: AbortSignal) {
     return this.request<WorkstationScreenState[]>('screens', {}, signal);
@@ -51,6 +54,7 @@ export class BatchClient {
   startCalibrationBatch(input: {
     cameraId: string;
     planVersion: string;
+    firstScreenId?: string;
     auto: true;
     horizontalConfirmed: true;
     compliantSetupConfirmed?: true;

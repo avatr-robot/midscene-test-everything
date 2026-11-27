@@ -279,9 +279,19 @@ export function WebCalibrationWorkspace({
       disabled={
         busy || (!checkBeforeStart && (!setup.mapping || !readyToStart))
       }
-      onClick={() => start(controller.create)}
+      onClick={() =>
+        start(
+          setup.teaching
+            ? controller.create
+            : () => controller.bootstrap(drawLogo),
+        )
+      }
     >
-      {t('Start automatic calibration')}
+      {t(
+        setup.teaching
+          ? 'Start automatic calibration'
+          : 'Start guided calibration',
+      )}
     </Button>
   ) : recovery || finishingAutomatically ? null : stage === 'positioning' ? (
     <Button
@@ -290,6 +300,14 @@ export function WebCalibrationWorkspace({
       onClick={() => command('record-reference', true)}
     >
       {t(placingScreen ? 'Record sampling start' : 'Record Reference Position')}
+    </Button>
+  ) : stage === 'ready' && !s.referencePosition && !s.teachingId ? (
+    <Button
+      type="primary"
+      disabled={busy || (!checkBeforeStart && !readyToCapture)}
+      onClick={() => start(() => controller.bootstrap(drawLogo))}
+    >
+      {t('Start guided calibration')}
     </Button>
   ) : stage === 'ready' && !s.referencePosition ? (
     <Button
@@ -315,7 +333,10 @@ export function WebCalibrationWorkspace({
     >
       {t('Save Installation Teaching')}
     </Button>
-  ) : stage === 'ready' && s.referencePosition && !s.teachingId ? (
+  ) : stage === 'ready' &&
+    s.referencePosition &&
+    !s.teachingId &&
+    s.bootstrap !== true ? (
     <Button
       type="primary"
       disabled={busy || !readyToCapture}

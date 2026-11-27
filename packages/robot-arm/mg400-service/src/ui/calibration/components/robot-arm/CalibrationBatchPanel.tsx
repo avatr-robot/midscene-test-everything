@@ -172,6 +172,8 @@ export const CalibrationBatchPanel = forwardRef<
   {
     api: RobotArmApi;
     cameraId?: string;
+    /** Screen selected in the workspace; it becomes the first batch screen. */
+    firstScreenId?: string;
     /** Screens of the selected camera, already fetched by the workspace. */
     screens: readonly WorkstationScreenState[];
     drawLogo: boolean;
@@ -186,6 +188,7 @@ export const CalibrationBatchPanel = forwardRef<
   {
     api,
     cameraId,
+    firstScreenId,
     screens,
     drawLogo,
     disabled,
@@ -272,7 +275,7 @@ export const CalibrationBatchPanel = forwardRef<
       return;
     let disposed = false;
     const load = () => {
-      void api.calibrationBatchPlan(cameraId).then(
+      void api.calibrationBatchPlan(cameraId, firstScreenId).then(
         (next) => {
           if (!disposed) setPreviewPlan(next);
         },
@@ -285,7 +288,7 @@ export const CalibrationBatchPanel = forwardRef<
       disposed = true;
       clearInterval(timer);
     };
-  }, [api, cameraId, busyBatch]);
+  }, [api, cameraId, firstScreenId, busyBatch]);
   const perform = async (work: () => Promise<unknown>) => {
     setWorking(true);
     setError(undefined);
@@ -304,7 +307,7 @@ export const CalibrationBatchPanel = forwardRef<
   const openPlan = () =>
     void perform(async () => {
       if (!cameraId) throw new Error(t('Select the main camera first.'));
-      const next = await api.calibrationBatchPlan(cameraId);
+      const next = await api.calibrationBatchPlan(cameraId, firstScreenId);
       if (!mounted.current) return;
       setPlan(next);
       setHorizontalConfirmed(false);
@@ -318,7 +321,7 @@ export const CalibrationBatchPanel = forwardRef<
         openPlan();
       },
     }),
-    [disabled, working, debugging, cameraId],
+    [disabled, working, debugging, cameraId, firstScreenId],
   );
   const start = () =>
     void perform(async () => {
@@ -335,6 +338,7 @@ export const CalibrationBatchPanel = forwardRef<
       await api.startCalibrationBatch({
         planVersion: plan.version,
         cameraId,
+        firstScreenId,
         auto: true,
         horizontalConfirmed: true,
         compliantSetupConfirmed: true,

@@ -90,7 +90,7 @@ it('only offers Finish for the current completed attempt even with an accepted p
         onActivated: async () => {},
       }),
     );
-  expect(render(false)).toContain('开始自动标定');
+  expect(render(false)).toContain('开始引导标定');
   expect(render(false)).not.toContain('完成标定');
   expect(render(true)).toContain('完成标定');
   value.session = {
@@ -259,7 +259,7 @@ it('explains the phone requirement without blocking reference-position recording
     }),
   );
   expect(html).toContain('设置标定参考位');
-  expect(html).toContain('进入拖动模式');
+  expect(html).toContain('开始引导标定');
   expect(html).toContain('手机连接已断开');
   expect(html).toContain('连接手机');
 });
@@ -293,7 +293,7 @@ it('keeps Start available when the camera check is the next action', () => {
         onCheckCamera,
       }),
     );
-  const startButton = /(<button[^>]*>)[^<]*<span>开始自动标定/;
+  const startButton = /(<button[^>]*>)[^<]*<span>开始(?:自动|引导)标定/;
   expect(render(() => {}).match(startButton)?.[1]).toBeDefined();
   expect(render(() => {}).match(startButton)?.[1]).not.toContain('disabled');
   expect(render().match(startButton)?.[1]).toContain('disabled');

@@ -2,6 +2,22 @@ import { assistedCalibrationZh } from './assisted-calibration-zh';
 import { depthZh } from './depth-zh';
 import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
+  'Start guided calibration': '开始引导标定',
+  'The robot did not reach the first screen reference.':
+    '机械臂未到达首屏参考位。',
+  'First-screen calibration needs the mapped screen outline.':
+    '首屏标定需要已映射的屏幕轮廓。',
+  'Start the first-screen calibration inside the robot workspace.':
+    '请在机械臂工作空间内开始首屏标定。',
+  'The visible start leaves no room to lift clear of the screens.':
+    '当前可见起点没有足够空间抬升越过屏幕。',
+  'The robot did not settle after lifting from the visible start.':
+    '机械臂抬升后未稳定在目标位置。',
+  'The robot did not settle at the screen reference.':
+    '机械臂未稳定在屏幕参考位。',
+  'Tip above screens': '笔尖在屏幕上方',
+  'The eye-level model could not confirm the tip above the screens. Move the tip above the screens and retry.':
+    '平视模型无法确认笔尖已经在屏幕上方。请把笔尖移到屏幕上方后重试。',
   'Installation Safe Start': '安装安全起点',
   'Safe start height — side view': '安全起点高度 · 侧视',
   'Record a safe start clear of the screens at a height that lets the tip pass above them and leaves room for the first probe.':

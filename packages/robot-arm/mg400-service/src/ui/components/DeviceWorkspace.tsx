@@ -109,7 +109,6 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     id: string;
     cameraId: string;
     step: 0 | 1;
-    reviewInstallationOnOpen: boolean;
     session: string;
   }>();
   const [wizardScreen, setWizardScreen] = useState<string>();
@@ -291,17 +290,13 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
   );
   // A missed status poll during motion must not unmount the current attempt.
   const activeWizard = wizard?.session === setupSession ? wizard : undefined;
-  const openCalibration = (
-    step: 0 | 1 = 0,
-    reviewInstallationOnOpen = false,
-  ) => {
+  const openCalibration = (step: 0 | 1 = 0) => {
     if (!deviceId || !selectedId || !setupSession) return;
     setWizardScreen(deviceId);
     setWizard({
       id: deviceId,
       cameraId: selectedId,
       step,
-      reviewInstallationOnOpen,
       session: setupSession,
     });
   };
@@ -777,7 +772,7 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
                     onClick={
                       perspectiveBlocked
                         ? openCameraCorrection
-                        : () => openCalibration(0, true)
+                        : () => openCalibration(0)
                     }
                   >
                     {language === 'zh' ? '进入标定' : 'Open calibration'}
@@ -876,7 +871,6 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
           onScreenChange={setWizardScreen}
           onClose={closeCalibration}
           initialStep={activeWizard.step}
-          reviewInstallationOnOpen={activeWizard.reviewInstallationOnOpen}
         />
       ) : camera && selected ? (
         <main className="app-workspace streams-section">

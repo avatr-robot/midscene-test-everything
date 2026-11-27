@@ -136,6 +136,7 @@ export class CalibrationClient {
   async locateCalibrationReference(
     sessionId: string,
     model: VlmModelSettings,
+    bootstrap = false,
   ): Promise<AssistedCalibrationState> {
     return (
       await this.request<{ session: AssistedCalibrationState }>(
@@ -144,6 +145,7 @@ export class CalibrationClient {
           sessionId,
           model,
           confirmed: true,
+          ...(bootstrap ? { bootstrap: true } : {}),
         },
       )
     ).session;
