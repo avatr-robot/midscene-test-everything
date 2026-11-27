@@ -14,7 +14,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
-async function setup() {
+async function setup({ teaching = true } = {}) {
   const f = await fixture();
   const queue = new ArmActionQueue();
   const arm = {
@@ -33,23 +33,24 @@ async function setup() {
     height: 500,
     autoOutput: true,
   });
-  await f.store.saveInstallationTeaching({
-    id: 'mount',
-    robotProfileId: f.robot.id,
-    toolProfileId: f.tool.id,
-    cameraId: 'cam',
-    referenceDeviceId: 'one',
-    robotGeometryRevision: f.robot.geometryRevision,
-    toolGeometryRevision: f.tool.geometryRevision,
-    recordedAt: new Date().toISOString(),
-    referencePose: pose(100, -50, 100),
-    poses: {
-      reference: pose(100, -50, 100),
-      cameraBoundary: pose(100, 100, 100),
-    },
-    cameraBoundary: { point: { x: 100, y: 100 }, normal: { x: 0, y: 1 } },
-    corridorConfirmed: true,
-  });
+  if (teaching)
+    await f.store.saveInstallationTeaching({
+      id: 'mount',
+      robotProfileId: f.robot.id,
+      toolProfileId: f.tool.id,
+      cameraId: 'cam',
+      referenceDeviceId: 'one',
+      robotGeometryRevision: f.robot.geometryRevision,
+      toolGeometryRevision: f.tool.geometryRevision,
+      recordedAt: new Date().toISOString(),
+      referencePose: pose(100, -50, 100),
+      poses: {
+        reference: pose(100, -50, 100),
+        cameraBoundary: pose(100, 100, 100),
+      },
+      cameraBoundary: { point: { x: 100, y: 100 }, normal: { x: 0, y: 1 } },
+      corridorConfirmed: true,
+    });
   const sessions = new Map<string, AssistedCalibrationState | null>();
   const starts: string[] = [];
   const stops: string[] = [];
@@ -117,6 +118,9 @@ async function setup() {
     entries,
     screens: () => f.store.list().screenTargets!,
     ensureHost: async (id: string) => entries.get(id).host,
+    dualCameraScreens: {
+      sideCamera: async () => ({ id: 'side', name: 'Side camera' }),
+    },
     calibrateCameraImaging: rstest.fn(),
     activateCameraImaging: rstest.fn(
       async (_cameraId: string, screenId: string) => ({
@@ -175,6 +179,39 @@ async function setup() {
     entries,
   };
 }
+it('puts the screen selected in the workspace first in the batch order', async () => {
+  const f = await setup();
+  const plan = await f.batch.plan('cam', 'two');
+  expect(plan.screens[0]?.screenId).toBe('two');
+  expect(plan.screens.map((screen) => screen.screenId)).toEqual(['two', 'one']);
+});
+
+it('derives the installation keep-outs from the first calibrated screen', async () => {
+  const f = await setup({ teaching: false });
+  const workstation = f.store.list().workstation!;
+  await f.store.acceptDeviceBinding({
+    ...workstation,
+    deviceId: 'one',
+    calibrationProfileId: f.calibration.id,
+    revision: 0,
+  });
+  const plan = await f.batch.plan('cam');
+  expect(plan.screens).toHaveLength(2);
+  const teaching = f.store.installationTeaching({
+    ...f.binding,
+    cameraId: 'cam',
+  });
+  expect(teaching?.cameraKeepOuts).toHaveLength(2);
+  expect(
+    teaching?.cameraKeepOuts?.every(
+      (entry) => entry.source === 'derived-screen-group',
+    ),
+  ).toBe(true);
+  expect(teaching?.referencePurpose).toBe('safe-start');
+  expect(teaching?.poses.cameraBoundary).toBeDefined();
+  expect(teaching?.poses.cameraBoundaryEnd).toBeDefined();
+});
+
 it('reads saved screen status without opening a calibration host', async () => {
   const f = await setup();
   f.entries.get('one').host = undefined;
@@ -904,4 +941,65 @@ it('checks outlines again after waiting for the Controller queue', async () => {
     release();
     await owner;
   }
+});
+
+it('starts a screen from its geometric estimate without the eye-level model', async () => {
+  const f = await setup();
+  await f.store.acceptDeviceBinding({
+    deviceId: 'one',
+    cameraId: 'cam',
+    ...f.binding,
+    calibrationProfileId: f.calibration.id,
+    revision: 0,
+    vision: f.store.list().workstation!.vision!,
+  });
+  const references = new Map<string, unknown>();
+  const locate = rstest.fn(async () => {
+    throw new Error('the eye-level model positioned a screen');
+  });
+  for (const [id, entry] of f.entries) {
+    entry.host.locateReference = locate;
+    entry.host.service.create = async () => {
+      const state = {
+        id: `${id}-attempt`,
+        stage: 'ready',
+      } as AssistedCalibrationState;
+      f.sessions.set(id, state);
+      f.starts.push(id);
+      return state;
+    };
+    entry.host.service.setBatchReference = rstest.fn((reference: unknown) => {
+      references.set(id, reference);
+      f.sessions.set(id, {
+        ...f.sessions.get(id)!,
+        referencePosition:
+          reference as AssistedCalibrationState['referencePosition'],
+      });
+    });
+  }
+  const plan = await f.batch.plan('cam');
+  await f.batch.start({
+    cameraId: 'cam',
+    planVersion: plan.version,
+    horizontalConfirmed: true,
+    acceptance: 'manual',
+    referenceModel: {
+      provider: 'test',
+      modelName: 'test-model',
+      modelFamily: 'test',
+      baseUrl: 'http://127.0.0.1:1',
+      apiKey: 'test-key',
+    },
+  });
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[0].status).toBe('awaiting-acceptance'),
+  );
+  expect(locate).not.toHaveBeenCalled();
+  expect(references.has('one')).toBe(true);
+  f.complete('one');
+  await rstest.waitFor(() =>
+    expect(f.batch.read()?.items[1].status).toBe('awaiting-acceptance'),
+  );
+  expect(locate).not.toHaveBeenCalled();
+  expect(references.has('two')).toBe(true);
 });

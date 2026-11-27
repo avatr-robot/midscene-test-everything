@@ -28,6 +28,7 @@ const reading = {
   tipVisible: true,
   viewClear: true,
   visibleGapAboveTarget: true,
+  aboveScreens: true,
   confidence: 0.91,
   overheadTip: { x: 520, y: 340 },
 };
@@ -51,6 +52,7 @@ it('returns the eye-level reading the preview overlays', async () => {
   );
 
   expect(result.hovering).toBe(true);
+  expect(result.aboveScreens).toBe(true);
   expect(result.overheadTip).toEqual({ x: 520, y: 340 });
   expect(result.debug).toMatchObject({
     ok: true,
@@ -59,9 +61,85 @@ it('returns the eye-level reading the preview overlays', async () => {
     tipVisible: true,
     viewClear: true,
     visibleGapAboveTarget: true,
+    aboveScreens: true,
     confidence: 0.91,
     overheadTip: { x: 520, y: 340 },
   });
+});
+
+it('reports an off-screen tip that still needs lifting instead of rejecting it', async () => {
+  const result = await verifyReferenceObservation(
+    observation,
+    model,
+    undefined,
+    reply(JSON.stringify({ ...reading, aboveScreens: false })),
+  );
+  expect(result.aboveScreens).toBe(false);
+  expect(result.debug.aboveScreens).toBe(false);
+});
+
+it('asks only for the overhead tip when the search needs a bearing', async () => {
+  let body: { max_tokens?: number; messages?: { content: unknown[] }[] } = {};
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    body = JSON.parse(String(init.body));
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                overheadTip: { x: 120, y: 800 },
+                confidence: 0.7,
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
+  const result = await verifyReferenceObservation(
+    { ...observation, side: undefined, tipOnly: true },
+    model,
+    undefined,
+    fetchImpl,
+  );
+
+  expect(result).toMatchObject({
+    overheadTip: { x: 120, y: 800 },
+    hovering: false,
+  });
+  // One image, and a budget that still leaves room for a model that reasons.
+  expect(body.messages?.[1]?.content).toHaveLength(1);
+  expect(body.max_tokens).toBe(400);
+});
+
+it('retries once when the answer drops the stylus tip', async () => {
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    const content =
+      calls === 1
+        ? { ...reading, overheadTip: null }
+        : { ...reading, overheadTip: { x: 430, y: 610 } };
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(content) } }],
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
+  const result = await verifyReferenceObservation(
+    observation,
+    model,
+    undefined,
+    fetchImpl,
+  );
+
+  expect(calls).toBe(2);
+  expect(result.overheadTip).toEqual({ x: 430, y: 610 });
 });
 
 it('retries one unparsable answer before failing the call', async () => {

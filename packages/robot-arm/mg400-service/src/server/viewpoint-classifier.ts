@@ -125,7 +125,13 @@ export async function requestVisionText({
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  const body = (useJsonMode: boolean): unknown => {
+  const body = ({
+    json,
+    reasoning,
+  }: {
+    json: boolean;
+    reasoning: boolean;
+  }): unknown => {
     if (isAnthropic) {
       headers['x-api-key'] = model.apiKey;
       headers['anthropic-version'] = '2023-06-01';
@@ -155,6 +161,13 @@ export async function requestVisionText({
       return {
         model: model.modelName,
         max_output_tokens: maxTokens,
+        /*
+         * These answers are a handful of fields, so reasoning tokens only add
+         * latency; a reference search waits on one round trip per step. `none`
+         * is the supported way to say that (GPT-6 rejects `minimal`), and the
+         * caller falls back without the field if the endpoint rejects it.
+         */
+        ...(reasoning ? { reasoning: { effort: 'none' } } : {}),
         input: [
           {
             role: 'user',
@@ -183,7 +196,7 @@ export async function requestVisionText({
           })),
         },
       ],
-      ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
+      ...(json ? { response_format: { type: 'json_object' } } : {}),
     };
   };
 
@@ -191,14 +204,14 @@ export async function requestVisionText({
     fetchImpl === fetch && !bypassesProxy(baseUrl)
       ? await getProxyDispatcher()
       : undefined;
-  const send = async (useJsonMode: boolean) => {
+  const send = async (options: { json: boolean; reasoning: boolean }) => {
     signal.throwIfAborted();
     let response: Response;
     try {
       response = await fetchImpl(endpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body(useJsonMode)),
+        body: JSON.stringify(body(options)),
         signal,
         ...(dispatcher ? { dispatcher } : {}),
       } as RequestInit & { dispatcher?: ProxyAgent });
@@ -232,50 +245,79 @@ export async function requestVisionText({
     } catch {
       throw new Error('The VLM response was not valid JSON');
     }
+    let text_: string;
+    try {
+      text_ = extractResponseText(payload);
+    } catch (error) {
+      /*
+       * A truncated answer has no text at all, and its finish reason is the only
+       * clue that the output budget was the problem rather than the model.
+       */
+      const finish = finishReasonOf(payload);
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}${
+          finish ? ` (finish: ${finish})` : ''
+        }`,
+      );
+    }
     return {
       status: response.status,
-      text: extractResponseText(payload),
+      text: text_,
       finishReason: finishReasonOf(payload),
     };
   };
 
-  const startedAt = Date.now();
-  try {
-    const result = await send(jsonMode);
-    onTrace?.({
-      model: model.modelName,
-      endpoint,
-      status: result.status,
-      durationMs: Date.now() - startedAt,
-      ...(result.finishReason ? { finishReason: result.finishReason } : {}),
-      responseChars: result.text.length,
-    });
-    return result.text;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    onTrace?.({
-      model: model.modelName,
-      endpoint,
-      durationMs: Date.now() - startedAt,
-      error: detail.slice(0, 400),
-    });
-    /*
-     * Some OpenAI-compatible gateways reject response_format outright, and a
-     * rejected format field must not take the whole calibration down. The
-     * prompt already asks for JSON, so one retry without it is still useful.
-     */
-    if (jsonMode && /\(HTTP (400|422)\)/.test(detail))
-      return requestVisionText({
-        frames,
-        prompt,
-        model,
-        signal,
-        fetchImpl,
-        maxTokens,
-        onTrace,
+  /*
+   * One optional field can make an endpoint reject the request, and which one
+   * depends on the API shape: the Responses API takes a reasoning budget, the
+   * chat APIs take response_format. Try it once, then send without it, so a
+   * rejected field costs one retry instead of the whole calibration.
+   */
+  const variants = (
+    isOpenAIResponses
+      ? [
+          { json: jsonMode, reasoning: true },
+          { json: false, reasoning: false },
+        ]
+      : [
+          { json: jsonMode, reasoning: false },
+          { json: false, reasoning: false },
+        ]
+  ).filter(
+    (variant, index, all) =>
+      all.findIndex(
+        (other) =>
+          other.json === variant.json && other.reasoning === variant.reasoning,
+      ) === index,
+  );
+  let lastError: unknown;
+  for (const [index, variant] of variants.entries()) {
+    const startedAt = Date.now();
+    try {
+      const result = await send(variant);
+      onTrace?.({
+        model: model.modelName,
+        endpoint,
+        status: result.status,
+        durationMs: Date.now() - startedAt,
+        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+        responseChars: result.text.length,
       });
-    throw error;
+      return result.text;
+    } catch (error) {
+      lastError = error;
+      const detail = error instanceof Error ? error.message : String(error);
+      onTrace?.({
+        model: model.modelName,
+        endpoint,
+        durationMs: Date.now() - startedAt,
+        error: detail.slice(0, 400),
+      });
+      const rejectedFormat = /\(HTTP (400|422)\)/.test(detail);
+      if (!rejectedFormat || index === variants.length - 1) throw error;
+    }
   }
+  throw lastError;
 }
 
 export function parseViewpointClassification(

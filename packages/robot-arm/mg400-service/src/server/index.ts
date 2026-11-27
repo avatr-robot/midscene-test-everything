@@ -45,6 +45,7 @@ import {
   PreviewPerspectives,
   phoneFingerprint,
 } from './preview-perspectives.js';
+import { logReferenceModelTrace } from './reference-model-log.js';
 import { verifyReferenceObservation } from './reference-observation.js';
 import { screenConnectPage } from './screen-connect-page.js';
 import { ScreenControl } from './screen-control.js';
@@ -937,7 +938,15 @@ export async function startPlaygroundHost({
         if (input.action === 'read')
           return send(200, otherCamera ? null : current);
         if (input.action === 'plan')
-          return send(200, await batch.plan(input.cameraId));
+          return send(
+            200,
+            await batch.plan(
+              input.cameraId,
+              typeof input.firstScreenId === 'string'
+                ? input.firstScreenId
+                : undefined,
+            ),
+          );
         if (input.action === 'screens')
           return send(200, await batch.screens(input.cameraId));
         if (input.action === 'start')
@@ -1143,6 +1152,7 @@ export async function startPlaygroundHost({
         if (action === 'reference/locate' && req.method === 'POST') {
           const input = await readBody(req, 65536);
           const model = input?.model;
+          const bootstrap = input?.bootstrap === true;
           if (
             input?.confirmed !== true ||
             typeof input.sessionId !== 'string' ||
@@ -1212,15 +1222,36 @@ export async function startPlaygroundHost({
             abort.signal.throwIfAborted();
             const sideCamera = await cameraManager.acquire(sideId, owner);
             let session: Awaited<ReturnType<typeof host.locateReference>>;
+            const verify = (
+              observation: Parameters<typeof verifyReferenceObservation>[0],
+            ) =>
+              verifyReferenceObservation(
+                observation,
+                model,
+                undefined,
+                fetch,
+                (trace) =>
+                  logReferenceModelTrace(
+                    `screen=${id} attempt=${input.sessionId}`,
+                    trace,
+                  ),
+              );
             try {
               assertCurrent();
               abort.signal.throwIfAborted();
-              session = await host.locateReference(
-                input.sessionId,
-                sideCamera,
-                (observation) => verifyReferenceObservation(observation, model),
-                abort.signal,
-              );
+              session = bootstrap
+                ? await host.locateBootstrapReference(
+                    input.sessionId,
+                    sideCamera,
+                    verify,
+                    abort.signal,
+                  )
+                : await host.locateReference(
+                    input.sessionId,
+                    sideCamera,
+                    verify,
+                    abort.signal,
+                  );
             } finally {
               await cameraManager.release(sideId, owner);
             }

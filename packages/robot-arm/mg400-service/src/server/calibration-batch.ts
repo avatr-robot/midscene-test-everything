@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import {
   type CalibrationProfile,
   type CartesianPose,
+  type InstallationTeaching,
   RobotArmError,
   type SharedParkingEvidence,
   calibrationAccepted,
@@ -16,6 +17,7 @@ import {
   verifyScreenVisibility,
 } from '@midscene/arm-kit/internal/calibration/camera/visibility';
 import { screenPoseMm } from '@midscene/arm-kit/internal/calibration/geometry';
+import { deriveInstallationKeepOuts } from '@midscene/arm-kit/internal/calibration/installation-keep-out';
 import {
   type ScreenPlaneSource,
   calibrationQuad,
@@ -38,6 +40,7 @@ import type {
 } from '@midscene/robotics-shared/assisted-contracts';
 import type { PlaygroundDevices } from './devices.js';
 import { modelFailure } from './model-failure.js';
+import { logReferenceModelTrace } from './reference-model-log.js';
 import { verifyReferenceObservation } from './reference-observation.js';
 import {
   type ViewpointModelConfig,
@@ -719,7 +722,92 @@ export class CalibrationBatch {
       };
     });
   }
-  async plan(cameraId: string): Promise<CalibrationBatchPlan> {
+  /**
+   * The first screen is calibrated through the bootstrap flow, so no manual
+   * installation teaching exists yet. Derive the two camera-side half-planes
+   * from the calibrated screen group (calibrated quads plus eye-level mapped
+   * estimates) before the batch plan starts.
+   */
+  private async ensureInstallationTeaching(
+    cameraId: string,
+    input: ReturnType<CalibrationBatch['selection']>,
+    estimates: ReturnType<CalibrationBatch['estimates']>,
+  ): Promise<InstallationTeaching> {
+    const store = this.runtime.profileStore;
+    const existing = store.installationTeaching(input);
+    if (existing) return existing;
+    const entries = this.entries(cameraId);
+    const calibrated = entries.find(
+      (entry) =>
+        entry.calibration &&
+        entry.screen &&
+        calibrationAccepted(entry.calibration),
+    );
+    if (!calibrated?.calibration || !calibrated.screen)
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'Calibrate the first screen before starting a batch.',
+        409,
+      );
+    const quads = entries.flatMap((entry) => {
+      const robot =
+        entry.calibration &&
+        entry.screen &&
+        calibrationQuad(entry.calibration, entry.screen);
+      if (robot) return [robot];
+      const estimate = estimates.get(entry.target.id);
+      return estimate ? [estimate.quad] : [];
+    });
+    const side = await this.devices.dualCameraScreens.sideCamera(cameraId);
+    const derived = deriveInstallationKeepOuts({
+      quads,
+      axis: {
+        x: calibrated.calibration.xAxis.x,
+        y: calibrated.calibration.xAxis.y,
+      },
+      primaryCameraId: cameraId,
+      sideCameraId: side?.id,
+    });
+    if (!derived)
+      throw new RobotArmError(
+        'INSTALLATION_TEACHING_REQUIRED',
+        'The calibrated screen group cannot define the camera keep-out yet.',
+        409,
+      );
+    const tool = store.getTool(input.toolProfileId);
+    const robot = store.getRobot(input.robotProfileId);
+    const reference = calibrated.calibration.observationPose;
+    const tipZ = contactPoint(reference, tool.offsetMm).z;
+    const at = (point: { x: number; y: number }) =>
+      flangePose({ ...point, z: tipZ }, reference.orientation, tool.offsetMm);
+    const teaching: InstallationTeaching = {
+      ...input,
+      id: randomUUID(),
+      recordedAt: new Date().toISOString(),
+      referenceDeviceId: calibrated.target.id,
+      referencePurpose: 'safe-start',
+      robotGeometryRevision: robot.geometryRevision,
+      toolGeometryRevision: tool.geometryRevision,
+      referencePose: reference,
+      poses: {
+        reference,
+        cameraBoundary: at(derived.primary.start),
+        cameraBoundaryEnd: at(derived.primary.end),
+      },
+      cameraBoundary: {
+        point: derived.primary.point,
+        normal: derived.primary.normal,
+      },
+      cameraKeepOuts: derived.keepOuts,
+      corridorConfirmed: true,
+    };
+    await store.saveInstallationTeaching(teaching);
+    return store.installationTeaching(input) ?? teaching;
+  }
+  async plan(
+    cameraId: string,
+    firstScreenId?: string,
+  ): Promise<CalibrationBatchPlan> {
     if (this.task || this.stopping || this.busy)
       throw new RobotArmError(
         'BUSY',
@@ -730,13 +818,11 @@ export class CalibrationBatch {
     await this.assertPerspectives(cameraId);
     const entries = this.entries(cameraId);
     const estimates = this.estimates(cameraId);
-    const teaching = this.runtime.profileStore.installationTeaching(input);
-    if (!teaching)
-      throw new RobotArmError(
-        'INSTALLATION_TEACHING_REQUIRED',
-        'Save the installation safe start and camera-side boundary.',
-        409,
-      );
+    const teaching = await this.ensureInstallationTeaching(
+      cameraId,
+      input,
+      estimates,
+    );
     if (!entries.length)
       throw new RobotArmError(
         'MAPPING_REQUIRED',
@@ -772,6 +858,9 @@ export class CalibrationBatch {
             ? 1
             : a.target.name.localeCompare(b.target.name),
     );
+    const selected = firstScreenId
+      ? entries.findIndex((entry) => entry.target.id === firstScreenId)
+      : -1;
     const current = entries.findIndex((e) => {
       const quad =
         e.calibration && e.screen && calibrationQuad(e.calibration, e.screen);
@@ -780,7 +869,7 @@ export class CalibrationBatch {
     const reference = entries.findIndex(
       (e) => e.target.id === teaching.referenceDeviceId && !e.calibration,
     );
-    const first = current >= 0 ? current : reference;
+    const first = selected >= 0 ? selected : current >= 0 ? current : reference;
     if (first > 0) entries.unshift(...entries.splice(first, 1));
     const version = createHash('sha256')
       .update(
@@ -826,6 +915,7 @@ export class CalibrationBatch {
   async start(input: {
     cameraId: string;
     planVersion: string;
+    firstScreenId?: string;
     horizontalConfirmed: boolean;
     compliantSetupConfirmed?: boolean;
     samplingMode?: CalibrationBatchSamplingMode;
@@ -851,7 +941,7 @@ export class CalibrationBatch {
           'drawLogo must be a boolean',
         );
       this.assertNoScreenCalibration();
-      const plan = await this.plan(input.cameraId);
+      const plan = await this.plan(input.cameraId, input.firstScreenId);
       if (input.planVersion !== plan.version)
         throw new RobotArmError(
           'STALE_CONTEXT',
@@ -954,28 +1044,23 @@ export class CalibrationBatch {
       await classifyCameraViewpoints({
         frames,
         model,
-        onTrace: (trace) => this.logReferenceModel(cameraId, trace),
+        onTrace: (trace) =>
+          logReferenceModelTrace(
+            `batch=${this.state?.id ?? '-'} camera=${cameraId}`,
+            trace,
+          ),
       });
       return { ok: true as const };
     } catch (error) {
       throw modelFailure(error);
     }
   }
+  /** Names the attempt that the `Reference positioning timing` line keys on. */
   private logReferenceModel(screenId: string, trace: VisionTrace) {
-    const parts = [
-      `[reference-model] batch=${this.state?.id ?? '-'} screen=${screenId}`,
-      `model=${trace.model}`,
-      `endpoint=${trace.endpoint}`,
-      `duration=${trace.durationMs}ms`,
-    ];
-    if (trace.status !== undefined) parts.push(`status=${trace.status}`);
-    if (trace.finishReason) parts.push(`finish=${trace.finishReason}`);
-    if (trace.responseChars !== undefined)
-      parts.push(`chars=${trace.responseChars}`);
-    if (trace.error) {
-      parts.push(`error=${trace.error.replace(/\s+/g, ' ').slice(0, 300)}`);
-      console.warn(parts.join(' '));
-    } else console.info(parts.join(' '));
+    logReferenceModelTrace(
+      `batch=${this.state?.id ?? '-'} screen=${screenId} attempt=${this.activeAttempt?.id ?? '-'}`,
+      trace,
+    );
   }
   private assertLaunchCurrent(revision: number) {
     if (revision !== this.launchRevision)
@@ -1367,6 +1452,9 @@ export class CalibrationBatch {
             return undefined;
           return { ...source, key: geometryKey, startPositions };
         },
+        // The first uncalibrated screen has no taught corridor yet: the
+        // operator placed it and the eye-level search starts from there.
+        { bootstrap: !saved && !estimated },
       );
     } catch (error) {
       /*
@@ -1513,15 +1601,32 @@ export class CalibrationBatch {
             if (state.usesSharedSafePosition)
               host.service.setBatchParking(state.id);
             const selection = this.selection(state.cameraId!);
-            if (state.automaticReference && !this.referenceModelFailed) {
+            /*
+             * A screen next to a calibrated one already has a geometric
+             * reference, so the batch moves straight to it. Keep the eye-level
+             * search as a fallback for the first screen: from a neighbouring
+             * screen's parking pose its own tool hides this screen's markers.
+             */
+            const estimate = this.estimates(state.cameraId!).get(row.deviceId);
+            if (
+              state.automaticReference &&
+              !this.referenceModelFailed &&
+              !estimate
+            ) {
               await this.update(() => {
                 row.note = 'Finding the screen reference position';
               });
+              /*
+               * The operator placed the stylus for this screen, so the current
+               * pose is this batch's verified start. Without this the visual
+               * search still demanded the old taught safe start.
+               */
+              this.verifiedReferenceStart =
+                await this.runtime.assertCalibrationMotionReady(
+                  selection.toolProfileId,
+                );
               session = await this.locateReference(host, session.id, signal);
             } else if (!session.referencePosition) {
-              const estimate = this.estimates(state.cameraId!).get(
-                row.deviceId,
-              );
               const source = this.entries(state.cameraId!).find(
                 (e) => e.calibration,
               )?.calibration;
