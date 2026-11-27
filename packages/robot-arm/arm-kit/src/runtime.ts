@@ -48,6 +48,8 @@ import {
   type CurrentOperation,
   type DeviceBinding,
   type EnableRequest,
+  type InstallationTeachingDraft,
+  type InstallationTeachingPoint,
   type MotionOptions,
   type MotionResult,
   type PayloadApplicationState,
@@ -3790,6 +3792,47 @@ export class RobotArmRuntime extends RobotKernel {
         ) ?? null
     );
   }
+  private simulatedInstallationTeachingPose(
+    reference: CartesianPose,
+    point: 'cameraBoundary' | 'cameraBoundaryEnd',
+  ) {
+    const pose = structuredClone(reference);
+    // Preserve the reference orientation and place a 40 mm boundary segment
+    // 30 mm to its side. Mock recording can repeatedly read the same resting
+    // pose, but save validation still receives a geometrically valid corridor.
+    pose.positionMm.x += 30;
+    if (point === 'cameraBoundaryEnd') pose.positionMm.y += 40;
+    return pose;
+  }
+  private installationTeachingCapturePose(
+    point: InstallationTeachingPoint,
+    measured: CartesianPose,
+    poses: InstallationTeachingDraft['poses'],
+  ) {
+    if (!this.connectionIdentity.startsWith('mock://') || point === 'reference')
+      return measured;
+    const reference = poses.reference;
+    return reference
+      ? this.simulatedInstallationTeachingPose(reference, point)
+      : measured;
+  }
+  private installationTeachingSavePoses(
+    poses: InstallationTeachingDraft['poses'],
+  ) {
+    if (!this.connectionIdentity.startsWith('mock://') || !poses.reference)
+      return poses;
+    return {
+      reference: poses.reference,
+      cameraBoundary: this.simulatedInstallationTeachingPose(
+        poses.reference,
+        'cameraBoundary',
+      ),
+      cameraBoundaryEnd: this.simulatedInstallationTeachingPose(
+        poses.reference,
+        'cameraBoundaryEnd',
+      ),
+    };
+  }
   private teachingCaptureBusy = false;
   async captureInstallationPoint(
     input: {
@@ -3883,7 +3926,9 @@ export class RobotArmRuntime extends RobotKernel {
         draft.poses = poses;
       }
       draft.id = randomUUID();
-      draft.poses[point] = structuredClone(measured);
+      draft.poses[point] = structuredClone(
+        this.installationTeachingCapturePose(point, measured, draft.poses),
+      );
       await this.profileStore.saveInstallationTeachingDraft(draft, check);
       return draft;
     };
@@ -3938,7 +3983,8 @@ export class RobotArmRuntime extends RobotKernel {
           'Record installation positions for the current equipment',
           409,
         );
-      const { reference, cameraBoundary, cameraBoundaryEnd } = draft.poses;
+      const poses = this.installationTeachingSavePoses(draft.poses);
+      const { reference, cameraBoundary, cameraBoundaryEnd } = poses;
       if (!reference || !cameraBoundary || !cameraBoundaryEnd)
         throw new RobotArmError(
           'NOT_READY',

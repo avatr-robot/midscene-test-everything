@@ -749,6 +749,19 @@ export class CameraSession implements CalibrationVision {
     return this.imaging.calibrate(this.imagingScopeId);
   }
 
+  async focusScreen(
+    screenId: string,
+    correction: CameraCorrection,
+  ): Promise<CameraImagingStatus> {
+    if (!this.imaging)
+      throw new RobotArmError(
+        'VISION_UNAVAILABLE',
+        'Camera imaging controller is unavailable',
+        409,
+      );
+    return this.imaging.focusScreens([{ screenId, correction }]);
+  }
+
   async calibrateScreens(
     screenIds: readonly string[],
     calibrationToken?: string,

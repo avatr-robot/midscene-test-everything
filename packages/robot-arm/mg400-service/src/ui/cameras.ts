@@ -520,6 +520,23 @@ export async function activateCameraImaging(
   return data.imaging;
 }
 
+export async function focusEyeLevelCamera(cameraId: string) {
+  const response = await fetch('/api/cameras/eye-level-focus', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: cameraId }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const data = (await response.json()) as {
+    error?: string;
+    skipped?: string;
+    focus?: CalibrationImagingStatus;
+  };
+  if (!response.ok)
+    throw new Error(data.error || 'Eye-level focus adjustment failed');
+  return data;
+}
+
 export async function updateCameraCaptureSettings(
   cameraId: string,
   settings: CameraProfileUpdate,

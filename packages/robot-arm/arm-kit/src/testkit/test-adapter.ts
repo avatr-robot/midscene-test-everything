@@ -32,6 +32,8 @@ export interface TestRobotOptions {
   physicalSpeedOnly?: boolean;
   motionDurationMs?: number;
   initialPose?: CartesianPose;
+  /** Test seam for exercising simulator-specific runtime behavior. */
+  connectionIdentity?: string;
   /**
    * Test seam only. The shipped Adapter configuration does not set it and the
    * service never passes it, because an installation must not be able to raise the
@@ -95,7 +97,7 @@ export class TestRobotAdapter implements RobotArmAdapter {
         'The screen tilt limit applies to restricted-orientation adapters only; a full-orientation arm aligns to the fitted screen plane',
       );
     this.id = `test-robot-${jointCount}`;
-    this.connectionIdentity = this.id;
+    this.connectionIdentity = options.connectionIdentity ?? this.id;
     this.name = `${jointCount}-axis Test robot`;
     this.motionCapabilities = {
       jointCount,

@@ -3,6 +3,7 @@ import { assertCameraBoundary } from '../src/application/teaching-constraints.js
 import { type InstallationTeaching, RobotArmError } from '../src/contracts.js';
 import { RobotDriverBoundary } from '../src/kernel/driver-boundary.js';
 import { ProfileStore } from '../src/runtime/profile-store.js';
+import { TestRobotAdapter } from '../src/testkit/test-adapter.js';
 import { fixture, pose } from './fixtures.js';
 
 it.each(['lift', 'traverse', 'lower'] as const)(
@@ -366,6 +367,86 @@ it('keeps drag mode while capturing a persistent reference and two boundary poin
     expect(saved.cameraBoundary.normal).toEqual({ x: 0, y: 1 });
     expect(saved.referenceDeviceId).toBe(f.screen.id);
     expect(f.adapter.movements).toHaveLength(0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it('simulates a valid installed corridor when every mock capture is stationary', async () => {
+  const adapter = new TestRobotAdapter({
+    jointCount: 4,
+    motionDurationMs: 10,
+    initialPose: pose(100, -50, 100),
+    connectionIdentity: 'mock://mg400',
+  });
+  const f = await fixture(4, 10, adapter);
+  try {
+    const binding = { ...f.binding, cameraId: 'cam' };
+    await f.runtime.enterDragMode(binding);
+    const reference = await f.runtime.captureInstallationPoint(
+      binding,
+      'reference',
+    );
+    await f.runtime.captureInstallationPoint(binding, 'cameraBoundary');
+    const boundary = await f.runtime.captureInstallationPoint(
+      binding,
+      'cameraBoundaryEnd',
+    );
+
+    expect(reference.poses.reference?.positionMm).toEqual({
+      x: 100,
+      y: -50,
+      z: 100,
+    });
+    expect(boundary.poses.cameraBoundary?.positionMm).toEqual({
+      x: 130,
+      y: -50,
+      z: 100,
+    });
+    expect(boundary.poses.cameraBoundaryEnd?.positionMm).toEqual({
+      x: 130,
+      y: -10,
+      z: 100,
+    });
+
+    await f.runtime.exitDragMode();
+    const saved = await f.runtime.teachInstallation({
+      binding,
+      draftId: boundary.id,
+      corridorConfirmed: true,
+    });
+    expect(saved.cameraBoundary).toEqual({
+      point: { x: 130, y: -50 },
+      normal: { x: 1, y: 0 },
+    });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+it('keeps the A/B separation check for non-mock adapters', async () => {
+  const f = await fixture();
+  try {
+    const binding = { ...f.binding, cameraId: 'cam' };
+    await f.runtime.enterDragMode(binding);
+    await f.runtime.captureInstallationPoint(binding, 'reference');
+    await f.runtime.captureInstallationPoint(binding, 'cameraBoundary');
+    const boundary = await f.runtime.captureInstallationPoint(
+      binding,
+      'cameraBoundaryEnd',
+    );
+    await f.runtime.exitDragMode();
+
+    await expect(
+      f.runtime.teachInstallation({
+        binding,
+        draftId: boundary.id,
+        corridorConfirmed: true,
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: 'Record boundary points A and B at least 20 mm apart in XY',
+    });
   } finally {
     await f.cleanup();
   }

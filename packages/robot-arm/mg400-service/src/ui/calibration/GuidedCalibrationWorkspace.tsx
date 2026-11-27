@@ -43,7 +43,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { activateCameraImaging } from '../cameras';
+import { activateCameraImaging, focusEyeLevelCamera } from '../cameras';
 import { useArmTheme } from '../theme';
 import {
   CalibrationPowerButton,
@@ -445,6 +445,7 @@ function GuidedContent({
   }, [connectedScreenId, selectScreen, selectedId]);
   const currentStep = useRef(step);
   currentStep.current = step;
+  const eyeLevelFocusKey = useRef<string>();
   const reportedSingleFailure = useRef<string>();
   const refreshSequence = useRef(0);
   const currentBase = useRef(base);
@@ -1012,6 +1013,23 @@ function GuidedContent({
     }
   };
   const waitForImagingCalibration = useCallback(async () => {
+    const focusKey = JSON.stringify([
+      cameraId,
+      selectedId,
+      config?.correctionKey ?? config?.correction,
+    ]);
+    if (eyeLevelFocusKey.current !== focusKey) {
+      eyeLevelFocusKey.current = focusKey;
+      void focusEyeLevelCamera(cameraId).catch((cause) => {
+        eyeLevelFocusKey.current = undefined;
+        if (currentBase.current === base)
+          void message.warning(
+            t('Eye-level focus adjustment failed: {0}', [
+              cause instanceof Error ? cause.message : String(cause),
+            ]),
+          );
+      });
+    }
     try {
       await finishCameraImagingForScreen({
         screenId: selectedId,
@@ -1031,7 +1049,15 @@ function GuidedContent({
           ),
         );
     }
-  }, [base, cameraId, client, message, selectedId]);
+  }, [
+    base,
+    cameraId,
+    client,
+    config?.correction,
+    config?.correctionKey,
+    message,
+    selectedId,
+  ]);
   const detected = useCallback(
     async (
       _session: unknown,

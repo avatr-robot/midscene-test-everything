@@ -59,6 +59,12 @@ interface StoredScreenImaging {
   calibratedAt: string;
 }
 
+interface StoredFocusLock {
+  screenId: string;
+  value: number;
+  lockedAt: string;
+}
+
 interface LegacyStoredCameraImaging {
   version: 1 | 2 | 3 | 4 | 5 | 6;
   cameraId: string;
@@ -77,6 +83,8 @@ interface StoredCameraImaging {
   version: 7;
   cameraId: string;
   screens: StoredScreenImaging[];
+  /** Eye-level focus only. Exposure and tone remain independent. */
+  focusLock?: StoredFocusLock;
   original?: Partial<Record<CameraControlProperty, StoredCameraControl>>;
   calibratedAt: string;
 }
@@ -276,6 +284,40 @@ function correctionFingerprint(screen: ImagingScreen) {
     .digest('hex');
 }
 
+function scaleCorrectionToFrame(
+  correction: CameraCorrection,
+  width: number,
+  height: number,
+): CameraCorrection {
+  if (correction.sourceWidth === width && correction.sourceHeight === height)
+    return correction;
+  const sx = width / correction.sourceWidth;
+  const sy = height / correction.sourceHeight;
+  return {
+    ...correction,
+    points: {
+      topLeft: {
+        x: correction.points.topLeft.x * sx,
+        y: correction.points.topLeft.y * sy,
+      },
+      topRight: {
+        x: correction.points.topRight.x * sx,
+        y: correction.points.topRight.y * sy,
+      },
+      bottomRight: {
+        x: correction.points.bottomRight.x * sx,
+        y: correction.points.bottomRight.y * sy,
+      },
+      bottomLeft: {
+        x: correction.points.bottomLeft.x * sx,
+        y: correction.points.bottomLeft.y * sy,
+      },
+    },
+    sourceWidth: width,
+    sourceHeight: height,
+  };
+}
+
 export function cameraImagingFile(directory: string, cameraId: string) {
   return path.join(
     directory,
@@ -318,7 +360,7 @@ export async function removeCameraImagingScreen(
   const screens = stored.screens.filter(
     (profile) => profile.screenId !== screenId,
   );
-  if (!screens.length) {
+  if (!screens.length && !stored.focusLock) {
     await rm(file, { force: true });
     return;
   }
@@ -425,6 +467,16 @@ export class CameraImagingController {
       const profile = this.stored?.screens.find(
         (entry) => entry.screenId === requested,
       );
+      const focusLock = this.stored?.focusLock;
+      if (!profile && focusLock?.screenId === requested)
+        return {
+          state: 'ready',
+          screenId: requested,
+          active: requested === this.activeScreenId && this.applied,
+          focus: focusLock.value,
+          message: 'Eye-level focus is locked',
+          updatedAt: Date.parse(focusLock.lockedAt) || undefined,
+        };
       if (!correction)
         return {
           state: 'unconfigured',
@@ -539,6 +591,14 @@ export class CameraImagingController {
               !Number.isFinite(screen.exposure?.value) ||
               !screen.calibratedAt,
           )
+        )
+          return;
+        if (
+          value.focusLock &&
+          (typeof value.focusLock.screenId !== 'string' ||
+            !value.focusLock.screenId ||
+            !Number.isFinite(value.focusLock.value) ||
+            !value.focusLock.lockedAt)
         )
           return;
         const screens = value.screens.filter(
@@ -829,10 +889,15 @@ export class CameraImagingController {
       }
       const { controls } = reading;
       const current = await controls.read();
+      const focusLock = this.stored?.focusLock;
       if (this.stored?.original) {
-        await this.restoreControls(controls, this.stored.original);
+        const { focus: _focus, ...original } = this.stored.original;
+        await this.restoreControls(
+          controls,
+          focusLock ? original : this.stored.original,
+        );
       } else {
-        if (current.focus?.supportsAuto)
+        if (!focusLock && current.focus?.supportsAuto)
           await controls.set('focus', current.focus.value, 'auto');
         if (current.exposure?.supportsAuto)
           await controls.set('exposure', current.exposure.value, 'auto');
@@ -843,6 +908,8 @@ export class CameraImagingController {
             'auto',
           );
       }
+      if (focusLock && current.focus?.mode !== 'manual')
+        await controls.set('focus', focusLock.value, 'manual');
     } catch (error) {
       this.statusValue = {
         state: 'error',
@@ -879,7 +946,7 @@ export class CameraImagingController {
     );
     this.screenErrors.delete(screenId);
     this.calibratingScreens.delete(screenId);
-    if (!this.stored.screens.length) {
+    if (!this.stored.screens.length && !this.stored.focusLock) {
       this.stored = undefined;
       await rm(cameraImagingFile(this.directory, this.camera.id), {
         force: true,
@@ -941,7 +1008,7 @@ export class CameraImagingController {
     }
     try {
       await controls.set('exposure', profile.exposure.value, 'manual');
-      if (profile.focus)
+      if (profile.focus && !this.stored?.focusLock)
         await controls.set('focus', profile.focus.value, 'manual');
       for (const [property, value] of [
         ['gain', profile.gain?.value],
@@ -977,6 +1044,108 @@ export class CameraImagingController {
 
   async calibrate(screenId?: string): Promise<CameraImagingStatus> {
     return this.calibrateScreens(screenId ? [screenId] : undefined);
+  }
+
+  /**
+   * A lower-precision focus pass for the eye-level camera. It leaves exposure,
+   * gain, white balance and tone untouched and only searches around the current
+   * automatic focus bracket.
+   */
+  async focusScreens(
+    screens: readonly ImagingScreen[],
+  ): Promise<CameraImagingStatus> {
+    if (!screens.length)
+      throw new RobotArmError(
+        'MAPPING_REQUIRED',
+        'An associated screen region is required before eye-level focus',
+        409,
+      );
+    return this.enqueue(async () => {
+      const frame = this.stream.getInfo();
+      const activeScreens =
+        frame.width && frame.height
+          ? screens.map((screen) => ({
+              ...screen,
+              correction: scaleCorrectionToFrame(
+                screen.correction,
+                frame.width,
+                frame.height,
+              ),
+            }))
+          : screens;
+      const controls = await this.ensureControls();
+      const initial = (await controls.read()).focus;
+      if (!initial?.supportsManual)
+        return {
+          state: 'unsupported',
+          screenId: activeScreens[0]!.screenId,
+          active: false,
+          message: 'This eye-level camera does not expose manual focus',
+          updatedAt: Date.now(),
+        };
+      const original = {
+        value: initial.value,
+        mode: initial.mode,
+      } satisfies StoredCameraControl;
+      this.stopMonitor();
+      this.applied = false;
+      this.captureInProgress = true;
+      try {
+        if (initial.supportsAuto) {
+          await controls.set('focus', initial.value, 'auto');
+          await delay(MARKER_FOCUS_SETTLE_MS);
+        }
+        const automatic = (await controls.read()).focus ?? initial;
+        if (!automatic.supportsManual)
+          throw new RobotArmError(
+            'VISION_UNAVAILABLE',
+            'This eye-level camera does not expose manual focus',
+            409,
+          );
+        const best = await this.searchFocus(automatic, activeScreens);
+        const final = (await controls.read()).focus;
+        if (!final || final.mode !== 'manual')
+          throw new RobotArmError(
+            'VISION_UNAVAILABLE',
+            'The eye-level camera did not keep focus in manual mode',
+            409,
+          );
+        const screenId = activeScreens[0]!.screenId;
+        const lockedAt = new Date().toISOString();
+        this.stored = {
+          version: 7,
+          cameraId: this.camera.id,
+          screens: this.stored?.screens ?? [],
+          ...(this.stored?.original ? { original: this.stored.original } : {}),
+          focusLock: { screenId, value: best.value, lockedAt },
+          calibratedAt: this.stored?.calibratedAt ?? lockedAt,
+        };
+        await this.persist(this.stored);
+        this.activeScreenId = screenId;
+        this.statusValue = {
+          state: 'ready',
+          screenId,
+          active: true,
+          focus: best.value,
+          message: `Eye-level focus locked for ${screenId}`,
+          updatedAt: Date.now(),
+        };
+        return { ...this.statusValue };
+      } catch (error) {
+        await this.restoreControls(controls, { focus: original }).catch(
+          () => undefined,
+        );
+        this.statusValue = {
+          state: 'error',
+          screenId: activeScreens[0]!.screenId,
+          message: error instanceof Error ? error.message : String(error),
+          updatedAt: Date.now(),
+        };
+        throw error;
+      } finally {
+        this.captureInProgress = false;
+      }
+    });
   }
 
   async calibrateScreens(
@@ -2460,8 +2629,31 @@ export class CameraImagingController {
     await writeCameraImagingFile(this.directory, this.camera.id, stored);
   }
 
+  private async restoreFocusLock() {
+    const focusLock = this.stored?.focusLock;
+    if (!focusLock) return;
+    const controls = await this.getControls();
+    if (!controls) return;
+    const focus = (await controls.read()).focus;
+    if (!focus?.supportsManual) return;
+    await controls.set('focus', focusLock.value, 'manual');
+    await delay(FOCUS_SETTLE_MS);
+    this.stopMonitor();
+    this.applied = false;
+    this.activeScreenId = focusLock.screenId;
+    this.statusValue = {
+      state: 'ready',
+      screenId: focusLock.screenId,
+      active: true,
+      focus: focusLock.value,
+      message: 'Eye-level focus is locked',
+      updatedAt: Date.parse(focusLock.lockedAt) || undefined,
+    };
+  }
+
   async reopenAfterRestart(): Promise<void> {
     await this.resumeStored();
+    await this.restoreFocusLock();
   }
 
   async close(): Promise<void> {

@@ -2,6 +2,7 @@ import { assistedCalibrationZh } from './assisted-calibration-zh';
 import { depthZh } from './depth-zh';
 import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
+  'Eye-level focus adjustment failed: {0}': '平视相机对焦调整失败：{0}',
   'Installation Safe Start': '安装安全起点',
   'Safe start height — side view': '安全起点高度 · 侧视',
   'Record a safe start clear of the screens at a height that lets the tip pass above them and leaves room for the first probe.':
