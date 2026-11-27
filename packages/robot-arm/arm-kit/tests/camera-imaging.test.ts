@@ -314,6 +314,71 @@ describe('camera imaging', () => {
     }
   });
 
+  it('does not persist a preliminary eye-level focus before planning', async () => {
+    const controls = new FakeCameraControl();
+    const directory = await mkdtemp(
+      path.join(tmpdir(), 'midscene-eye-level-preview-focus-'),
+    );
+    const camera = {
+      id: 'eye-level-preview',
+      name: 'Eye-level preview camera',
+      backend: 'dshow' as const,
+    };
+    const stream = {
+      getInfo: () => ({ state: 'running', width: 400, height: 800, fps: 30 }),
+      getFrame: async () => ({ jpeg: await calibrationPattern() }),
+    };
+    const imaging = new CameraImagingController(
+      camera,
+      stream as never,
+      directory,
+      controls,
+    );
+    let reopened: CameraImagingController | undefined;
+    try {
+      const result = await imaging.focusScreens(
+        [
+          {
+            screenId: 'current-screen',
+            correction: {
+              points: {
+                topLeft: { x: 8, y: 16 },
+                topRight: { x: 192, y: 16 },
+                bottomRight: { x: 192, y: 384 },
+                bottomLeft: { x: 8, y: 384 },
+              },
+              sourceWidth: 200,
+              sourceHeight: 400,
+              rotation: 0,
+            },
+          },
+        ],
+        { lock: false },
+      );
+      expect(result.message).toContain('adjusted');
+      await imaging.close();
+
+      controls.values.focus = {
+        ...controls.values.focus,
+        value: 50,
+        mode: 'auto',
+      };
+      reopened = new CameraImagingController(
+        camera,
+        stream as never,
+        directory,
+        controls,
+      );
+      await reopened.load();
+      await reopened.reopenAfterRestart();
+      expect(controls.values.focus.mode).toBe('auto');
+    } finally {
+      await imaging.close();
+      await reopened?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('reports background imaging initialization and failures without stale ready state', async () => {
     const controls = new FakeCameraControl();
     const imaging = new CameraImagingController(

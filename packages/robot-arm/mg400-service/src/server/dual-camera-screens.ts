@@ -124,22 +124,33 @@ export class DualCameraScreens {
   }
 
   /**
-   * Resolve the first screen in calibration order for the eye-level camera's
-   * focus pass. Wait briefly because the association may still be refreshing
-   * while the overhead camera starts its exposure/focus calibration.
+   * Resolve the screen used by the eye-level focus pass. A planned screen wins;
+   * otherwise use calibration order and wait for the association to refresh.
    */
-  async focusTarget(overheadId: string, timeoutMs = 120_000) {
+  async focusTarget(
+    overheadId: string,
+    options: { screenId?: string; timeoutMs?: number } = {},
+  ) {
     const { sideCamera, screens, key } = await this.context(overheadId);
     if (!sideCamera) return undefined;
-    let planOrder: string[] = [];
-    try {
-      planOrder = (await this.devices.batch.plan(overheadId)).screens.map(
-        (screen) => screen.screenId,
-      );
-    } catch {
-      // Installation teaching is not required for camera-only focus setup.
+    const requested = options.screenId
+      ? screens.find((screen) => screen.id === options.screenId)
+      : undefined;
+    let ordered;
+    if (requested) {
+      ordered = [requested];
+    } else {
+      let planOrder: string[] = [];
+      try {
+        planOrder = (await this.devices.batch.plan(overheadId)).screens.map(
+          (screen) => screen.screenId,
+        );
+      } catch {
+        // Installation teaching is not required for camera-only focus setup.
+      }
+      ordered = eyeLevelFocusOrder(screens, planOrder);
     }
-    const ordered = eyeLevelFocusOrder(screens, planOrder);
+    const timeoutMs = options.timeoutMs ?? 120_000;
     const deadline = Date.now() + Math.max(0, timeoutMs);
     while (true) {
       const saved = await this.readSaved(overheadId, key);

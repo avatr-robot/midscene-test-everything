@@ -1053,6 +1053,7 @@ export class CameraImagingController {
    */
   async focusScreens(
     screens: readonly ImagingScreen[],
+    options: { lock?: boolean } = {},
   ): Promise<CameraImagingStatus> {
     if (!screens.length)
       throw new RobotArmError(
@@ -1083,6 +1084,24 @@ export class CameraImagingController {
           message: 'This eye-level camera does not expose manual focus',
           updatedAt: Date.now(),
         };
+      const existingLock = this.stored?.focusLock;
+      const screenId = activeScreens[0]!.screenId;
+      if (options.lock !== false && existingLock?.screenId === screenId) {
+        if (initial.mode !== 'manual' || initial.value !== existingLock.value) {
+          await controls.set('focus', existingLock.value, 'manual');
+          await delay(FOCUS_SETTLE_MS);
+        }
+        this.activeScreenId = screenId;
+        this.statusValue = {
+          state: 'ready',
+          screenId,
+          active: true,
+          focus: existingLock.value,
+          message: `Eye-level focus locked for ${screenId}`,
+          updatedAt: Date.parse(existingLock.lockedAt) || undefined,
+        };
+        return { ...this.statusValue };
+      }
       const original = {
         value: initial.value,
         mode: initial.mode,
@@ -1110,24 +1129,30 @@ export class CameraImagingController {
             'The eye-level camera did not keep focus in manual mode',
             409,
           );
-        const screenId = activeScreens[0]!.screenId;
-        const lockedAt = new Date().toISOString();
-        this.stored = {
-          version: 7,
-          cameraId: this.camera.id,
-          screens: this.stored?.screens ?? [],
-          ...(this.stored?.original ? { original: this.stored.original } : {}),
-          focusLock: { screenId, value: best.value, lockedAt },
-          calibratedAt: this.stored?.calibratedAt ?? lockedAt,
-        };
-        await this.persist(this.stored);
+        const lock = options.lock !== false;
+        if (lock) {
+          const lockedAt = new Date().toISOString();
+          this.stored = {
+            version: 7,
+            cameraId: this.camera.id,
+            screens: this.stored?.screens ?? [],
+            ...(this.stored?.original
+              ? { original: this.stored.original }
+              : {}),
+            focusLock: { screenId, value: best.value, lockedAt },
+            calibratedAt: this.stored?.calibratedAt ?? lockedAt,
+          };
+          await this.persist(this.stored);
+        }
         this.activeScreenId = screenId;
         this.statusValue = {
           state: 'ready',
           screenId,
           active: true,
           focus: best.value,
-          message: `Eye-level focus locked for ${screenId}`,
+          message: lock
+            ? `Eye-level focus locked for ${screenId}`
+            : `Eye-level focus adjusted for ${screenId}`,
           updatedAt: Date.now(),
         };
         return { ...this.statusValue };

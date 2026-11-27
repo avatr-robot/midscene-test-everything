@@ -999,7 +999,7 @@ function GuidedContent({
     ]);
     if (eyeLevelFocusKey.current !== focusKey) {
       eyeLevelFocusKey.current = focusKey;
-      void focusEyeLevelCamera(cameraId).catch((cause) => {
+      void focusEyeLevelCamera(cameraId, selectedId, false).catch((cause) => {
         eyeLevelFocusKey.current = undefined;
         if (currentBase.current === base)
           void message.warning(

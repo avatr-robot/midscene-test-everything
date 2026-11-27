@@ -1675,8 +1675,13 @@ export async function startPlaygroundHost({
         const input = await readBody(req);
         if (typeof input.id !== 'string')
           return send(400, { error: 'Camera id is required' });
+        const screenId =
+          typeof input.screenId === 'string' ? input.screenId : undefined;
+        const lock = input.lock !== false;
         if (devices) {
-          const target = await devices.dualCameraScreens.focusTarget(input.id);
+          const target = await devices.dualCameraScreens.focusTarget(input.id, {
+            screenId,
+          });
           if (!target) return send(200, { skipped: 'screen association' });
           const owner = `eye-level-focus:${randomUUID()}`;
           const side = await devices.cameras.acquire(
@@ -1687,6 +1692,7 @@ export async function startPlaygroundHost({
             const focus = await side.focusScreen(
               target.screenId,
               target.correction,
+              { lock },
             );
             return send(200, { ...target, focus });
           } finally {
@@ -1721,23 +1727,27 @@ export async function startPlaygroundHost({
             return send(409, { error: 'Eye-level camera has no frame' });
           const insetX = info.width * 0.04;
           const insetY = info.height * 0.04;
-          const focus = await side.focusScreen('eye-level', {
-            points: {
-              topLeft: { x: insetX, y: insetY },
-              topRight: { x: info.width - insetX, y: insetY },
-              bottomRight: {
-                x: info.width - insetX,
-                y: info.height - insetY,
+          const focus = await side.focusScreen(
+            screenId ?? 'eye-level',
+            {
+              points: {
+                topLeft: { x: insetX, y: insetY },
+                topRight: { x: info.width - insetX, y: insetY },
+                bottomRight: {
+                  x: info.width - insetX,
+                  y: info.height - insetY,
+                },
+                bottomLeft: { x: insetX, y: info.height - insetY },
               },
-              bottomLeft: { x: insetX, y: info.height - insetY },
+              sourceWidth: info.width,
+              sourceHeight: info.height,
+              rotation: 0,
             },
-            sourceWidth: info.width,
-            sourceHeight: info.height,
-            rotation: 0,
-          });
+            { lock },
+          );
           return send(200, {
             sideCameraId: sideId,
-            screenId: 'eye-level',
+            screenId: screenId ?? 'eye-level',
             screenName: 'Eye-level preview',
             focus,
           });

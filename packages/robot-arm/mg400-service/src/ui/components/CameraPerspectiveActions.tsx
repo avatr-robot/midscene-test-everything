@@ -115,7 +115,7 @@ export function CameraPerspectiveActions({
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
     if (scope.current.signal.aborted) return;
-    void focusEyeLevelCamera(cameraId).catch((error) => {
+    void focusEyeLevelCamera(cameraId, screen.id, false).catch((error) => {
       if (!scope.current.signal.aborted)
         message.warning(
           zh

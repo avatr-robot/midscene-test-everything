@@ -24,6 +24,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { focusEyeLevelCamera } from '../../../cameras';
 import { loadVlmModelSettings } from '../../../components/robot-arm/vlm-model-settings';
 import type { BatchClient as RobotArmApi } from '../../batch-client';
 import { calibrationErrorText, t } from '../../i18n';
@@ -216,6 +217,7 @@ export const CalibrationBatchPanel = forwardRef<
   const signature = useRef('');
   const readingSignature = useRef('');
   const mounted = useRef(true);
+  const focusedPlanCamera = useRef<string>();
   const busyBatch = active(batch) || debugging;
   useEffect(() => {
     mounted.current = true;
@@ -277,7 +279,22 @@ export const CalibrationBatchPanel = forwardRef<
     const load = () => {
       void api.calibrationBatchPlan(cameraId, firstScreenId).then(
         (next) => {
-          if (!disposed) setPreviewPlan(next);
+          if (disposed) return;
+          setPreviewPlan(next);
+          const first = next.screens[0];
+          if (!first || focusedPlanCamera.current === cameraId) return;
+          focusedPlanCamera.current = cameraId;
+          void focusEyeLevelCamera(cameraId, first.screenId, true).catch(
+            (cause) => {
+              focusedPlanCamera.current = undefined;
+              if (!disposed)
+                setError(
+                  t('Eye-level focus adjustment failed: {0}', [
+                    describeCause(cause),
+                  ]),
+                );
+            },
+          );
         },
         () => undefined,
       );

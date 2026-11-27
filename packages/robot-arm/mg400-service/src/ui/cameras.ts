@@ -520,11 +520,19 @@ export async function activateCameraImaging(
   return data.imaging;
 }
 
-export async function focusEyeLevelCamera(cameraId: string) {
+export async function focusEyeLevelCamera(
+  cameraId: string,
+  screenId?: string,
+  lock = true,
+) {
   const response = await fetch('/api/cameras/eye-level-focus', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: cameraId }),
+    body: JSON.stringify({
+      id: cameraId,
+      ...(screenId ? { screenId } : {}),
+      lock,
+    }),
     signal: AbortSignal.timeout(30_000),
   });
   const data = (await response.json()) as {
