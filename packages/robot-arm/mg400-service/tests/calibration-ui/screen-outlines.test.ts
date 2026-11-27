@@ -3,6 +3,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   ScreenOutlines,
+  screenOutlineCenterLabelPlacement,
   screenOutlineLabelPlacement,
 } from '../../src/ui/calibration/components/robot-arm/ScreenOutlines';
 
@@ -39,6 +40,28 @@ it('draws one outline and one label per saved screen', () => {
   // The overlay shares the preview's letterboxing instead of stretching.
   expect(html).toContain('preserveAspectRatio="xMidYMid meet"');
   expect(html).toContain('viewBox="0 0 640 480"');
+});
+
+it('centers eye-level labels without drawing the screen mask', () => {
+  const html = renderToStaticMarkup(
+    createElement(ScreenOutlines, {
+      labelMode: 'center',
+      outlines: [
+        { id: 'left', name: 'Left screen', correction, active: true },
+        {
+          id: 'right',
+          name: 'Right screen',
+          correction: { ...correction, rotation: 90 },
+        },
+      ],
+    }),
+  );
+  expect(html).toContain('data-label-mode="center"');
+  expect(html).not.toContain('<polygon');
+  expect(html).toContain('data-active="true"');
+  expect(html).toContain('data-active="false"');
+  expect(html).toContain('Left screen');
+  expect(html).toContain('Right screen');
 });
 
 it('renders nothing for a camera without a saved perspective', () => {
@@ -102,7 +125,7 @@ it.each([
   },
 );
 
-it('centers the screen name on the calibrated top edge, even on the side', () => {
+it('keeps the overhead label on the calibrated top edge', () => {
   expect(
     screenOutlineLabelPlacement(correction, { width: 640, height: 480 }),
   ).toEqual({ left: 240, top: 30, angle: 0 });
@@ -130,20 +153,17 @@ it('centers the screen name on the calibrated top edge, even on the side', () =>
   expect(placement?.angle).toBeCloseTo(72.38, 1);
 });
 
-it('letterboxes the placement and keeps the text upright', () => {
+it('centers the eye-level label inside the calibrated screen', () => {
   expect(
-    screenOutlineLabelPlacement(correction, { width: 1000, height: 480 }),
-  ).toEqual({ left: 420, top: 30, angle: 0 });
-
-  const reversed = {
-    ...correction,
-    points: {
-      ...correction.points,
-      topLeft: { x: 440, y: 30 },
-      topRight: { x: 40, y: 30 },
-    },
-  };
+    screenOutlineCenterLabelPlacement(correction, {
+      width: 640,
+      height: 480,
+    }),
+  ).toEqual({ left: 240, top: 180 });
   expect(
-    screenOutlineLabelPlacement(reversed, { width: 640, height: 480 })?.angle,
-  ).toBe(0);
+    screenOutlineCenterLabelPlacement(correction, {
+      width: 1000,
+      height: 480,
+    }),
+  ).toEqual({ left: 420, top: 180 });
 });

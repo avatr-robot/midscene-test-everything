@@ -53,6 +53,7 @@ import {
   type CameraProfileUpdate,
   type CameraViewpoint,
   activateCameraImaging,
+  cameraForScreenCalibration,
   cameraRailEntries,
   cameraScreenNeedsCalibration,
   cameraStateLabel,
@@ -258,6 +259,16 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
         selected?.previewScreenId,
         selectedId ?? undefined,
       ]) ?? (!connected ? selected : undefined));
+  const calibrationCamera = cameraForScreenCalibration(cameras, selectedId);
+  const calibrationScreen = selectCameraScreen(
+    robotReady ? (calibrationCamera?.screens ?? []) : [],
+    [
+      preferredScreenId,
+      activeScreen?.id,
+      calibrationCamera?.previewScreenId,
+      calibrationCamera?.id,
+    ],
+  );
   const deviceId =
     !depthCamera && robotReady && streamState === 'running'
       ? (activeScreen?.id ?? selectedId ?? undefined)
@@ -295,11 +306,12 @@ export function DeviceWorkspace({ connected }: { connected: boolean }) {
     step: 0 | 1 = 0,
     reviewInstallationOnOpen = false,
   ) => {
-    if (!deviceId || !selectedId || !setupSession) return;
-    setWizardScreen(deviceId);
+    if (!calibrationCamera || !setupSession) return;
+    const screenId = calibrationScreen?.id ?? calibrationCamera.id;
+    setWizardScreen(screenId);
     setWizard({
-      id: deviceId,
-      cameraId: selectedId,
+      id: screenId,
+      cameraId: calibrationCamera.id,
       step,
       reviewInstallationOnOpen,
       session: setupSession,

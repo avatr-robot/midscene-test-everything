@@ -127,6 +127,47 @@ test('depth fusion folds the paired RGB endpoint into one rail entry', () => {
   assert.deepEqual(cameraRailEntries([depth, color], depth, true), [depth]);
 });
 
+test('hides a stopped built-in camera from the rail', () => {
+  const builtIn = {
+    id: 'dshow:HP Wide Vision HD Camera',
+    name: 'HP Wide Vision HD Camera',
+  };
+  const external = {
+    ...camera,
+    id: 'dshow:C922 Pro Stream Webcam',
+    name: 'C922 Pro Stream Webcam',
+  };
+
+  assert.deepEqual(cameraRailEntries([builtIn, external], builtIn, false), [
+    external,
+  ]);
+  assert.deepEqual(cameraRailEntries([camera, external], camera, false), [
+    camera,
+    external,
+  ]);
+});
+
+test('selects a running external camera when the stored choice is hidden', async () => {
+  const builtIn: CameraEntry = {
+    id: 'dshow:HP Wide Vision HD Camera',
+    name: 'HP Wide Vision HD Camera',
+    deviceName: 'HP Wide Vision HD Camera',
+  };
+  const external: CameraEntry = {
+    ...camera,
+    id: 'dshow:C922 Pro Stream Webcam',
+    name: 'C922 Pro Stream Webcam',
+    deviceName: 'C922 Pro Stream Webcam',
+  };
+  useCameras.setState({ selectedId: builtIn.id });
+  globalThis.fetch = async () =>
+    Response.json({ cameras: [builtIn, external] });
+
+  await useCameras.getState().refresh(false);
+
+  assert.equal(useCameras.getState().selectedId, external.id);
+});
+
 test('C922 capture modes cascade from resolution to supported frame rates', () => {
   const modes = [
     { width: 1920, height: 1080, fps: 30 },

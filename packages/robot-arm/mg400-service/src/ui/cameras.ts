@@ -123,6 +123,30 @@ export function cameraViewpointCandidates<
   );
 }
 
+/**
+ * Screen calibration belongs to the overhead camera. The workspace may be
+ * previewing the eye-level camera, but opening calibration from that view must
+ * not switch to a different, empty calibration target.
+ */
+export function cameraForScreenCalibration<
+  T extends {
+    id: string;
+    kind?: CameraKind;
+    label?: CameraLabel | null;
+    stream?: { state: string };
+  },
+>(cameras: readonly T[], selectedId: string | null | undefined) {
+  const overhead = cameras.filter(
+    (camera) =>
+      camera.kind !== 'depth' && cameraViewpointOf(camera.label) === 'top',
+  );
+  return (
+    overhead.find((camera) => camera.stream?.state === 'running') ??
+    overhead[0] ??
+    cameras.find((camera) => camera.id === selectedId)
+  );
+}
+
 export function cameraViewpointAssignments(
   cameras: readonly Pick<CameraEntry, 'id' | 'kind' | 'label'>[],
   selectedId: string,
@@ -232,6 +256,8 @@ export function flipFlagsOf(mode: FlipMode) {
 }
 export interface CameraEntry extends CameraScreen {
   deviceName?: string;
+  /** The host identifies an integrated laptop or display camera. */
+  builtIn?: boolean;
   label?: CameraLabel;
   profileKey?: string;
   verticalFlip?: boolean;
@@ -296,19 +322,40 @@ export function cameraStateLabel(camera: CameraEntry) {
   }
 }
 
+const BUILT_IN_CAMERA_NAME =
+  /facetime|built.?in|integrated|internal|laptop camera|notebook camera|user facing|wide vision|内建|内置/iu;
+
+export function isBuiltInCamera(
+  camera: Pick<CameraEntry, 'builtIn' | 'deviceName' | 'name' | 'id'>,
+) {
+  if (camera.builtIn !== undefined) return camera.builtIn;
+  return BUILT_IN_CAMERA_NAME.test(
+    [camera.deviceName, camera.name, camera.id].filter(Boolean).join(' '),
+  );
+}
+
+/** Stopped built-in cameras stay out of the rail while remaining discoverable. */
+export function isCameraRailVisible(camera: CameraEntry) {
+  return (
+    !isBuiltInCamera(camera) ||
+    (camera.stream?.state !== undefined && camera.stream.state !== 'stopped')
+  );
+}
+
 /** The RGB endpoint is folded into the depth card while fusion is active. */
 export function cameraRailEntries(
   cameras: CameraEntry[],
   selected: CameraEntry | undefined,
   depthFusionEnabled: boolean,
 ) {
+  const visible = cameras.filter(isCameraRailVisible);
   if (
     !depthFusionEnabled ||
     selected?.kind !== 'depth' ||
     !selected.pairedDeviceId
   )
-    return cameras;
-  return cameras.filter((camera) => camera.id !== selected.pairedDeviceId);
+    return visible;
+  return visible.filter((camera) => camera.id !== selected.pairedDeviceId);
 }
 type CameraStatus = 'idle' | 'loading' | 'ready' | 'unavailable' | 'error';
 // Camera records are discovered by the Node host, never manually created in UI.
@@ -407,6 +454,17 @@ export const useCameras = create<{
         throw new Error('Invalid camera list');
       if (revision !== listRevision) return;
       const cameras = data.cameras as CameraEntry[];
+      const currentSelected = cameras.find(
+        (camera) => camera.id === get().selectedId,
+      );
+      const nextSelectedId =
+        currentSelected && isCameraRailVisible(currentSelected)
+          ? currentSelected.id
+          : (cameras.find(
+              (camera) =>
+                isCameraRailVisible(camera) &&
+                camera.stream?.state === 'running',
+            )?.id ?? cameras.find(isCameraRailVisible)?.id);
       set({
         cameras,
         deviceSession:
@@ -420,9 +478,7 @@ export const useCameras = create<{
             ? data.error
             : undefined,
         status: 'ready',
-        selectedId: cameras.some((camera) => camera.id === get().selectedId)
-          ? get().selectedId
-          : (cameras[0]?.id ?? null),
+        selectedId: nextSelectedId ?? null,
       });
     } catch (error) {
       if (revision !== listRevision) return;

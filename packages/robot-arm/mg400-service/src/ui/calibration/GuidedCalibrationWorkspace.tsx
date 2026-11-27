@@ -2292,7 +2292,10 @@ function GuidedContent({
                                   )}
                                   alt={sideCamera.name}
                                 />
-                                <ScreenOutlines outlines={sideOutlines} />
+                                <ScreenOutlines
+                                  outlines={sideOutlines}
+                                  labelMode="center"
+                                />
                                 {modelReading && (
                                   <ReferenceModelReading debug={modelReading} />
                                 )}
