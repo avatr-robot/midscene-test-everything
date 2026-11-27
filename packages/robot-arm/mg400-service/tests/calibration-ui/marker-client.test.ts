@@ -32,6 +32,13 @@ it('lets perspective clearing bypass a blocked screen request', async () => {
     await expect(
       new ScreenCalibClient('camera').clearCameraPerspectives('camera'),
     ).resolves.toEqual({ ok: true });
+    const clear = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith('/api/screen-pages'),
+    );
+    expect(JSON.parse(String(clear?.[1]?.body))).toEqual({
+      cameraId: 'camera',
+      action: 'clear-perspectives',
+    });
   } finally {
     blocked.abort();
     await expect(held).rejects.toMatchObject({ name: 'AbortError' });

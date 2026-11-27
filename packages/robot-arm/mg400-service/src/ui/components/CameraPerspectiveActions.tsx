@@ -3,8 +3,9 @@ import type { CameraCorrection } from '@midscene/robotics-shared/contracts';
 import { App, Button } from 'antd';
 import { Camera, Eraser, ScanLine, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { ScreenCalibClient } from '../calibration/marker-client';
 import type { CameraView } from '../camera-preview';
-import type { CameraScreen } from '../cameras';
+import { type CameraScreen, focusEyeLevelCamera } from '../cameras';
 import { useLanguage, useT } from '../i18n';
 import {
   PerspectiveCorrectionDialog,
@@ -114,6 +115,14 @@ export function CameraPerspectiveActions({
     const result = await response.json();
     if (!response.ok) throw new Error(result.error);
     if (scope.current.signal.aborted) return;
+    void focusEyeLevelCamera(cameraId).catch((error) => {
+      if (!scope.current.signal.aborted)
+        message.warning(
+          zh
+            ? `平视相机对焦调整失败：${String(error)}`
+            : `Eye-level focus adjustment failed: ${String(error)}`,
+        );
+    });
     await onChanged('corrected');
     setDraft(undefined);
     if (result.validity?.state === 'invalid')
@@ -201,21 +210,30 @@ export function CameraPerspectiveActions({
               title: t('clearCorrectionTitle'),
               content: robot
                 ? zh
-                  ? '停止应用此屏幕的校正，并清除页面映射。已保存的透视将保留。'
-                  : 'Clear the applied correction and page mapping for this screen. Its saved perspective is kept.'
+                  ? '清除这台相机下所有屏幕的透视校正和页面映射，屏幕本身会保留。'
+                  : 'Clear perspective correction and page mapping for every screen on this camera. The screens themselves are kept.'
                 : t('clearCorrectionBody'),
               okText: t('clearCorrection'),
               okButtonProps: { danger: true },
               cancelText: zh ? '取消' : 'Cancel',
               onOk: async () => {
                 if (scope.current.signal.aborted) return;
-                const response = await fetch(
-                  `/api/cameras/correction?${new URLSearchParams(identity)}`,
-                  { method: 'DELETE', signal: signal() },
-                );
-                if (!response.ok) {
-                  const error = new Error((await response.json()).error);
-                  message.error(error.message);
+                try {
+                  if (robot) {
+                    await new ScreenCalibClient(
+                      cameraId,
+                    ).clearCameraPerspectives(cameraId);
+                  } else {
+                    const response = await fetch(
+                      `/api/cameras/correction?${new URLSearchParams(identity)}`,
+                      { method: 'DELETE', signal: signal() },
+                    );
+                    if (!response.ok) {
+                      throw new Error((await response.json()).error);
+                    }
+                  }
+                } catch (error) {
+                  message.error(String(error));
                   throw error;
                 }
                 if (!scope.current.signal.aborted) await onChanged('raw');

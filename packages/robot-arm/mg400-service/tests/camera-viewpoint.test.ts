@@ -1,5 +1,6 @@
 import { expect, it } from '@rstest/core';
 import {
+  cameraForScreenCalibration,
   cameraViewpointAssignments,
   cameraViewpointCandidates,
   cameraViewpointOf,
@@ -64,4 +65,26 @@ it('uses only running color cameras for mutual viewpoint assignment', () => {
       { id: 'depth', kind: 'depth' as const, stream: { state: 'running' } },
     ]).map((camera) => camera.id),
   ).toEqual(['side', 'overhead']);
+});
+
+it('opens screen calibration on the overhead camera from any preview', () => {
+  const cameras = [
+    {
+      id: 'eye-level',
+      kind: 'color' as const,
+      label: 'front' as const,
+      stream: { state: 'running' },
+    },
+    {
+      id: 'overhead',
+      kind: 'color' as const,
+      label: 'top' as const,
+      stream: { state: 'stopped' },
+    },
+  ];
+
+  expect(cameraForScreenCalibration(cameras, 'eye-level')?.id).toBe('overhead');
+  expect(cameraForScreenCalibration([cameras[0]], 'eye-level')?.id).toBe(
+    'eye-level',
+  );
 });

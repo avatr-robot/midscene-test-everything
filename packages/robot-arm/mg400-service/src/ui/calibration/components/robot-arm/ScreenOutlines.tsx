@@ -18,7 +18,7 @@ export interface ScreenOutlineEntry {
 export interface ScreenOutlineLabelPlacement {
   left: number;
   top: number;
-  angle: number;
+  angle?: number;
 }
 
 const corners = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'] as const;
@@ -51,12 +51,35 @@ export function screenOutlineLabelPlacement(
   };
 }
 
+/** Center the eye-level screen name inside the detected screen region. */
+export function screenOutlineCenterLabelPlacement(
+  correction: CameraCorrection,
+  box: { width: number; height: number },
+): ScreenOutlineLabelPlacement | undefined {
+  const { sourceWidth: width, sourceHeight: height, points } = correction;
+  if (!width || !height || !box.width || !box.height) return undefined;
+  const scale = Math.min(box.width / width, box.height / height);
+  const offsetX = (box.width - width * scale) / 2;
+  const offsetY = (box.height - height * scale) / 2;
+  const corners = Object.values(points);
+  const center = corners.reduce(
+    (sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y }),
+    { x: 0, y: 0 },
+  );
+  return {
+    left: offsetX + (center.x / corners.length) * scale,
+    top: offsetY + (center.y / corners.length) * scale,
+  };
+}
+
 function ScreenOutline({
   outline,
   screenCorners,
+  labelMode,
 }: {
   outline: ScreenOutlineEntry;
   screenCorners?: readonly { x: number; y: number }[];
+  labelMode: 'edge' | 'center';
 }) {
   const { name, correction, active, validity } = outline;
   const { sourceWidth: width, sourceHeight: height, points } = correction;
@@ -68,7 +91,10 @@ function ScreenOutline({
     if (!element || !name) return;
     const measure = () => {
       const box = element.getBoundingClientRect();
-      const next = screenOutlineLabelPlacement(correction, box);
+      const next =
+        labelMode === 'center'
+          ? screenOutlineCenterLabelPlacement(correction, box)
+          : screenOutlineLabelPlacement(correction, box);
       if (next) setPlacement(next);
     };
     measure();
@@ -76,28 +102,31 @@ function ScreenOutline({
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [name, correction]);
+  }, [name, correction, labelMode]);
 
   return (
     <div
       className="camera-mapping-outline-layer"
       data-active={active === true}
       data-validity={validity}
+      data-label-mode={labelMode}
       ref={layer}
     >
-      <svg
-        className="camera-mapping-outlines"
-        viewBox={`0 0 ${width} ${height}`}
-        preserveAspectRatio="xMidYMid meet"
-        role="img"
-        aria-label={name || t('Screen boundary')}
-      >
-        <polygon
-          points={corners
-            .map((corner) => `${points[corner].x},${points[corner].y}`)
-            .join(' ')}
-        />
-      </svg>
+      {labelMode === 'edge' && (
+        <svg
+          className="camera-mapping-outlines"
+          viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="xMidYMid meet"
+          role="img"
+          aria-label={name || t('Screen boundary')}
+        >
+          <polygon
+            points={corners
+              .map((corner) => `${points[corner].x},${points[corner].y}`)
+              .join(' ')}
+          />
+        </svg>
+      )}
       <CalibrationPositionMarkers
         correction={correction}
         positions={outline.previewPositions}
@@ -112,7 +141,11 @@ function ScreenOutline({
               ? {
                   left: placement.left,
                   top: placement.top,
-                  transform: `translate(-50%, -50%) rotate(${placement.angle}deg)`,
+                  transform: `translate(-50%, -50%)${
+                    placement.angle === undefined
+                      ? ''
+                      : ` rotate(${placement.angle}deg)`
+                  }`,
                 }
               : { visibility: 'hidden' }
           }
@@ -126,7 +159,12 @@ function ScreenOutline({
 
 export function ScreenOutlines({
   outlines,
-}: { outlines: readonly ScreenOutlineEntry[] }) {
+  labelMode = 'edge',
+}: {
+  outlines: readonly ScreenOutlineEntry[];
+  /** Eye-level previews center the label; all other previews keep the edge. */
+  labelMode?: 'edge' | 'center';
+}) {
   return (
     <>
       {outlines.map((outline) =>
@@ -134,6 +172,7 @@ export function ScreenOutlines({
           <ScreenOutline
             key={outline.id}
             outline={outline}
+            labelMode={labelMode}
             screenCorners={
               outline.previewPositions?.cameraBoundaryLine
                 ? outlines.flatMap(({ correction, validity }) =>

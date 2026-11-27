@@ -13,7 +13,10 @@ import type {
   ScreenAssociationResult,
   SideScreenRegion,
 } from '@midscene/robotics-shared/assisted-contracts';
-import type { ScreenVisibilityProbePattern } from '@midscene/robotics-shared/contracts';
+import type {
+  CameraCorrection,
+  ScreenVisibilityProbePattern,
+} from '@midscene/robotics-shared/contracts';
 import type { DeviceEntry, PlaygroundDevices } from './devices.js';
 
 type Camera = DeviceEntry['camera'];
@@ -118,6 +121,59 @@ export class DualCameraScreens {
           },
       ),
     };
+  }
+
+  /**
+   * Resolve the first screen in calibration order for the eye-level camera's
+   * focus pass. Wait briefly because the association may still be refreshing
+   * while the overhead camera starts its exposure/focus calibration.
+   */
+  async focusTarget(overheadId: string, timeoutMs = 120_000) {
+    const { sideCamera, screens, key } = await this.context(overheadId);
+    if (!sideCamera) return undefined;
+    let planOrder: string[] = [];
+    try {
+      planOrder = (await this.devices.batch.plan(overheadId)).screens.map(
+        (screen) => screen.screenId,
+      );
+    } catch {
+      // Installation teaching is not required for camera-only focus setup.
+    }
+    const ordered = eyeLevelFocusOrder(screens, planOrder);
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (true) {
+      const saved = await this.readSaved(overheadId, key);
+      const first = ordered[0];
+      if (first) {
+        const match = saved.find((entry) => entry.screenId === first.id);
+        if (match?.status === 'associated')
+          return {
+            sideCameraId: sideCamera.id,
+            sideCameraName: sideCamera.name,
+            screenId: first.id,
+            screenName: first.name,
+            correction: sideRegionCorrection(match.region),
+          };
+      }
+      if (Date.now() >= deadline) {
+        // The first calibration target is the required focus target. If its
+        // association never finishes, keep the pass useful with any mapped
+        // screen rather than leaving the eye-level camera on autofocus.
+        for (const screen of ordered) {
+          const match = saved.find((entry) => entry.screenId === screen.id);
+          if (match?.status !== 'associated') continue;
+          return {
+            sideCameraId: sideCamera.id,
+            sideCameraName: sideCamera.name,
+            screenId: screen.id,
+            screenName: screen.name,
+            correction: sideRegionCorrection(match.region),
+          };
+        }
+        return undefined;
+      }
+      await delay(250);
+    }
   }
 
   async associate(
@@ -370,6 +426,35 @@ export class DualCameraScreens {
     ]);
     return { screenId, ...detected };
   }
+}
+
+export function eyeLevelFocusOrder<T extends { id: string; name: string }>(
+  screens: readonly T[],
+  planOrder: readonly string[] = [],
+) {
+  return [
+    ...planOrder.flatMap((id) => {
+      const screen = screens.find((entry) => entry.id === id);
+      return screen ? [screen] : [];
+    }),
+    ...screens
+      .filter((screen) => !planOrder.includes(screen.id))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  ];
+}
+
+function sideRegionCorrection(region: SideScreenRegion): CameraCorrection {
+  return {
+    points: {
+      topLeft: { x: region.left, y: region.top },
+      topRight: { x: region.right, y: region.top },
+      bottomRight: { x: region.right, y: region.bottom },
+      bottomLeft: { x: region.left, y: region.bottom },
+    },
+    sourceWidth: region.sourceWidth,
+    sourceHeight: region.sourceHeight,
+    rotation: 0,
+  };
 }
 
 function sameRegion(a: SideScreenRegion, b: SideScreenRegion) {

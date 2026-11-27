@@ -221,6 +221,99 @@ describe('camera imaging', () => {
     }
   });
 
+  it('focuses the eye-level screen ROI without changing exposure or tone', async () => {
+    const controls = new FakeCameraControl();
+    const directory = await mkdtemp(
+      path.join(tmpdir(), 'midscene-eye-level-focus-'),
+    );
+    const camera = {
+      id: 'eye-level',
+      name: 'Eye-level camera',
+      backend: 'dshow' as const,
+    };
+    const stream = {
+      getInfo: () => ({ state: 'running', width: 400, height: 800, fps: 30 }),
+      getFrame: async () => ({ jpeg: await calibrationPattern() }),
+    };
+    const imaging = new CameraImagingController(
+      camera,
+      stream as never,
+      directory,
+      controls,
+    );
+    let reopened: CameraImagingController | undefined;
+    try {
+      const result = await imaging.focusScreens([
+        {
+          screenId: 'first-screen',
+          correction: {
+            points: {
+              topLeft: { x: 8, y: 16 },
+              topRight: { x: 192, y: 16 },
+              bottomRight: { x: 192, y: 384 },
+              bottomLeft: { x: 8, y: 384 },
+            },
+            sourceWidth: 200,
+            sourceHeight: 400,
+            rotation: 0,
+          },
+        },
+      ]);
+
+      expect(result).toMatchObject({
+        state: 'ready',
+        screenId: 'first-screen',
+        active: true,
+      });
+      expect(controls.values.focus.mode).toBe('manual');
+      expect(
+        controls.setCalls.filter(({ property }) => property === 'focus'),
+      ).not.toHaveLength(0);
+      expect(
+        controls.setCalls.filter(({ property }) => property !== 'focus'),
+      ).toEqual([]);
+      const lockedFocus = controls.values.focus.value;
+      const focusSetCount = controls.setCalls.filter(
+        ({ property }) => property === 'focus',
+      ).length;
+      await imaging.activateScreen('second-screen');
+      expect(controls.values.focus).toMatchObject({
+        value: lockedFocus,
+        mode: 'manual',
+      });
+      expect(
+        controls.setCalls.filter(({ property }) => property === 'focus'),
+      ).toHaveLength(focusSetCount);
+      await imaging.close();
+
+      controls.values.focus = {
+        ...controls.values.focus,
+        value: 50,
+        mode: 'auto',
+      };
+      reopened = new CameraImagingController(
+        camera,
+        stream as never,
+        directory,
+        controls,
+      );
+      await reopened.load();
+      await reopened.reopenAfterRestart();
+      expect(controls.values.focus).toMatchObject({
+        value: lockedFocus,
+        mode: 'manual',
+      });
+      expect(reopened.status('first-screen')).toMatchObject({
+        state: 'ready',
+        focus: lockedFocus,
+      });
+    } finally {
+      await imaging.close();
+      await reopened?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('reports background imaging initialization and failures without stale ready state', async () => {
     const controls = new FakeCameraControl();
     const imaging = new CameraImagingController(

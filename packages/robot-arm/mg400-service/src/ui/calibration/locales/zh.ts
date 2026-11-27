@@ -2,6 +2,7 @@ import { assistedCalibrationZh } from './assisted-calibration-zh';
 import { depthZh } from './depth-zh';
 import { migratedZh } from './migrated-zh';
 const calibrationZh: Record<string, string> = {
+  'Eye-level focus adjustment failed: {0}': '平视相机对焦调整失败：{0}',
   'Start guided calibration': '开始引导标定',
   'The robot did not reach the first screen reference.':
     '机械臂未到达首屏参考位。',

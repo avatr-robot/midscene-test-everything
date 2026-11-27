@@ -1665,6 +1665,87 @@ export async function startPlaygroundHost({
         return send(200, { imaging });
       }
       if (
+        url.pathname === '/api/cameras/eye-level-focus' &&
+        req.method === 'POST'
+      ) {
+        if (screenControl?.busy)
+          return send(409, {
+            error: 'Wait for the manual screen gesture to finish',
+          });
+        const input = await readBody(req);
+        if (typeof input.id !== 'string')
+          return send(400, { error: 'Camera id is required' });
+        if (devices) {
+          const target = await devices.dualCameraScreens.focusTarget(input.id);
+          if (!target) return send(200, { skipped: 'screen association' });
+          const owner = `eye-level-focus:${randomUUID()}`;
+          const side = await devices.cameras.acquire(
+            target.sideCameraId,
+            owner,
+          );
+          try {
+            const focus = await side.focusScreen(
+              target.screenId,
+              target.correction,
+            );
+            return send(200, { ...target, focus });
+          } finally {
+            await devices.cameras.release(target.sideCameraId, owner);
+          }
+        }
+        const overhead = await cameraManager.cameraPreferences(input.id);
+        if (overhead?.label !== 'top')
+          return send(200, { skipped: 'viewpoint' });
+        const known = await listCameras({
+          cachedOnly: true,
+          includeBuiltIn: true,
+        });
+        const sideIds = (
+          await Promise.all(
+            known
+              .filter(({ id, kind }) => id !== input.id && kind !== 'depth')
+              .map(async ({ id }) =>
+                (await cameraManager.cameraPreferences(id))?.label === 'front'
+                  ? id
+                  : undefined,
+              ),
+          )
+        ).filter((id): id is string => id !== undefined);
+        if (sideIds.length !== 1) return send(200, { skipped: 'viewpoint' });
+        const sideId = sideIds[0]!;
+        const owner = `eye-level-focus:${randomUUID()}`;
+        const side = await cameraManager.acquire(sideId, owner);
+        try {
+          const info = side.stream.getInfo();
+          if (!info.width || !info.height)
+            return send(409, { error: 'Eye-level camera has no frame' });
+          const insetX = info.width * 0.04;
+          const insetY = info.height * 0.04;
+          const focus = await side.focusScreen('eye-level', {
+            points: {
+              topLeft: { x: insetX, y: insetY },
+              topRight: { x: info.width - insetX, y: insetY },
+              bottomRight: {
+                x: info.width - insetX,
+                y: info.height - insetY,
+              },
+              bottomLeft: { x: insetX, y: info.height - insetY },
+            },
+            sourceWidth: info.width,
+            sourceHeight: info.height,
+            rotation: 0,
+          });
+          return send(200, {
+            sideCameraId: sideId,
+            screenId: 'eye-level',
+            screenName: 'Eye-level preview',
+            focus,
+          });
+        } finally {
+          await cameraManager.release(sideId, owner);
+        }
+      }
+      if (
         url.pathname === '/api/cameras/depth/controls' &&
         req.method === 'POST'
       ) {
